@@ -18,6 +18,7 @@ pub struct PciDevice {
     pub subclass: u8,
     pub prog_if: u8,
     pub header_type: u8,
+    pub bar0: u32,
 }
 
 impl PciDevice {
@@ -85,6 +86,8 @@ impl PciBus {
                     let dword3 = unsafe { Self::read_config_dword(bus, dev, func, 0x0C) };
                     let header_type = ((dword3 >> 16) & 0x7F) as u8;
 
+                    let bar0 = unsafe { Self::read_config_dword(bus, dev, func, 0x10) } & 0xFFFFFFF0;
+
                     self.devices.push(PciDevice {
                         bus,
                         device: dev,
@@ -95,6 +98,7 @@ impl PciBus {
                         subclass,
                         prog_if,
                         header_type,
+                        bar0,
                     });
 
                     // If single-function device, don't check other functions

@@ -14,6 +14,7 @@ global_asm!(include_str!("syscall/syscall_entry.s"));
 pub mod arch;
 pub mod drivers;
 pub mod fs;
+pub mod gui;
 pub mod ipc;
 pub mod mm;
 pub mod shell;
@@ -54,7 +55,14 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     // 7. Run Kernel Self-Test Suite to verify all subsystems
     tests::run_all_tests();
 
-    // 8. Launch the Interactive Cosmos Shell
+    // 8. Launch GUI Desktop if VBE graphics adapter is present
+    if drivers::vbe::is_available() {
+        kinfo!("Bochs VBE display adapter detected. Launching Cosmos Desktop GUI...");
+        kinfo!("(Press Escape or click 'Exit to Shell' to switch to text shell)");
+        gui::launch_desktop();
+    }
+
+    // 9. Interactive Cosmos Shell fallback / continuation
     kinfo!("Launching Cosmos Interactive Shell (CosmosSH)...");
     shell::run_shell();
 }

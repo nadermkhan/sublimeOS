@@ -49,6 +49,18 @@ impl SerialPort {
         }
         unsafe { inb(self.port) }
     }
+
+    pub fn try_read_byte(&self) -> Option<u8> {
+        if self.is_data_ready() {
+            Some(unsafe { inb(self.port) })
+        } else {
+            None
+        }
+    }
+}
+
+pub fn read_rx_char() -> Option<u8> {
+    SERIAL1.lock().try_read_byte()
 }
 
 impl fmt::Write for SerialPort {

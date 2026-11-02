@@ -28,6 +28,7 @@ pub fn execute_command(line: &str) {
         "mkdir" => cmd_mkdir(args),
         "touch" => cmd_touch(args),
         "rm" => cmd_rm(args),
+        "gui" => cmd_gui(),
         "test" => crate::tests::run_all_tests(),
         "reboot" => cmd_reboot(),
         "halt" => cmd_halt(),
@@ -53,9 +54,15 @@ fn cmd_help() {
     println!("  mkdir <path>    Create a directory in the VFS");
     println!("  touch <path>    Create an empty file in the VFS");
     println!("  rm <path>       Remove a file from the VFS");
+    println!("  gui             Launch the interactive Cosmos Desktop GUI (1024x768)");
     println!("  test            Execute kernel verification self-test suite");
     println!("  reboot          Reboot the system");
     println!("  halt            Power off / halt processor");
+}
+
+fn cmd_gui() {
+    println!("\x1b[35mStarting Cosmos Desktop Graphical Environment...\x1b[0m");
+    crate::gui::launch_desktop();
 }
 
 fn cmd_clear() {
@@ -113,8 +120,8 @@ fn cmd_lspci() {
     println!("Found {} PCI device(s):", pci.devices.len());
     for dev in pci.devices.iter() {
         println!(
-            "{:02x}:{:02x}.{:x} {} [Class {:02x}{:02x}] (Vendor: {:04x}, Device: {:04x})",
-            dev.bus, dev.device, dev.function, dev.class_name(), dev.class_code, dev.subclass, dev.vendor_id, dev.device_id
+            "{:02x}:{:02x}.{:x} {} [Class {:02x}{:02x}] (Vendor: {:04x}, Device: {:04x}, BAR0: 0x{:08x})",
+            dev.bus, dev.device, dev.function, dev.class_name(), dev.class_code, dev.subclass, dev.vendor_id, dev.device_id, dev.bar0
         );
     }
 }

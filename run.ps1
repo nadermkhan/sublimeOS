@@ -1,4 +1,5 @@
 param(
+    [switch]$Headless,
     [switch]$Graphic,
     [switch]$Debug
 )
@@ -21,13 +22,13 @@ Write-Host "==============================================" -ForegroundColor Cya
 
 $qemuArgs = @("-kernel", "cosmoskernel32.elf", "-m", "128M")
 
-if ($Graphic) {
-    Write-Host "Starting QEMU with graphical VGA console & PS/2 keyboard..." -ForegroundColor Green
-    $qemuArgs += @("-serial", "stdio")
-} else {
+if ($Headless) {
     Write-Host "Starting QEMU in headless terminal mode (COM1 serial stdio)..." -ForegroundColor Green
     Write-Host "Press Ctrl+A then X to exit QEMU." -ForegroundColor DarkGray
     $qemuArgs += @("-serial", "stdio", "-display", "none")
+} else {
+    Write-Host "Starting QEMU in graphical desktop mode (1024x768 VBE & PS/2 mouse)..." -ForegroundColor Green
+    $qemuArgs += @("-serial", "stdio")
 }
 
 if ($Debug) {

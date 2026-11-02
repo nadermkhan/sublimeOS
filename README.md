@@ -15,6 +15,12 @@ CosmosKernel is a complete, monolithic, bare-metal 64-bit operating system kerne
 
 ```
                     +------------------------------------------+
+                    |        Cosmos Desktop GUI Compositor     |
+                    |  (1024x768x32bpp Double-Buffered Canvas) |
+                    |  - Windows, Mouse, Taskbar, Apps, Theme  |
+                    +--------------------+---------------------+
+                                         |
+                    +--------------------+---------------------+
                     |        Cosmos Interactive Shell          |
                     |        (Built-in Diagnostic CLI)         |
                     +--------------------+---------------------+
@@ -51,7 +57,8 @@ CosmosKernel is a complete, monolithic, bare-metal 64-bit operating system kerne
     |  - GDT & 64-bit TSS with IST Stacks  - 80x25 Color VGA Console Driver   |
     |  - IDT (256 Vectors & CPU Traps)     - 8254 PIT Timer (1000 Hz ticks)   |
     |  - 8259 Dual PIC Remapping (32..47)  - CMOS Real-Time Clock (RTC)       |
-    |  - PS/2 Keyboard Driver (IRQ 1)      - PCI Bus Enumerator (lspci)       |
+    |  - PS/2 Keyboard Driver (IRQ 1)      - Bochs VBE Display (1024x768x32)  |
+    |  - PS/2 Mouse Driver (IRQ 12)        - PCI Bus Enumerator (lspci)       |
     +-------------------------------------------------------------------------+
 ```
 
@@ -117,9 +124,24 @@ Built-in interactive CLI available on both VGA display and COM1 serial:
 - `mkdir <path>` - Create directory
 - `touch <path>` - Create empty file
 - `rm <path>` - Remove file
+- `gui` - Launch the interactive Cosmos Desktop GUI (1024x768)
 - `test` - Run kernel verification self-tests
 - `reboot` - Reboot system
 - `halt` - Halt CPU
+
+### 8. Graphical User Interface Subsystem (`src/gui`)
+CosmosKernel features a full-fledged, clean, modern desktop GUI environment:
+- **Linear Framebuffer Graphics**: Bochs VBE display controller running at 1024x768 with 32-bit ARGB true color mapped directly to higher-half virtual memory (`0xFFFFFFFFD0000000`).
+- **Compositor & 2D Canvas**: Double-buffered software rendering engine (`Canvas`) with Bresenham lines, rectangles, rounded corners, circles, alpha blending, gradients, and soft drop shadows.
+- **Hardware Mouse Driver**: PS/2 auxiliary 8042 controller driver with IRQ 12 interrupt handler, 3-byte packet decoding, delta clamping, and arrow cursor sprite with drop shadow.
+- **Window Management**: Interactive movable windows with titlebars, drag-and-drop, focus switching, maximize/minimize, and macOS-style circular control buttons (Close, Maximize, Minimize).
+- **Cosmic Space Desktop**: Deep space gradient wallpaper with starfield, centered glowing logo banner, and interactive desktop icons.
+- **Taskbar & Start Menu**: Bottom-docked acrylic taskbar, Start button with popup menu, running window tabs, live hardware RTC clock, and real-time physical RAM usage indicator.
+- **Desktop Applications**:
+  - **CosmosSH Terminal**: Graphical virtual terminal window executing shell commands with formatted output and cursor blinking.
+  - **System Monitor**: Live Task Manager displaying CPU/PIT ticks, graphical RAM usage progress bar, heap memory stats, and active kernel subsystems status.
+  - **File Explorer**: Graphical two-pane directory tree and file inspector for browsing `/etc`, `/proc`, `/dev`, and viewing file contents.
+  - **About Cosmos**: System specification dialog detailing architecture, toolchain, memory layout, and kernel capabilities.
 
 ---
 
@@ -182,7 +204,25 @@ cosmos/
     ├── drivers/
     │   ├── mod.rs                   # Device driver manager
     │   ├── keyboard.rs              # PS/2 keyboard driver & scancode decoder
-    │   └── pci.rs                   # PCI Configuration Space scanner
+    │   ├── mouse.rs                 # PS/2 mouse driver & IRQ 12 packet decoder
+    │   ├── pci.rs                   # PCI Configuration Space scanner
+    │   └── vbe.rs                   # Bochs VBE display adapter (1024x768x32bpp)
+    ├── gui/
+    │   ├── mod.rs                   # Compositor event loop & DesktopManager
+    │   ├── canvas.rs                # Double-buffered 2D drawing canvas & primitives
+    │   ├── color.rs                 # ARGB8888 color, alpha blending & cosmic palette
+    │   ├── desktop.rs               # Space wallpaper, starfield & desktop icons
+    │   ├── font.rs                  # 8x16 monospace font renderer
+    │   ├── font_data.rs             # CP437 ASCII glyph bitmap tables
+    │   ├── mouse.rs                 # Arrow mouse cursor sprite & compositing
+    │   ├── taskbar.rs               # Taskbar dock, Start menu, clock & RAM meter
+    │   ├── window.rs                # Window chrome, dragging & control buttons
+    │   └── apps/
+    │       ├── mod.rs               # Application suite coordinator
+    │       ├── terminal.rs          # Graphical virtual terminal (CosmosSH)
+    │       ├── sysmon.rs            # Live task manager & memory usage meter
+    │       ├── files.rs             # Graphical file explorer & content previewer
+    │       └── about.rs             # About Cosmos operating system dialog
     ├── syscall/
     │   ├── mod.rs                   # Syscall dispatcher
     │   ├── table.rs                 # POSIX system call numbers

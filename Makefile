@@ -8,7 +8,7 @@ QEMU ?= C:/msys64/mingw64/bin/qemu-system-x86_64.exe
 KERNEL_ELF = target/$(TARGET)/release/cosmoskernel
 MULTIBOOT_ELF = cosmoskernel32.elf
 
-.PHONY: all build run run-graphic clean test
+.PHONY: all build run run-graphic run-gui clean test
 
 all: build
 
@@ -25,6 +25,8 @@ run: $(MULTIBOOT_ELF)
 
 run-graphic: $(MULTIBOOT_ELF)
 	$(QEMU) -kernel $< -m 128M -serial stdio
+
+run-gui: run-graphic
 
 test: build
 	powershell -ExecutionPolicy Bypass -File ./run.ps1

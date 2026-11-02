@@ -111,6 +111,14 @@ impl PhysicalMemoryManager {
         };
         (self.total_frames, self.used_frames, free)
     }
+
+    pub fn get_total_frames(&self) -> usize {
+        self.total_frames
+    }
+
+    pub fn get_used_frames(&self) -> usize {
+        self.used_frames
+    }
 }
 
 pub static PMM: IrqSafeSpinlock<PhysicalMemoryManager> = IrqSafeSpinlock::new(PhysicalMemoryManager::new());
