@@ -1,0 +1,16 @@
+[package]
+name = "cosmoskernel"
+version = "0.1.0"
+edition = "2021"
+authors = ["Cosmos Kernel Team"]
+description = "A clean, mature, monolithic Rust-based 64-bit operating system kernel"
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 3
