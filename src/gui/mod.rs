@@ -361,11 +361,8 @@ pub fn launch_desktop() {
                 running = false;
             }
             TaskbarAction::HaltSystem => {
-                kinfo!("System halted by user.");
-                crate::arch::x86_64::registers::disable_interrupts();
-                loop {
-                    crate::arch::x86_64::registers::hlt();
-                }
+                kinfo!("System halted by user via GUI.");
+                crate::arch::x86_64::acpi::poweroff();
             }
             _ => {}
         }

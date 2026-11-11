@@ -128,6 +128,16 @@ impl InodeOperations for RamInode {
         }
     }
 
+    fn add_child_node(&mut self, name: &str, node: Arc<IrqSafeSpinlock<dyn InodeOperations>>) -> Result<(), &'static str> {
+        match self.content {
+            RamNodeContent::Directory(ref mut entries) => {
+                entries.insert(String::from(name), node);
+                Ok(())
+            }
+            RamNodeContent::File(_) => Err("Not a directory"),
+        }
+    }
+
     fn stat(&self) -> Stat {
         let size = match self.content {
             RamNodeContent::File(ref data) => data.len(),

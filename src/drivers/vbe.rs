@@ -69,17 +69,59 @@ pub fn is_available() -> bool {
     (id >= 0xB0C0) && (id <= 0xB0C6)
 }
 
-/// Initialize Bochs VBE display adapter to width x height x 32bpp and map framebuffer.
+/// Initialize Universal Graphics: uses Multiboot VBE/GOP linear framebuffer if provided,
+/// or falls back to Bochs VBE display adapter (1024x768x32bpp) and maps framebuffer.
 pub fn init(width: u32, height: u32) -> Result<(), &'static str> {
     if !VBE.lock().framebuffer.is_null() {
         return Ok(());
     }
 
-    if !is_available() {
-        return Err("Bochs VBE display adapter not detected");
+    // 1. Check if bootloader (GRUB / Ventoy / UEFI GOP) passed a linear framebuffer
+    let mb_fb = crate::arch::x86_64::multiboot::MULTIBOOT.lock().framebuffer;
+    if let Some(fb) = mb_fb {
+        let total_bytes = (fb.pitch * fb.height) as usize;
+        let total_pages = (total_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        {
+            let vmm = VMM.lock();
+            let kernel_pml4 = vmm.get_kernel_pml4();
+            let flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_WRITE_THROUGH;
+
+            for page in 0..total_pages {
+                let virt = FRAMEBUFFER_VIRT_BASE + (page * PAGE_SIZE) as u64;
+                let phys = fb.addr + (page * PAGE_SIZE) as u64;
+                vmm.map_page(kernel_pml4, virt, phys, flags)?;
+            }
+        }
+
+        {
+            let mut vbe = VBE.lock();
+            vbe.width = fb.width;
+            vbe.height = fb.height;
+            vbe.bpp = fb.bpp as u32;
+            vbe.pitch = fb.pitch;
+            vbe.lfb_phys = fb.addr;
+            vbe.framebuffer = FRAMEBUFFER_VIRT_BASE as *mut u32;
+        }
+
+        kinfo!(
+            "Universal Linear Framebuffer active: {}x{}@{}bpp, Pitch: {}, Phys: 0x{:X} -> Virt: 0x{:016X}",
+            fb.width,
+            fb.height,
+            fb.bpp,
+            fb.pitch,
+            fb.addr,
+            FRAMEBUFFER_VIRT_BASE
+        );
+        return Ok(());
     }
 
-    // 1. Locate VGA display controller in PCI devices to get BAR0
+    // 2. Fallback to Bochs VBE display controller
+    if !is_available() {
+        return Err("No compatible display adapter detected (Bochs VBE or Multiboot GOP required)");
+    }
+
+    // Locate VGA display controller in PCI devices to get BAR0
     let mut lfb_phys = 0xFD000000u64; // Default fallback in QEMU
     {
         let pci = PCI.lock();
@@ -93,7 +135,7 @@ pub fn init(width: u32, height: u32) -> Result<(), &'static str> {
         }
     }
 
-    // 2. Set Bochs VBE mode
+    // Set Bochs VBE mode
     unsafe {
         vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
         vbe_write(VBE_DISPI_INDEX_XRES, width as u16);
@@ -102,7 +144,7 @@ pub fn init(width: u32, height: u32) -> Result<(), &'static str> {
         vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
     }
 
-    // 3. Map physical framebuffer into virtual address space
+    // Map physical framebuffer into virtual address space
     let total_bytes = (width * height * 4) as usize;
     let total_pages = (total_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 

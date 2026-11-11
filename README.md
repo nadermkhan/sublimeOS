@@ -65,6 +65,8 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
 
 ### 1. Architecture & CPU (`src/arch/x86_64`)
 - **Boot Protocol**: Multiboot 1 and Multiboot 2 headers. Starts in 32-bit protected mode, performs CPUID and Long Mode checks, builds early 4-level page tables with identity and higher-half mapping, enables PAE, EFER.LME, and CR0.PG/WP, loads 64-bit GDT, and jumps into higher-half 64-bit Rust `kernel_main`.
+- **Multiboot Framebuffer & Memory Parser (`multiboot.rs`)**: Parses Multiboot 1 and Multiboot 2 information structures, extracting UEFI GOP / VBE linear framebuffers (address, pitch, width, height, bpp) and memory maps passed by bootloaders (GRUB, Ventoy, Syslinux).
+- **ACPI Subsystem & Hardware Power Management (`acpi.rs`)**: Searches EBDA and BIOS ROM space for RSDP, parses RSDT, XSDT, and FADT (`FACP`), extracts `PM1a_CNT_BLK`, reset registers, and `_S5` sleep packages for clean hardware ACPI power-off and reset on physical PCs.
 - **Global Descriptor Table (GDT) & TSS**: 64-bit Kernel Code (0x08), Kernel Data (0x10), User Data (0x1B), User Code (0x23), and 64-bit Task State Segment (0x28). Configures dedicated IST stacks for Double Fault (`IST1`) and Page Fault (`IST2`).
 - **Interrupt Descriptor Table (IDT)**: Complete 256-vector table. Handles all 32 x86_64 CPU exceptions with register dumps, CR2 fault decoding, hardware IRQs 32..47, and user syscall vector `0x80`.
 - **Interrupt Controller (PIC & APIC)**: Remaps legacy dual 8259 PICs to IRQ 32..47 and manages Local APIC.
@@ -83,8 +85,9 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
 - **Preemptive Scheduler**: Round-Robin and Priority scheduler driven by PIT timer ticks. Manages ready queue, sleeping queue (with tick deadlines), and idle thread.
 - **Assembly Context Switching**: Hand-crafted assembly routine `cosmos_context_switch(prev_rsp, next_rsp)` preserving callee-saved registers (`rbx, rbp, r12-r15, rflags`) and switching stacks atomically.
 
-### 4. Virtual File System (`src/fs`)
-- **VFS Abstraction**: Standard POSIX-style interface with `InodeOperations`, `Stat`, `DirEntry`, `File`, and global mount manager.
+### 4. Virtual File System & Storage (`src/fs`)
+- **VFS Abstraction**: Standard POSIX-style interface with `InodeOperations`, `Stat`, `DirEntry`, `File`, and dynamic mount manager (`add_child_node`).
+- **FAT32 Filesystem Driver (`fat32.rs`)**: Complete `#![no_std]` FAT32 implementation with MBR partition table detection, BPB parsing, cluster chain traversal, LFN (Long File Name) support, and file reading. Automatically mounts physical drives at `/Volumes/Cosmic USB`.
 - **RamFS**: In-memory hierarchical filesystem supporting creation, reading, writing, seeking, and deletion.
 - **DevFS (`/dev`)**:
   - `/dev/null`: Discards writes, EOF on read.
@@ -92,6 +95,7 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
   - `/dev/random` & `/dev/urandom`: Fast pseudo-random number generator.
   - `/dev/tty` & `/dev/console`: Reads keyboard input, writes to VGA and serial.
   - `/dev/rtc`: Formatted date & time string from CMOS RTC.
+  - `/dev/disk0`, `/dev/disk1`: Physical block storage devices.
 - **ProcFS (`/proc`)**:
   - `/proc/version`: Kernel version, architecture, compiler.
   - `/proc/uptime`: System uptime in seconds and timer ticks.
@@ -99,15 +103,22 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
   - `/proc/cpuinfo`: CPU model, frequency, feature flags.
   - `/proc/tasks`: Real-time task list with states and ticks.
   - `/proc/mounts`: Mounted filesystem table.
-- Standard directories pre-populated: `/etc/os-release`, `/etc/motd`, `/bin`, `/tmp`, `/home`.
 
 ### 5. Inter-Process Communication (`src/ipc`)
 - **Anonymous Pipes**: Circular memory buffer with read/write ends, reader/writer reference counts, and EOF signaling. Implements `InodeOperations`.
 - **POSIX Signals**: Full signal set (`SIGINT`, `SIGTERM`, `SIGKILL`, `SIGSEGV`, `SIGALRM`, `SIGCHLD`, etc.) with pending masks and delivery state.
 
-### 6. Hardware Drivers (`src/drivers`)
+### 6. Hardware Drivers & Storage Subsystem (`src/drivers`)
+- **Physical Block Storage Manager (`src/drivers/storage/`)**:
+  - **`BlockDevice` Trait**: Unified sector-based interface (`read_sectors`, `write_sectors`, `total_sectors`).
+  - **ATA / IDE Driver (`ata.rs`)**: Real PIO LBA28/LBA48 controller driver across Primary and Secondary buses (0x1F0/0x170). Communicates via hardware I/O ports, queries drive `IDENTIFY` (model name, sector capacity), and handles sector read/writes.
+  - **AHCI SATA Driver (`ahci.rs`)**: Scans PCI for SATA AHCI controllers (Class 0x01, Subclass 0x06, Prog-IF 0x01).
+- **Display Controllers (`vbe.rs`)**:
+  - **Universal Linear Framebuffer**: Uses Multiboot GOP/VBE framebuffer handover when available (works on real Intel, AMD, and NVIDIA graphics hardware).
+  - **Bochs VBE Ports Fallback**: Falls back to I/O ports 0x1CE/0x1CF when running on emulators.
 - **PS/2 Keyboard**: IRQ 1 handler, Set 1/2 scancode decoder, Shift/Ctrl/Alt/CapsLock modifier tracking, and thread-safe input ring buffer.
-- **PCI Bus Scanner**: Scans PCI configuration space (ports 0xCF8/0xCFC), identifying host bridges, ISA bridges, IDE controllers, VGA controllers, and NICs (`lspci`).
+- **PS/2 Mouse**: IRQ 12 handler, 3-byte packet decoder, clamping, and hardware cursor compositing.
+- **PCI Bus Scanner**: Scans PCI configuration space (ports 0xCF8/0xCFC), identifying host bridges, IDE controllers, VGA controllers, and NICs (`lspci`).
 
 ### 7. Interactive CosmicOS Shell (`zsh`) & Virtual TTYs
 Built-in interactive CLI available on VGA display, COM1 serial, and virtual consoles:

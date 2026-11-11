@@ -1,8 +1,10 @@
+pub mod acpi;
 pub mod apic;
 pub mod gdt;
 pub mod idt;
 pub mod io;
 pub mod msr;
+pub mod multiboot;
 pub mod pic;
 pub mod pit;
 pub mod registers;
@@ -42,4 +44,7 @@ pub fn init() {
     // 7. Initialize AMD64 fast syscall (LSTAR/STAR)
     syscall::init();
     kinfo!("Fast syscall interface initialized");
+
+    // 8. Discover ACPI tables for power management
+    acpi::init();
 }

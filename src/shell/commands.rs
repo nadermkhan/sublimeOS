@@ -103,17 +103,30 @@ fn cmd_sysctl(args: &[&str]) {
 fn cmd_diskutil(args: &[&str]) {
     let sub = args.first().copied().unwrap_or("list");
     if sub == "list" {
-        println!("/dev/disk0 (internal, physical):");
-        println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
-        println!("   0:      GUID_partition_scheme                        *128.0 MB   disk0");
-        println!("   1:                        EFI EFI                     100.0 MB   disk0s1");
-        println!("   2:                  Cosmic_FS Container disk1         *28.0 MB   disk0s2\n");
+        let storage = crate::drivers::storage::STORAGE_MANAGER.lock();
+        if !storage.devices.is_empty() {
+            for (_idx, dev) in storage.devices.iter().enumerate() {
+                let size_mb = (dev.total_sectors() * 512) / (1024 * 1024);
+                println!("/dev/{} (internal, physical):", dev.name());
+                println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
+                println!("   0:      GUID_partition_scheme                        *{} MB    {}", size_mb, dev.name());
+                println!("   1:                        EFI EFI                     100.0 MB   {}s1", dev.name());
+                println!("   2:                  Cosmic_FS FAT32 Partition         *{} MB    {}s2\n", size_mb.saturating_sub(100), dev.name());
+            }
+        } else {
+            println!("/dev/disk0 (internal, physical):");
+            println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
+            println!("   0:      GUID_partition_scheme                        *128.0 MB   disk0");
+            println!("   1:                        EFI EFI                     100.0 MB   disk0s1");
+            println!("   2:                  Cosmic_FS Container disk1         *28.0 MB   disk0s2\n");
+        }
+
         println!("/dev/disk1 (synthesized):");
         println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
         println!("   0:    CosmicFS Container Scheme -                      +28.0 MB    disk1");
         println!("                                 Physical Store disk0s2");
         println!("   1:              Cosmic Volume Cosmic HD               12.4 MB    disk1s1");
-        println!("   2:              Cosmic Volume Preboot                 1.2 MB     disk1s2");
+        println!("   2:              Cosmic Volume Cosmic USB              15.6 MB    disk1s2");
     } else {
         println!("Usage: diskutil list");
     }
@@ -368,15 +381,10 @@ fn cmd_rm(args: &[&str]) {
 
 fn cmd_reboot() {
     println!("\x1b[31mRestarting CosmicOS...\x1b[0m");
-    unsafe {
-        crate::arch::x86_64::io::outb(0x64, 0xFE);
-    }
+    crate::arch::x86_64::acpi::reboot();
 }
 
 fn cmd_halt() {
     println!("\x1b[31mShutting down CosmicOS...\x1b[0m");
-    crate::arch::x86_64::registers::disable_interrupts();
-    loop {
-        crate::arch::x86_64::registers::hlt();
-    }
+    crate::arch::x86_64::acpi::poweroff();
 }

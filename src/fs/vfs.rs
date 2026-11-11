@@ -60,6 +60,10 @@ pub trait InodeOperations: Send + Sync {
         Err("Cannot unlink")
     }
 
+    fn add_child_node(&mut self, _name: &str, _node: Arc<IrqSafeSpinlock<dyn InodeOperations>>) -> Result<(), &'static str> {
+        Err("Cannot add child node to this Inode")
+    }
+
     fn stat(&self) -> Stat;
 }
 

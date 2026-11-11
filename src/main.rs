@@ -28,6 +28,7 @@ pub mod tty;
 pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     // 1. Initialize Architecture & Hardware Abstraction Layer
     arch::x86_64::init();
+    arch::x86_64::multiboot::parse_boot_info(magic, mb_info);
 
     kinfo!("=======================================================");
     kinfo!("  CosmicOS — Sublime Kernel Version 1.0.0 (x86_64)");
@@ -46,8 +47,9 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     // 4. Initialize Virtual File System (VFS, RamFS, DevFS, ProcFS)
     fs::init();
 
-    // 5. Initialize Device Drivers (Keyboard, PCI Bus Scanner)
+    // 5. Initialize Device Drivers (Keyboard, Mouse, PCI, Storage)
     drivers::init();
+    fs::mount_storage_devices();
 
     // 6. Initialize Master TTY Subsystem & Virtual Consoles
     tty::init();
