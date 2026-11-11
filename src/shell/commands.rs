@@ -55,6 +55,7 @@ pub fn execute_command(line: &str) {
         "rm" => cmd_rm(args),
         "mount" => cmd_mount(),
         "wifi" => cmd_wifi(args),
+        "dhcp" => cmd_dhcp(args),
         "ifconfig" => cmd_ifconfig(),
         "ping" => cmd_ping(args),
         "nslookup" => cmd_nslookup(args),
@@ -348,6 +349,7 @@ fn cmd_help() {
     println!("  diskutil [list] Manage CosmicFS containers and disk volumes");
     println!("  mount           List mounted filesystems (FAT32, exFAT, ext4, NTFS)");
     println!("  wifi [subcmd]   802.11 Wi-Fi manager (scan, connect, status, disconnect)");
+    println!("  dhcp [subcmd]   DHCP client manager (status, discover, release)");
     println!("  ifconfig        Display network interface configuration (lo0, en0, wlan0)");
     println!("  ping <target>   Send ICMP ECHO_REQUEST packets to network hosts");
     println!("  nslookup <host> Query DNS nameservers for IPv4 host address");
@@ -695,6 +697,54 @@ fn cmd_wifi(args: &[&str]) {
         }
         _ => {
             println!("Usage: wifi [scan | connect <ssid> [passphrase] | status | disconnect]");
+        }
+    }
+}
+
+fn cmd_dhcp(args: &[&str]) {
+    let subcmd = args.get(0).copied().unwrap_or("status");
+    match subcmd {
+        "status" => {
+            let client = crate::net::dhcp::DHCP_CLIENT.lock();
+            println!("CosmicOS DHCP Client Status:");
+            println!("  State:     {:?}", client.state);
+            println!("  Interface: {}", if client.interface_name.is_empty() { "none" } else { &client.interface_name });
+            if let Some(ref lease) = client.active_lease {
+                println!("  IP:        {}.{}.{}.{}", lease.assigned_ip[0], lease.assigned_ip[1], lease.assigned_ip[2], lease.assigned_ip[3]);
+                println!("  Subnet:    {}.{}.{}.{}", lease.subnet_mask[0], lease.subnet_mask[1], lease.subnet_mask[2], lease.subnet_mask[3]);
+                println!("  Router:    {}.{}.{}.{}", lease.router[0], lease.router[1], lease.router[2], lease.router[3]);
+                println!("  DNS:       {}.{}.{}.{}", lease.dns_server[0], lease.dns_server[1], lease.dns_server[2], lease.dns_server[3]);
+                println!("  Server ID: {}.{}.{}.{}", lease.server_id[0], lease.server_id[1], lease.server_id[2], lease.server_id[3]);
+                println!("  Lease:     {} seconds", lease.lease_time);
+            } else {
+                println!("  No active lease assigned.");
+            }
+        }
+        "discover" | "renew" => {
+            let iface = args.get(1).copied().unwrap_or("en0");
+            println!("Sending DHCPDISCOVER on {}...", iface);
+            match crate::net::dhcp::start_dhcp_discovery(iface) {
+                Ok(frame) => {
+                    let net = crate::net::device::NET_MANAGER.lock();
+                    if let Some((dev, _)) = net.get_device(iface) {
+                        let _ = dev.send_packet(&frame);
+                        println!("DHCPDISCOVER transmitted (broadcast)");
+                    }
+                }
+                Err(e) => println!("DHCP discovery error: {}", e),
+            }
+        }
+        "release" => {
+            let mut client = crate::net::dhcp::DHCP_CLIENT.lock();
+            if let Some(lease) = client.active_lease.take() {
+                client.state = crate::net::dhcp::DhcpState::Init;
+                println!("Released DHCP lease for {}.{}.{}.{}", lease.assigned_ip[0], lease.assigned_ip[1], lease.assigned_ip[2], lease.assigned_ip[3]);
+            } else {
+                println!("No active DHCP lease to release.");
+            }
+        }
+        _ => {
+            println!("Usage: dhcp [status | discover [interface] | release]");
         }
     }
 }

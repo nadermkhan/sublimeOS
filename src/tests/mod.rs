@@ -47,6 +47,9 @@ pub fn run_all_tests() {
     test_usb_hid_subsystem();
     test_mdns_bonjour_responder();
     test_posix_shared_memory_and_mmap();
+    test_posix_semaphores_and_message_queues();
+    test_dhcp_client_daemon();
+    test_ntfs_non_resident_runlist_decoder();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -2142,6 +2145,378 @@ fn test_posix_shared_memory_and_mmap() {
     let unlink_ret = sys_shm_unlink(shm_name.as_ptr());
     assert_eq!(unlink_ret, 0, "sys_shm_unlink failed: {}", unlink_ret);
     assert!(SHM_REGISTRY.lock().get("cosmic_ipc_shm").is_none());
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_posix_semaphores_and_message_queues() {
+    print!("  [TEST] POSIX Semaphores & Message Queues (sem_*, mq_*) ... ");
+
+    use crate::ipc::mqueue::*;
+    use crate::ipc::semaphore::*;
+    use crate::task::process::*;
+
+    // 1. Test POSIX Semaphore Lifecycle: open, getvalue, wait, trywait, post, unlink
+    let sem_name = b"cosmic_sem_test\0";
+    let sem_fd = sys_sem_open(sem_name.as_ptr(), 0x40 | 0x80, 0o666, 2);
+    assert!(sem_fd >= 0, "sys_sem_open failed: {}", sem_fd);
+
+    let mut val: i32 = 0;
+    let get_ret = sys_sem_getvalue(sem_fd as usize, &mut val as *mut i32);
+    assert_eq!(get_ret, 0);
+    assert_eq!(val, 2, "Expected initial semaphore value 2");
+
+    // Decrement value to 1 with trywait
+    let trywait_ret = sys_sem_trywait(sem_fd as usize);
+    assert_eq!(trywait_ret, 0);
+    let _ = sys_sem_getvalue(sem_fd as usize, &mut val as *mut i32);
+    assert_eq!(val, 1);
+
+    // Decrement value to 0 with wait
+    let wait_ret = sys_sem_wait(sem_fd as usize);
+    assert_eq!(wait_ret, 0);
+    let _ = sys_sem_getvalue(sem_fd as usize, &mut val as *mut i32);
+    assert_eq!(val, 0);
+
+    // trywait when value is 0 must fail with -EAGAIN (-11)
+    let trywait_empty = sys_sem_trywait(sem_fd as usize);
+    assert_eq!(trywait_empty, -11, "Expected -EAGAIN on zero semaphore");
+
+    // Increment value back to 1 with post
+    let post_ret = sys_sem_post(sem_fd as usize);
+    assert_eq!(post_ret, 0);
+    let _ = sys_sem_getvalue(sem_fd as usize, &mut val as *mut i32);
+    assert_eq!(val, 1);
+
+    // Close and unlink
+    sys_sem_close(sem_fd as usize);
+    let unlink_ret = sys_sem_unlink(sem_name.as_ptr());
+    assert_eq!(unlink_ret, 0);
+    assert!(SEMAPHORE_REGISTRY.lock().get("cosmic_sem_test").is_none());
+
+    // 2. Test POSIX Message Queue Lifecycle: open, send (priority-ordered), receive, getattr, unlink
+    let mq_name = b"cosmic_mq_test\0";
+    let attr = MqAttr {
+        mq_flags: 0,
+        mq_maxmsg: 5,
+        mq_msgsize: 128,
+        mq_curmsgs: 0,
+    };
+    let mq_fd = sys_mq_open(mq_name.as_ptr(), 0x40 | 0x80, &attr as *const MqAttr);
+    assert!(mq_fd >= 0, "sys_mq_open failed: {}", mq_fd);
+
+    // Send three messages with different priorities out of order
+    let msg_low = b"Low priority message";
+    let msg_high = b"CRITICAL high priority message";
+    let msg_med = b"Medium priority message";
+
+    let send_low = sys_mq_send(mq_fd as usize, msg_low.as_ptr(), msg_low.len(), 10);
+    assert_eq!(send_low, 0);
+
+    let send_high = sys_mq_send(mq_fd as usize, msg_high.as_ptr(), msg_high.len(), 50);
+    assert_eq!(send_high, 0);
+
+    let send_med = sys_mq_send(mq_fd as usize, msg_med.as_ptr(), msg_med.len(), 30);
+    assert_eq!(send_med, 0);
+
+    // Verify queue attributes
+    let mut check_attr = MqAttr::default();
+    let getattr_ret = sys_mq_getattr(mq_fd as usize, &mut check_attr as *mut MqAttr);
+    assert_eq!(getattr_ret, 0);
+    assert_eq!(check_attr.mq_curmsgs, 3, "Expected 3 queued messages");
+
+    // Receive 1: Must be the highest priority message (prio 50)
+    let mut recv_buf = [0u8; 128];
+    let mut recv_prio = 0u32;
+    let n1 = sys_mq_receive(mq_fd as usize, recv_buf.as_mut_ptr(), recv_buf.len(), &mut recv_prio as *mut u32);
+    assert_eq!(n1, msg_high.len() as i64);
+    assert_eq!(recv_prio, 50);
+    assert_eq!(&recv_buf[..n1 as usize], msg_high);
+
+    // Receive 2: Must be medium priority message (prio 30)
+    let n2 = sys_mq_receive(mq_fd as usize, recv_buf.as_mut_ptr(), recv_buf.len(), &mut recv_prio as *mut u32);
+    assert_eq!(n2, msg_med.len() as i64);
+    assert_eq!(recv_prio, 30);
+    assert_eq!(&recv_buf[..n2 as usize], msg_med);
+
+    // Receive 3: Must be low priority message (prio 10)
+    let n3 = sys_mq_receive(mq_fd as usize, recv_buf.as_mut_ptr(), recv_buf.len(), &mut recv_prio as *mut u32);
+    assert_eq!(n3, msg_low.len() as i64);
+    assert_eq!(recv_prio, 10);
+    assert_eq!(&recv_buf[..n3 as usize], msg_low);
+
+    // Queue should now be empty
+    let _ = sys_mq_getattr(mq_fd as usize, &mut check_attr as *mut MqAttr);
+    assert_eq!(check_attr.mq_curmsgs, 0);
+
+    // 3. Test VFS /dev/mqueue integration
+    {
+        let vfs = VFS.lock();
+        let mq_file = vfs.open("/dev/mqueue/cosmic_mq_test", 0).expect("Open /dev/mqueue/cosmic_mq_test failed");
+        let mut vfs_buf = [0u8; 64];
+        let bytes = mq_file.read(&mut vfs_buf).expect("Read from /dev/mqueue node failed");
+        assert!(bytes > 0);
+        let s = core::str::from_utf8(&vfs_buf[..bytes]).unwrap_or("");
+        assert!(s.contains("cosmic_mq_test"));
+    }
+
+    // Close and unlink
+    sys_close(mq_fd as usize);
+    let mq_unlink_ret = sys_mq_unlink(mq_name.as_ptr());
+    assert_eq!(mq_unlink_ret, 0);
+    assert!(MQUEUE_REGISTRY.lock().get("cosmic_mq_test").is_none());
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_dhcp_client_daemon() {
+    print!("  [TEST] DHCP Client Daemon (RFC 2131/2132 Discovery, Offer, Request, Lease) ... ");
+
+    use crate::net::dhcp::*;
+
+    let client_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+    let xid: u32 = 0x4A7B9C1E;
+
+    // 1. Test DHCPDISCOVER packet creation
+    let discover_bytes = build_dhcp_discover(client_mac, xid);
+    assert!(discover_bytes.len() >= 240);
+    assert_eq!(discover_bytes[0], 1); // BOOTREQUEST
+    assert_eq!(discover_bytes[1], 1); // Ethernet
+    assert_eq!(discover_bytes[2], 6); // MAC len
+    assert_eq!(&discover_bytes[4..8], &xid.to_be_bytes());
+    assert_eq!(&discover_bytes[28..34], &client_mac);
+    assert_eq!(&discover_bytes[236..240], &DHCP_MAGIC_COOKIE);
+
+    // Verify option 53 = 1 (DHCPDISCOVER)
+    let opt53_pos = discover_bytes.windows(3).position(|w| w == &[53, 1, DHCP_DISCOVER]);
+    assert!(opt53_pos.is_some(), "Option 53 DHCPDISCOVER not found");
+
+    // 2. Test DHCPOFFER packet synthesis and parsing
+    let offered_ip = [192, 168, 1, 175];
+    let server_id = [192, 168, 1, 1];
+    let subnet_mask = [255, 255, 255, 0];
+    let router_gw = [192, 168, 1, 1];
+    let dns_ip = [8, 8, 4, 4];
+
+    let mut mock_offer = alloc::vec![0u8; 240];
+    mock_offer[0] = 2; // BOOTREPLY
+    mock_offer[1] = 1;
+    mock_offer[2] = 6;
+    mock_offer[4..8].copy_from_slice(&xid.to_be_bytes());
+    mock_offer[16..20].copy_from_slice(&offered_ip); // yiaddr
+    mock_offer[28..34].copy_from_slice(&client_mac);
+    mock_offer[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+    // Add Options
+    mock_offer.extend_from_slice(&[53, 1, DHCP_OFFER]);
+    mock_offer.extend_from_slice(&[54, 4, server_id[0], server_id[1], server_id[2], server_id[3]]);
+    mock_offer.extend_from_slice(&[1, 4, subnet_mask[0], subnet_mask[1], subnet_mask[2], subnet_mask[3]]);
+    mock_offer.extend_from_slice(&[3, 4, router_gw[0], router_gw[1], router_gw[2], router_gw[3]]);
+    mock_offer.extend_from_slice(&[6, 4, dns_ip[0], dns_ip[1], dns_ip[2], dns_ip[3]]);
+    mock_offer.extend_from_slice(&[51, 4, 0x00, 0x01, 0x51, 0x80]); // 86400s lease
+    mock_offer.push(255); // End
+
+    let (msg_type, lease) = parse_dhcp_packet(&mock_offer).expect("Failed to parse mock DHCPOFFER");
+    assert_eq!(msg_type, DHCP_OFFER);
+    assert_eq!(lease.assigned_ip, offered_ip);
+    assert_eq!(lease.server_id, server_id);
+    assert_eq!(lease.subnet_mask, subnet_mask);
+    assert_eq!(lease.router, router_gw);
+    assert_eq!(lease.dns_server, dns_ip);
+    assert_eq!(lease.lease_time, 86400);
+
+    // 3. Test DHCPREQUEST packet creation
+    let req_bytes = build_dhcp_request(client_mac, lease.assigned_ip, lease.server_id, xid);
+    assert_eq!(req_bytes[0], 1); // BOOTREQUEST
+    let opt53_req = req_bytes.windows(3).position(|w| w == &[53, 1, DHCP_REQUEST]);
+    assert!(opt53_req.is_some(), "Option 53 DHCPREQUEST not found");
+    let opt50_req = req_bytes.windows(6).position(|w| w[0] == 50 && w[1] == 4 && &w[2..6] == offered_ip);
+    assert!(opt50_req.is_some(), "Option 50 Requested IP not found");
+    let opt54_req = req_bytes.windows(6).position(|w| w[0] == 54 && w[1] == 4 && &w[2..6] == server_id);
+    assert!(opt54_req.is_some(), "Option 54 Server Identifier not found");
+
+    // 4. Test DHCPACK synthesis and lease application
+    let mut mock_ack = mock_offer.clone();
+    if let Some(pos) = mock_ack.windows(3).position(|w| w == &[53, 1, DHCP_OFFER]) {
+        mock_ack[pos + 2] = DHCP_ACK;
+    }
+
+    let (ack_type, ack_lease) = parse_dhcp_packet(&mock_ack).expect("Failed to parse mock DHCPACK");
+    assert_eq!(ack_type, DHCP_ACK);
+
+    // Apply lease to lo0 and verify state
+    apply_dhcp_lease("lo0", ack_lease);
+    {
+        let client = DHCP_CLIENT.lock();
+        assert_eq!(client.state, DhcpState::Bound);
+        assert!(client.active_lease.is_some());
+    }
+
+    // Restore lo0 to 127.0.0.1
+    let mut net = crate::net::device::NET_MANAGER.lock();
+    if let Some((_, mut cfg)) = net.get_device("lo0") {
+        cfg.ipv4 = [127, 0, 0, 1];
+        cfg.netmask = [255, 0, 0, 0];
+        cfg.gateway = [0, 0, 0, 0];
+        net.set_interface_config("lo0", cfg);
+    }
+    drop(net);
+
+    // 5. Test DHCPRELEASE packet creation
+    let release_bytes = build_dhcp_release(client_mac, offered_ip, server_id, xid);
+    assert_eq!(release_bytes[0], 1);
+    assert_eq!(&release_bytes[12..16], &offered_ip); // ciaddr
+    let opt53_rel = release_bytes.windows(3).position(|w| w == &[53, 1, DHCP_RELEASE]);
+    assert!(opt53_rel.is_some(), "Option 53 DHCPRELEASE not found");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_ntfs_non_resident_runlist_decoder() {
+    print!("  [TEST] NTFS Non-Resident Data Runlist Decoder & Fragmented Extents ... ");
+
+    use crate::fs::ntfs::*;
+
+    // 1. Unit test the mapping-pairs runlist parser (NtfsInode::decode_runlist)
+    let runlist_bytes = alloc::vec![
+        0x21, 4, 100, 0,                   // Run 1: 4 clusters at LCN 100
+        0x12, 44, 1, 50,                   // Run 2: 300 clusters (44 + 1*256) at LCN +50 = 150
+        0x11, 10, (-20i8) as u8,           // Run 3: 10 clusters at LCN -20 = 130 (0xEC signed)
+        0x02, 50, 0,                       // Run 4: 50 clusters sparse
+        0x00,                              // Terminating 0
+    ];
+
+    let decoded = NtfsInode::decode_runlist(&runlist_bytes, 0);
+    assert_eq!(decoded.len(), 4, "Expected 4 decoded data runs");
+    assert_eq!(decoded[0], (4, Some(100)));
+    assert_eq!(decoded[1], (300, Some(150)));
+    assert_eq!(decoded[2], (10, Some(130)));
+    assert_eq!(decoded[3], (50, None)); // Sparse run
+
+    // 2. Full end-to-end simulated NTFS volume with non-resident file
+    let dev = MemBlockDevice::new("mem_ntfs_nonresident", 2048);
+    {
+        let mut d = dev.data.lock();
+        // Sector 0: NTFS VBR
+        d[3..11].copy_from_slice(b"NTFS    ");
+        d[11] = 0x00; d[12] = 0x02; // bytes per sector = 512
+        d[13] = 1; // sectors per cluster = 1 (512 bytes)
+        d[48] = 10; // $MFT starting cluster = 10
+        d[64] = 0xF6; // 1024 bytes per MFT record
+        d[510] = 0x55; d[511] = 0xAA;
+
+        // MFT Record 5: root directory (at LBA 10 + 5*2 = 20, offset 20 * 512 = 10240)
+        let r5 = 20 * 512;
+        d[r5..r5 + 4].copy_from_slice(b"FILE");
+        d[r5 + 4] = 48; // USA offset
+        d[r5 + 6] = 3;  // USA count
+        d[r5 + 20] = 56; // first attr offset = 56
+        d[r5 + 22] = 0x03; // flags: in use + directory
+
+        // Attribute $INDEX_ROOT (type 0x90) at offset 56
+        let a90 = r5 + 56;
+        d[a90 + 0] = 0x90; // type 0x90
+        d[a90 + 4] = 120;  // length = 120
+        d[a90 + 8] = 0;    // resident
+        d[a90 + 20] = 24;  // value offset = 24
+
+        // Index root header (at a90 + 24)
+        let ir = a90 + 24;
+        d[ir + 0] = 0x30;
+        d[ir + 16] = 16;
+
+        // First index entry pointing to MFT Record 20: "BIGFILE.DAT"
+        let ie = ir + 32;
+        d[ie + 0] = 20;   // child MFT record number = 20
+        d[ie + 8] = 96;   // entry length = 96
+        d[ie + 10] = 80;  // content length = 80
+        d[ie + 12] = 0x02;// last entry
+
+        let fn_payload = ie + 16;
+        d[fn_payload + 48] = (2500 & 0xFF) as u8; // file size = 2500 bytes
+        d[fn_payload + 49] = ((2500 >> 8) & 0xFF) as u8;
+        d[fn_payload + 56] = 0x20;
+        d[fn_payload + 64] = 11; // name length = 11
+        d[fn_payload + 65] = 1; // namespace Win32
+        for (i, &b) in b"BIGFILE.DAT".iter().enumerate() {
+            d[fn_payload + 66 + i * 2] = b;
+        }
+
+        // MFT Record 20: Non-resident file (at LBA 10 + 20*2 = 50, offset 50 * 512 = 25600)
+        let r20 = 50 * 512;
+        d[r20..r20 + 4].copy_from_slice(b"FILE");
+        d[r20 + 4] = 48; // USA offset
+        d[r20 + 6] = 3;  // USA count
+        d[r20 + 20] = 56; // first attr offset = 56
+        d[r20 + 22] = 0x01; // in use
+
+        // Attribute $DATA (type 0x80) at offset 56: Non-Resident
+        let a80 = r20 + 56;
+        d[a80 + 0] = 0x80; // type 0x80
+        d[a80 + 4] = 72;   // length = 72
+        d[a80 + 8] = 1;    // NON-RESIDENT flag = 1
+        d[a80 + 16] = 0;   // starting VCN = 0
+        d[a80 + 24] = 4;   // ending VCN = 4 (5 clusters total)
+        d[a80 + 32] = 64;  // runlist offset = 64 (relative to a80)
+        // Allocated size (5 clusters * 512 = 2560 bytes)
+        d[a80 + 40] = (2560 & 0xFF) as u8;
+        d[a80 + 41] = ((2560 >> 8) & 0xFF) as u8;
+        // Real size = 2500 bytes
+        d[a80 + 48] = (2500 & 0xFF) as u8;
+        d[a80 + 49] = ((2500 >> 8) & 0xFF) as u8;
+
+        // Runlist at a80 + 64:
+        // Run 1: 3 clusters at LCN 60 (LBA 60, 61, 62 -> 1536 bytes) -> header 0x11, len=3, delta=60
+        // Run 2: 2 clusters at LCN +20 (LCN 80: LBA 80, 81 -> 1024 bytes) -> header 0x11, len=2, delta=20
+        // Terminating 0
+        let runs = a80 + 64;
+        d[runs + 0] = 0x11;
+        d[runs + 1] = 3;
+        d[runs + 2] = 60;
+        d[runs + 3] = 0x11;
+        d[runs + 4] = 2;
+        d[runs + 5] = 20;
+        d[runs + 6] = 0x00;
+
+        // Write test data payloads to disk clusters:
+        let cl60 = 60 * 512;
+        d[cl60..cl60 + 512].fill(b'A');
+        let cl61 = 61 * 512;
+        d[cl61..cl61 + 512].fill(b'B');
+        let cl62 = 62 * 512;
+        d[cl62..cl62 + 512].fill(b'C');
+
+        let cl80 = 80 * 512;
+        d[cl80..cl80 + 512].fill(b'D');
+        let cl81 = 81 * 512;
+        d[cl81..cl81 + 512].fill(b'E');
+    }
+
+    // 3. Mount and read non-resident file across cluster and extent boundaries
+    let fs = NtfsFileSystem::mount(dev).expect("Mount non-resident NTFS volume failed");
+    let root = NtfsInode::new_root(fs).expect("Root inode lookup failed");
+    let file = root.lock().lookup("BIGFILE.DAT").expect("Lookup BIGFILE.DAT failed");
+
+    let stat = file.lock().stat();
+    assert_eq!(stat.size, 2500, "Expected file size 2500");
+
+    let mut full_buf = alloc::vec![0u8; 2500];
+    let n = file.lock().read(0, &mut full_buf).expect("Read non-resident file failed");
+    assert_eq!(n, 2500, "Expected 2500 bytes read");
+
+    // Verify payload across extents:
+    assert!(full_buf[0..512].iter().all(|&b| b == b'A'), "Cluster 60 mismatch");
+    assert!(full_buf[512..1024].iter().all(|&b| b == b'B'), "Cluster 61 mismatch");
+    assert!(full_buf[1024..1536].iter().all(|&b| b == b'C'), "Cluster 62 mismatch");
+    assert!(full_buf[1536..2048].iter().all(|&b| b == b'D'), "Cluster 80 mismatch");
+    assert!(full_buf[2048..2500].iter().all(|&b| b == b'E'), "Cluster 81 mismatch");
+
+    // Test offset seek read spanning the boundary between Extent 1 and Extent 2 (1500..1600)
+    let mut boundary_buf = [0u8; 100];
+    let n_span = file.lock().read(1500, &mut boundary_buf).expect("Cross-extent boundary read failed");
+    assert_eq!(n_span, 100);
+    assert!(boundary_buf[0..36].iter().all(|&b| b == b'C'));
+    assert!(boundary_buf[36..100].iter().all(|&b| b == b'D'));
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

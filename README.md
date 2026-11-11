@@ -28,8 +28,8 @@
    - [7. Intel High Definition Audio & Sound Subsystem](#7-intel-high-definition-audio--sound-subsystem)
    - [8. CosmicSH POSIX Shell & Terminal Text Editor](#8-cosmicsh-posix-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
-4. [Interactive Shell Command Reference (51 Commands)](#interactive-shell-command-reference-51-commands)
-5. [Automated Verification Suite (36 Self-Tests)](#automated-verification-suite-36-self-tests)
+4. [Interactive Shell Command Reference (52 Commands)](#interactive-shell-command-reference-52-commands)
+5. [Automated Verification Suite (39 Self-Tests)](#automated-verification-suite-39-self-tests)
 6. [Building and Running](#building-and-running)
    - [Prerequisites](#prerequisites)
    - [Compiling Kernel](#compiling-kernel)
@@ -162,6 +162,9 @@
 - **POSIX Signals Subsystem ([`signal.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/ipc/signal.rs))**:
   - Per-process signal action tables ([`SigAction`](src/ipc/signal.rs)), blocked signal bitmasks, pending signals delivery, asynchronous inter-process signaling ([`sys_kill`](src/task/process.rs)), child termination notification (`SIGCHLD` to parent), and unblockable signals (`SIGKILL`, `SIGSTOP`).
   - Syscalls: `sys_rt_sigaction` (13), `sys_rt_sigprocmask` (14), and `sys_kill` (62).
+- **POSIX Semaphores & Message Queues ([`semaphore.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/ipc/semaphore.rs), [`mqueue.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/ipc/mqueue.rs))**:
+  - **Named Semaphores**: `sem_open` (240), `sem_close` (241), `sem_post` (242), `sem_wait` (243), `sem_trywait` (244), `sem_getvalue` (245), `sem_unlink` (246), and `/dev/sem/*` virtual VFS filesystem integration.
+  - **POSIX Message Queues**: `mq_open` (247), `mq_send` (248), `mq_receive` (249), `mq_unlink` (250), `mq_getattr` (251), and `/dev/mqueue/*` VFS directory node. Supports priority-ordered message insertion (higher priority popped first) and configurable queue limits (`mq_maxmsg`, `mq_msgsize`).
 
 ### 4. Userspace Runtime, Dynamic Linker & Standard Library
 *Location: [`src/user/`](src/user/)*
@@ -196,7 +199,7 @@
 - **FAT32 R/W ([`fat32.rs`](src/fs/fat32.rs))**: Real Read/Write implementation with partition discovery, BPB decoding, cluster allocation bitmap scanning, cluster chain traversal, LFN directory parsing, and file creation/overwriting.
 - **exFAT ([`exfat.rs`](src/fs/exfat.rs))**: Sector-accurate exFAT parser supporting Main Boot Region, Volume Flags, Cluster Heap allocation, Stream Extension entries, and file traversal.
 - **ext4 R/W ([`ext4.rs`](src/fs/ext4.rs))**: Linux ext4 superblock parser, Block Group Descriptor Table lookup, block and inode bitmap allocation, extent tree mapping, direct write block updates, directory entry insertion, and file creation.
-- **NTFS ([`ntfs.rs`](src/fs/ntfs.rs))**: Windows NTFS VBR parsing, `$MFT` record decoding, and resident `$DATA` attribute extraction.
+- **NTFS ([`ntfs.rs`](src/fs/ntfs.rs))**: Windows NTFS VBR parsing, `$MFT` record decoding, resident `$DATA` extraction, and non-resident variable-length data runlist decoder (`decode_runlist`). Supports multi-extent fragmented cluster chains, signed LCN relative offsets, sparse zero-filled extents, and sector-by-sector DMA streaming for files of arbitrary length.
 - **USB Mass Storage ([`usb/msc.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/usb/msc.rs))**: Bulk-Only Transport (BOT) driver sending SCSI Command Descriptor Blocks (`INQUIRY`, `READ CAPACITY 10`, `READ 10`, `WRITE 10`) over xHCI and EHCI controllers.
 - **USB HID Input Subsystem ([`usb/hid.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/usb/hid.rs))**: USB Human Interface Device driver supporting Boot Protocol keyboards and mice over xHCI and EHCI controllers. Parses 8-byte keyboard reports, maps USB HID Usage codes to PS/2 scancodes with modifier tracking, and translates 3/4-byte mouse packets into desktop coordinate updates.
 
@@ -228,6 +231,11 @@
   - Resolves `cosmicos.local` to the system's IPv4 address (`A` record).
   - DNS Service Discovery (DNS-SD) advertising running system daemons: HTTP Web Server (`_http._tcp.local`, port 80), SSH Remote Shell (`_ssh._tcp.local`, port 22), and Telnet Server (`_telnet._tcp.local`, port 23), along with service enumeration (`_services._dns-sd._udp.local`).
   - Generates authoritative answer frames with PTR, SRV, TXT, and A resource records.
+- **DHCP Client Daemon ([`dhcp.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/net/dhcp.rs))**:
+  - RFC 2131 / RFC 2132 compliant dynamic host configuration client running over UDP client port 68 / server port 67 with magic cookie `0x63825363`.
+  - Full state machine (`Init`, `Selecting`, `Requesting`, `Bound`), handling `DHCPDISCOVER`, `DHCPOFFER`, `DHCPREQUEST`, `DHCPACK`, and `DHCPRELEASE`.
+  - Automatic dynamic lease acquisition: extracts assigned IPv4, subnet mask, default gateway router, DNS nameserver, server identifier, and lease duration, automatically applying network configurations into `NET_MANAGER`.
+  - Interactive shell management via `dhcp` command (`dhcp status`, `dhcp discover [interface]`, `dhcp release`).
 - **Hardware Network Drivers ([`src/drivers/net/`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/))**:
   - **Intel e1000 Gigabit NIC ([`e1000.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/e1000.rs))**: PCI controller (`en0`) with MMIO register control and hardware packet rings.
   - **Realtek Fast & Gigabit Ethernet ([`realtek.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/realtek.rs))**: Support for RTL8139 (10/100M Fast Ethernet), RTL8168/RTL8169 (PCI/PCIe Gigabit), and RTL8125 (2.5GbE Gaming NIC) with auto-switching MMIO/I/O port dispatch, hardware reset (`CMD_RST`), MAC extraction (`IDR0`..`IDR5`), 18 KiB RX ring buffer with wrap margin, and 4-descriptor TX rings (`en1`).
@@ -314,6 +322,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 | | `uniq` | Omit repeated adjacent lines |
 | | `\|`, `>`, `>>`, `<` | Shell pipelines and file redirection |
 | **Network & Web** | `ifconfig` | Display network interfaces (`lo0`, `en0`, `wlan0`) and IP configurations |
+| | `dhcp [subcmd]` | DHCP client manager (`status`, `discover`, `release`) |
 | | `ping <target>` | Send ICMP ECHO_REQUEST packets to network hosts |
 | | `nslookup <host>` | Resolve domain names to IPv4 addresses via DNS |
 | | `wifi [subcmd]` | 802.11 Wi-Fi manager (`scan`, `connect <ssid> <pass>`, `status`, `disconnect`) |
@@ -382,6 +391,9 @@ On startup, CosmicOS executes its automated self-test verification suite, verify
   [TEST] USB HID Keyboard & Mouse Input Subsystem ... [PASS]
   [TEST] mDNS / Bonjour ZeroConf Responder (cosmicos.local & DNS-SD) ... [PASS]
   [TEST] POSIX Shared Memory (shm_open, ftruncate, /dev/shm, mmap MAP_SHARED) ... [PASS]
+  [TEST] POSIX Semaphores & Message Queues (sem_*, mq_*) ... [PASS]
+  [TEST] DHCP Client Daemon (RFC 2131/2132 Discovery, Offer, Request, Lease) ... [PASS]
+  [TEST] NTFS Non-Resident Data Runlist Decoder & Fragmented Extents ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

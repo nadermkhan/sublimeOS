@@ -753,6 +753,274 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> i64 {
     -9 // -EBADF
 }
 
+pub fn sys_sem_open(name_ptr: *const u8, oflag: i32, mode: u32, value: u32) -> i64 {
+    if name_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+        Ok(s) => s,
+        Err(_) => return -22, // -EINVAL
+    };
+    let clean_name = raw_name.trim_start_matches('/');
+
+    let sem_obj = match crate::ipc::semaphore::SEMAPHORE_REGISTRY.lock().open_or_create(clean_name, oflag, mode, value) {
+        Ok(s) => s,
+        Err(_) => return -2, // -ENOENT or error
+    };
+
+    let file = Arc::new(crate::fs::vfs::File::new(sem_obj, oflag as u32));
+    let current_pid = get_current_pid();
+    let proc = match get_process(current_pid) {
+        Some(p) => p,
+        None => {
+            let pcb = Arc::new(IrqSafeSpinlock::new(ProcessControlBlock::new(current_pid, 0, "proc")));
+            PROCESS_TABLE.lock().push(pcb.clone());
+            pcb
+        }
+    };
+
+    let res = if let Some(fd) = proc.lock().alloc_fd(file) {
+        fd as i64
+    } else {
+        -24 // -EMFILE
+    };
+    res
+}
+
+pub fn sys_sem_close(fd: usize) -> i64 {
+    sys_close(fd)
+}
+
+pub fn sys_sem_post(fd: usize) -> i64 {
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if let Some(file) = p.get_fd(fd) {
+            let inode = file.inode.clone();
+            drop(p);
+            return match inode.lock().sem_post() {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            };
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_sem_wait(fd: usize) -> i64 {
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if let Some(file) = p.get_fd(fd) {
+            let inode = file.inode.clone();
+            drop(p);
+            return match inode.lock().sem_wait() {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            };
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_sem_trywait(fd: usize) -> i64 {
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if let Some(file) = p.get_fd(fd) {
+            let inode = file.inode.clone();
+            drop(p);
+            return match inode.lock().sem_trywait() {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            };
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_sem_getvalue(fd: usize, sval_ptr: *mut i32) -> i64 {
+    if sval_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if let Some(file) = p.get_fd(fd) {
+            let inode = file.inode.clone();
+            drop(p);
+            return match inode.lock().sem_getvalue() {
+                Ok(val) => {
+                    unsafe { *sval_ptr = val; }
+                    0
+                }
+                Err(e) => e as i64,
+            };
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_sem_unlink(name_ptr: *const u8) -> i64 {
+    if name_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+        Ok(s) => s,
+        Err(_) => return -22, // -EINVAL
+    };
+    let clean_name = raw_name.trim_start_matches('/');
+    if crate::ipc::semaphore::SEMAPHORE_REGISTRY.lock().unlink(clean_name) {
+        0
+    } else {
+        -2 // -ENOENT
+    }
+}
+
+pub fn sys_mq_open(name_ptr: *const u8, oflag: i32, attr_ptr: *const crate::ipc::mqueue::MqAttr) -> i64 {
+    if name_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+        Ok(s) => s,
+        Err(_) => return -22, // -EINVAL
+    };
+    let clean_name = raw_name.trim_start_matches('/');
+    let attr = if !attr_ptr.is_null() {
+        Some(unsafe { *attr_ptr })
+    } else {
+        None
+    };
+
+    let mq_obj = match crate::ipc::mqueue::MQUEUE_REGISTRY.lock().open_or_create(clean_name, oflag, attr) {
+        Ok(mq) => mq,
+        Err(_) => return -2,
+    };
+
+    let file = Arc::new(crate::fs::vfs::File::new(mq_obj, oflag as u32));
+    let current_pid = get_current_pid();
+    let proc = match get_process(current_pid) {
+        Some(p) => p,
+        None => {
+            let pcb = Arc::new(IrqSafeSpinlock::new(ProcessControlBlock::new(current_pid, 0, "proc")));
+            PROCESS_TABLE.lock().push(pcb.clone());
+            pcb
+        }
+    };
+
+    let res = if let Some(fd) = proc.lock().alloc_fd(file) {
+        fd as i64
+    } else {
+        -24 // -EMFILE
+    };
+    res
+}
+
+pub fn sys_mq_send(fd: usize, msg_ptr: *const u8, msg_len: usize, msg_prio: u32) -> i64 {
+    if msg_ptr.is_null() && msg_len > 0 {
+        return -14; // -EFAULT
+    }
+    let slice = if msg_len > 0 {
+        unsafe { core::slice::from_raw_parts(msg_ptr, msg_len) }
+    } else {
+        &[]
+    };
+
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if let Some(file) = p.get_fd(fd) {
+            let inode = file.inode.clone();
+            drop(p);
+            return match inode.lock().mq_send(slice, msg_prio, false) {
+                Ok(()) => 0,
+                Err(e) => e as i64,
+            };
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_mq_receive(fd: usize, msg_ptr: *mut u8, msg_len: usize, msg_prio_ptr: *mut u32) -> i64 {
+    if msg_ptr.is_null() || msg_len == 0 {
+        return -14; // -EFAULT
+    }
+    let slice = unsafe { core::slice::from_raw_parts_mut(msg_ptr, msg_len) };
+
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if let Some(file) = p.get_fd(fd) {
+            let inode = file.inode.clone();
+            drop(p);
+            return match inode.lock().mq_receive(slice, msg_len, false) {
+                Ok((bytes, prio)) => {
+                    if !msg_prio_ptr.is_null() {
+                        unsafe { *msg_prio_ptr = prio; }
+                    }
+                    bytes as i64
+                }
+                Err(e) => e as i64,
+            };
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_mq_getattr(fd: usize, attr_ptr: *mut crate::ipc::mqueue::MqAttr) -> i64 {
+    if attr_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if let Some(file) = p.get_fd(fd) {
+            let inode = file.inode.clone();
+            drop(p);
+            return match inode.lock().mq_getattr() {
+                Ok(attr) => {
+                    unsafe { *attr_ptr = attr; }
+                    0
+                }
+                Err(e) => e as i64,
+            };
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_mq_unlink(name_ptr: *const u8) -> i64 {
+    if name_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+        Ok(s) => s,
+        Err(_) => return -22, // -EINVAL
+    };
+    let clean_name = raw_name.trim_start_matches('/');
+    if crate::ipc::mqueue::MQUEUE_REGISTRY.lock().unlink(clean_name) {
+        0
+    } else {
+        -2 // -ENOENT
+    }
+}
+
 pub fn sys_close(fd: usize) -> i64 {
     let current_pid = get_current_pid();
     if let Some(proc) = get_process(current_pid) {

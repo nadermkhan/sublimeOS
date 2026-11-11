@@ -73,6 +73,24 @@ pub unsafe fn syscall3(num: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
+/// Fast AMD64 Userspace System Call Gateway (4 arguments)
+#[inline(always)]
+pub unsafe fn syscall4(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "syscall",
+        inlateout("rax") num => ret,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        in("r10") a4,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack, preserves_flags)
+    );
+    ret
+}
+
 /// Fast AMD64 Userspace System Call Gateway (6 arguments)
 #[inline(always)]
 pub unsafe fn syscall6(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
@@ -451,6 +469,97 @@ pub fn shm_unlink(name: &str) -> i32 {
     } else {
         -2 // -ENOENT
     }
+}
+
+/// POSIX sem_open() wrapper
+pub fn sem_open(name: &str, oflag: i32, mode: u32, value: u32) -> i32 {
+    let mut null_terminated = alloc::string::String::from(name);
+    null_terminated.push('\0');
+    unsafe {
+        syscall4(SYS_SEM_OPEN, null_terminated.as_ptr() as u64, oflag as u64, mode as u64, value as u64) as i32
+    }
+}
+
+/// POSIX sem_close() wrapper
+pub fn sem_close(fd: usize) -> i32 {
+    unsafe { syscall1(SYS_SEM_CLOSE, fd as u64) as i32 }
+}
+
+/// POSIX sem_post() wrapper
+pub fn sem_post(fd: usize) -> i32 {
+    unsafe { syscall1(SYS_SEM_POST, fd as u64) as i32 }
+}
+
+/// POSIX sem_wait() wrapper
+pub fn sem_wait(fd: usize) -> i32 {
+    unsafe { syscall1(SYS_SEM_WAIT, fd as u64) as i32 }
+}
+
+/// POSIX sem_trywait() wrapper
+pub fn sem_trywait(fd: usize) -> i32 {
+    unsafe { syscall1(SYS_SEM_TRYWAIT, fd as u64) as i32 }
+}
+
+/// POSIX sem_getvalue() wrapper
+pub fn sem_getvalue(fd: usize, sval: &mut i32) -> i32 {
+    unsafe { syscall2(SYS_SEM_GETVALUE, fd as u64, sval as *mut i32 as u64) as i32 }
+}
+
+/// POSIX sem_unlink() wrapper
+pub fn sem_unlink(name: &str) -> i32 {
+    let mut null_terminated = alloc::string::String::from(name);
+    null_terminated.push('\0');
+    unsafe { syscall1(SYS_SEM_UNLINK, null_terminated.as_ptr() as u64) as i32 }
+}
+
+/// POSIX mq_open() wrapper
+pub fn mq_open(name: &str, oflag: i32, attr: Option<&crate::ipc::mqueue::MqAttr>) -> i32 {
+    let mut null_terminated = alloc::string::String::from(name);
+    null_terminated.push('\0');
+    let attr_ptr = match attr {
+        Some(a) => a as *const crate::ipc::mqueue::MqAttr as u64,
+        None => 0,
+    };
+    unsafe {
+        syscall3(SYS_MQ_OPEN, null_terminated.as_ptr() as u64, oflag as u64, attr_ptr) as i32
+    }
+}
+
+/// POSIX mq_send() wrapper
+pub fn mq_send(fd: usize, msg: &[u8], prio: u32) -> i32 {
+    unsafe {
+        syscall4(SYS_MQ_SEND, fd as u64, msg.as_ptr() as u64, msg.len() as u64, prio as u64) as i32
+    }
+}
+
+/// POSIX mq_receive() wrapper
+pub fn mq_receive(fd: usize, buf: &mut [u8], prio: Option<&mut u32>) -> isize {
+    let prio_ptr = match prio {
+        Some(p) => p as *mut u32 as u64,
+        None => 0,
+    };
+    unsafe {
+        syscall4(SYS_MQ_RECEIVE, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64, prio_ptr) as isize
+    }
+}
+
+/// POSIX mq_getattr() wrapper
+pub fn mq_getattr(fd: usize, attr: &mut crate::ipc::mqueue::MqAttr) -> i32 {
+    unsafe {
+        syscall2(SYS_MQ_GETATTR, fd as u64, attr as *mut crate::ipc::mqueue::MqAttr as u64) as i32
+    }
+}
+
+/// POSIX mq_close() wrapper
+pub fn mq_close(fd: usize) -> i32 {
+    unsafe { syscall1(SYS_CLOSE, fd as u64) as i32 }
+}
+
+/// POSIX mq_unlink() wrapper
+pub fn mq_unlink(name: &str) -> i32 {
+    let mut null_terminated = alloc::string::String::from(name);
+    null_terminated.push('\0');
+    unsafe { syscall1(SYS_MQ_UNLINK, null_terminated.as_ptr() as u64) as i32 }
 }
 
 /// POSIX exit() system call wrapper

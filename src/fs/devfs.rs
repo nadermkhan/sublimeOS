@@ -41,6 +41,8 @@ impl DevFsDirectory {
         entries.insert(String::from("ptmx"), Arc::new(IrqSafeSpinlock::new(crate::tty::pty::PtmxDev)));
         entries.insert(String::from("pts"), Arc::new(IrqSafeSpinlock::new(crate::tty::pty::PtsDirectory)));
         entries.insert(String::from("shm"), Arc::new(IrqSafeSpinlock::new(crate::mm::shm::ShmDirectory)));
+        entries.insert(String::from("sem"), Arc::new(IrqSafeSpinlock::new(crate::ipc::semaphore::SemDirectory)));
+        entries.insert(String::from("mqueue"), Arc::new(IrqSafeSpinlock::new(crate::ipc::mqueue::MqueueDirectory)));
         entries.insert(String::from("ttyS0"), Arc::new(IrqSafeSpinlock::new(crate::arch::x86_64::serial::UartDev(0))));
         entries.insert(String::from("ttyS1"), Arc::new(IrqSafeSpinlock::new(crate::arch::x86_64::serial::UartDev(1))));
 

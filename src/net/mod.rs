@@ -74,10 +74,9 @@ pub fn poll() {
                                         if let Some((msg_type, lease)) = dhcp::parse_dhcp_packet(udp_payload) {
                                             if msg_type == dhcp::DHCP_OFFER {
                                                 // Send DHCP Request
-                                                let req_payload = dhcp::build_dhcp_request(dev.mac_address(), lease.assigned_ip, src_ip, 0x3903F326);
-                                                let udp_pkt = udp::build_udp_packet(udp::PORT_DHCP_CLIENT, udp::PORT_DHCP_SERVER, &req_payload);
-                                                let ip_pkt = ip::build_ipv4_packet([0, 0, 0, 0], [255, 255, 255, 255], ip::IP_PROTO_UDP, &udp_pkt);
-                                                let frame = ethernet::build_frame(ethernet::BROADCAST_MAC, dev.mac_address(), ETHERTYPE_IPV4, &ip_pkt);
+                                                let srv = if lease.server_id != [0, 0, 0, 0] { lease.server_id } else { src_ip };
+                                                let req_payload = dhcp::build_dhcp_request(dev.mac_address(), lease.assigned_ip, srv, 0x3903F326);
+                                                let frame = dhcp::build_dhcp_ethernet_frame(&req_payload, dev.mac_address());
                                                 let _ = dev.send_packet(&frame);
                                             } else if msg_type == dhcp::DHCP_ACK {
                                                 dhcp::apply_dhcp_lease(dev.name(), lease);

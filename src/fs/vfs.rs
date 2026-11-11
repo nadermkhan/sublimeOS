@@ -76,6 +76,15 @@ pub trait InodeOperations: Send + Sync {
         None
     }
 
+    fn sem_wait(&self) -> Result<(), i32> { Err(-22) }
+    fn sem_trywait(&self) -> Result<(), i32> { Err(-22) }
+    fn sem_post(&self) -> Result<(), i32> { Err(-22) }
+    fn sem_getvalue(&self) -> Result<i32, i32> { Err(-22) }
+
+    fn mq_send(&self, _data: &[u8], _prio: u32, _nonblock: bool) -> Result<(), i32> { Err(-22) }
+    fn mq_receive(&self, _buf: &mut [u8], _max_len: usize, _nonblock: bool) -> Result<(usize, u32), i32> { Err(-22) }
+    fn mq_getattr(&self) -> Result<crate::ipc::mqueue::MqAttr, i32> { Err(-22) }
+
     fn stat(&self) -> Stat;
 }
 

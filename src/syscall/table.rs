@@ -47,3 +47,17 @@ pub const SYS_GETPGID: u64 = 121;
 pub const SYS_GETSID: u64 = 124;
 pub const SYS_SCHED_SETAFFINITY: u64 = 203;
 pub const SYS_SCHED_GETAFFINITY: u64 = 204;
+
+pub const SYS_SEM_OPEN: u64 = 240;
+pub const SYS_SEM_CLOSE: u64 = 241;
+pub const SYS_SEM_POST: u64 = 242;
+pub const SYS_SEM_WAIT: u64 = 243;
+pub const SYS_SEM_TRYWAIT: u64 = 244;
+pub const SYS_SEM_GETVALUE: u64 = 245;
+pub const SYS_SEM_UNLINK: u64 = 246;
+
+pub const SYS_MQ_OPEN: u64 = 247;
+pub const SYS_MQ_SEND: u64 = 248;
+pub const SYS_MQ_RECEIVE: u64 = 249;
+pub const SYS_MQ_UNLINK: u64 = 250;
+pub const SYS_MQ_GETATTR: u64 = 251;

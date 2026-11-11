@@ -64,6 +64,18 @@ pub extern "C" fn syscall_dispatcher(
         SYS_RT_SIGPROCMASK => crate::task::process::sys_rt_sigprocmask(a1 as i32, a2 as *const u64, a3 as *mut u64, _a4 as usize) as i64,
         SYS_SCHED_SETAFFINITY => crate::task::process::sys_sched_setaffinity(a1 as i32, a2 as usize, a3 as *const u64) as i64,
         SYS_SCHED_GETAFFINITY => crate::task::process::sys_sched_getaffinity(a1 as i32, a2 as usize, a3 as *mut u64) as i64,
+        SYS_SEM_OPEN => crate::task::process::sys_sem_open(a1 as *const u8, a2 as i32, a3 as u32, _a4 as u32),
+        SYS_SEM_CLOSE => crate::task::process::sys_sem_close(a1 as usize),
+        SYS_SEM_POST => crate::task::process::sys_sem_post(a1 as usize),
+        SYS_SEM_WAIT => crate::task::process::sys_sem_wait(a1 as usize),
+        SYS_SEM_TRYWAIT => crate::task::process::sys_sem_trywait(a1 as usize),
+        SYS_SEM_GETVALUE => crate::task::process::sys_sem_getvalue(a1 as usize, a2 as *mut i32),
+        SYS_SEM_UNLINK => crate::task::process::sys_sem_unlink(a1 as *const u8),
+        SYS_MQ_OPEN => crate::task::process::sys_mq_open(a1 as *const u8, a2 as i32, a3 as *const crate::ipc::mqueue::MqAttr),
+        SYS_MQ_SEND => crate::task::process::sys_mq_send(a1 as usize, a2 as *const u8, a3 as usize, _a4 as u32),
+        SYS_MQ_RECEIVE => crate::task::process::sys_mq_receive(a1 as usize, a2 as *mut u8, a3 as usize, _a4 as *mut u32),
+        SYS_MQ_GETATTR => crate::task::process::sys_mq_getattr(a1 as usize, a2 as *mut crate::ipc::mqueue::MqAttr),
+        SYS_MQ_UNLINK => crate::task::process::sys_mq_unlink(a1 as *const u8),
         SYS_EXIT => crate::task::user::handle_user_exit(a1 as i32),
         _ => -38, // -ENOSYS
     }

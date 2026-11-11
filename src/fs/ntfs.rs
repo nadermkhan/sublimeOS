@@ -182,15 +182,20 @@ impl NtfsInode {
                     }
                 } else {
                     // Non-resident data: decode NTFS data runs
-                    let data_size = (self.raw_record[attr_off + 48] as usize)
-                        | ((self.raw_record[attr_off + 49] as usize) << 8)
-                        | ((self.raw_record[attr_off + 50] as usize) << 16)
-                        | ((self.raw_record[attr_off + 51] as usize) << 24);
+                    let data_size = (self.raw_record[attr_off + 48] as u64)
+                        | ((self.raw_record[attr_off + 49] as u64) << 8)
+                        | ((self.raw_record[attr_off + 50] as u64) << 16)
+                        | ((self.raw_record[attr_off + 51] as u64) << 24)
+                        | ((self.raw_record[attr_off + 52] as u64) << 32)
+                        | ((self.raw_record[attr_off + 53] as u64) << 40)
+                        | ((self.raw_record[attr_off + 54] as u64) << 48)
+                        | ((self.raw_record[attr_off + 55] as u64) << 56);
 
-                    if offset >= data_size {
+                    let data_sz = data_size as usize;
+                    if offset >= data_sz {
                         return Ok(0);
                     }
-                    let bytes_to_read = buf.len().min(data_size - offset);
+                    let bytes_to_read = buf.len().min(data_sz - offset);
                     let runs_offset = (self.raw_record[attr_off + 32] as usize)
                         | ((self.raw_record[attr_off + 33] as usize) << 8);
 
@@ -204,16 +209,14 @@ impl NtfsInode {
         Ok(0)
     }
 
-    /// Decode NTFS Data Runs and read bytes into output buffer.
-    fn read_from_data_runs(&self, mut run_offset: usize, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
-        let cluster_bytes = (self.fs.sectors_per_cluster * 512) as usize;
+    /// Parse and decode NTFS mapping-pair data runs into a vector of (cluster_count, Option<lcn>).
+    /// If Option<lcn> is None, it is a sparse run.
+    pub fn decode_runlist(raw_record: &[u8], mut run_offset: usize) -> Vec<(u64, Option<i64>)> {
+        let mut runs = Vec::new();
         let mut curr_lcn = 0i64;
-        let mut logical_byte_pos = 0usize;
-        let mut bytes_read = 0usize;
-        let mut cluster_buf = [0u8; 4096];
 
-        while run_offset < self.raw_record.len() && bytes_read < buf.len() {
-            let header = self.raw_record[run_offset];
+        while run_offset < raw_record.len() {
+            let header = raw_record[run_offset];
             if header == 0 {
                 break;
             }
@@ -222,48 +225,132 @@ impl NtfsInode {
             let len_bytes = (header & 0x0F) as usize;
             let off_bytes = ((header >> 4) & 0x0F) as usize;
 
+            if run_offset + len_bytes + off_bytes > raw_record.len() {
+                break;
+            }
+
             let mut run_len = 0u64;
             for b in 0..len_bytes {
-                run_len |= (self.raw_record[run_offset + b] as u64) << (b * 8);
+                run_len |= (raw_record[run_offset + b] as u64) << (b * 8);
             }
             run_offset += len_bytes;
 
-            let mut lcn_delta = 0i64;
-            for b in 0..off_bytes {
-                lcn_delta |= (self.raw_record[run_offset + b] as i64) << (b * 8);
-            }
-            // Sign extend
-            if off_bytes > 0 && (self.raw_record[run_offset + off_bytes - 1] & 0x80) != 0 {
-                for b in off_bytes..8 {
-                    lcn_delta |= 0xFFi64 << (b * 8);
+            if off_bytes == 0 {
+                // Sparse run
+                runs.push((run_len, None));
+            } else {
+                let mut lcn_delta = 0i64;
+                for b in 0..off_bytes {
+                    lcn_delta |= (raw_record[run_offset + b] as i64) << (b * 8);
                 }
+                // Sign extension for 2's complement
+                if (raw_record[run_offset + off_bytes - 1] & 0x80) != 0 {
+                    for b in off_bytes..8 {
+                        lcn_delta |= 0xFFi64 << (b * 8);
+                    }
+                }
+                run_offset += off_bytes;
+
+                curr_lcn += lcn_delta;
+                runs.push((run_len, Some(curr_lcn)));
             }
-            run_offset += off_bytes;
+        }
 
-            curr_lcn += lcn_delta;
+        runs
+    }
 
+    /// Decode NTFS Data Runs and read bytes into output buffer.
+    fn read_from_data_runs(&self, run_offset: usize, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+        let cluster_bytes = (self.fs.sectors_per_cluster * 512) as usize;
+        let runs = Self::decode_runlist(&self.raw_record, run_offset);
+
+        let mut logical_byte_pos = 0usize;
+        let mut bytes_read = 0usize;
+        let mut sector_buf = [0u8; 512];
+
+        for (run_len, lcn_opt) in runs {
             let run_bytes = (run_len as usize) * cluster_bytes;
-            while bytes_read < buf.len() && (offset + bytes_read) < (logical_byte_pos + run_bytes) {
-                if (offset + bytes_read) < logical_byte_pos {
-                    break;
+            let run_end = logical_byte_pos + run_bytes;
+
+            if (offset + bytes_read) < run_end && (offset + bytes_read) >= logical_byte_pos {
+                while bytes_read < buf.len() && (offset + bytes_read) < run_end {
+                    let offset_in_run = (offset + bytes_read) - logical_byte_pos;
+                    let sector_in_run = offset_in_run / 512;
+                    let offset_in_sector = offset_in_run % 512;
+                    let chunk = (buf.len() - bytes_read).min(512 - offset_in_sector);
+
+                    match lcn_opt {
+                        Some(lcn) => {
+                            let cluster_in_run = sector_in_run / (self.fs.sectors_per_cluster as usize);
+                            let sector_in_cluster = sector_in_run % (self.fs.sectors_per_cluster as usize);
+                            let cluster = (lcn as u64) + (cluster_in_run as u64);
+                            let lba = self.fs.cluster_to_lba(cluster) + (sector_in_cluster as u64);
+
+                            self.fs.device.read_sectors(lba, 1, &mut sector_buf)?;
+                            buf[bytes_read..bytes_read + chunk].copy_from_slice(&sector_buf[offset_in_sector..offset_in_sector + chunk]);
+                        }
+                        None => {
+                            // Sparse run: fill with zeros
+                            buf[bytes_read..bytes_read + chunk].fill(0);
+                        }
+                    }
+
+                    bytes_read += chunk;
                 }
-                let offset_in_run = (offset + bytes_read) - logical_byte_pos;
-                let cluster_idx_in_run = offset_in_run / cluster_bytes;
-                let offset_in_cluster = offset_in_run % cluster_bytes;
-
-                let lba = self.fs.cluster_to_lba((curr_lcn as u64) + cluster_idx_in_run as u64);
-                let sectors = self.fs.sectors_per_cluster.min(8);
-
-                self.fs.device.read_sectors(lba, sectors, &mut cluster_buf[..((sectors * 512) as usize)])?;
-                let chunk = (buf.len() - bytes_read).min(cluster_bytes - offset_in_cluster);
-                buf[bytes_read..bytes_read + chunk].copy_from_slice(&cluster_buf[offset_in_cluster..offset_in_cluster + chunk]);
-                bytes_read += chunk;
             }
 
-            logical_byte_pos += run_bytes;
+            logical_byte_pos = run_end;
+            if bytes_read >= buf.len() {
+                break;
+            }
         }
 
         Ok(bytes_read)
+    }
+
+    /// Get exact file size by scanning the $DATA attribute (resident or non-resident).
+    pub fn get_exact_size(&self) -> usize {
+        let mut attr_off = (self.raw_record[20] as usize) | ((self.raw_record[21] as usize) << 8);
+
+        while attr_off + 8 <= self.raw_record.len() {
+            let attr_type = (self.raw_record[attr_off] as u32)
+                | ((self.raw_record[attr_off + 1] as u32) << 8)
+                | ((self.raw_record[attr_off + 2] as u32) << 16)
+                | ((self.raw_record[attr_off + 3] as u32) << 24);
+
+            if attr_type == 0xFFFFFFFF {
+                break;
+            }
+
+            let attr_len = (self.raw_record[attr_off + 4] as usize)
+                | ((self.raw_record[attr_off + 5] as usize) << 8);
+            if attr_len == 0 || attr_off + attr_len > self.raw_record.len() {
+                break;
+            }
+
+            if attr_type == 0x80 {
+                let non_resident = self.raw_record[attr_off + 8];
+                if non_resident == 0 {
+                    let val_len = (self.raw_record[attr_off + 16] as usize)
+                        | ((self.raw_record[attr_off + 17] as usize) << 8);
+                    return val_len;
+                } else {
+                    let real_size = (self.raw_record[attr_off + 48] as u64)
+                        | ((self.raw_record[attr_off + 49] as u64) << 8)
+                        | ((self.raw_record[attr_off + 50] as u64) << 16)
+                        | ((self.raw_record[attr_off + 51] as u64) << 24)
+                        | ((self.raw_record[attr_off + 52] as u64) << 32)
+                        | ((self.raw_record[attr_off + 53] as u64) << 40)
+                        | ((self.raw_record[attr_off + 54] as u64) << 48)
+                        | ((self.raw_record[attr_off + 55] as u64) << 56);
+                    return real_size as usize;
+                }
+            }
+
+            attr_off += attr_len;
+        }
+
+        self.size
     }
 }
 
@@ -322,7 +409,7 @@ impl InodeOperations for NtfsInode {
     fn stat(&self) -> Stat {
         Stat {
             inode: self.mft_record_num,
-            size: self.size,
+            size: self.get_exact_size(),
             file_type: self.file_type,
             mode: if self.file_type == FileType::Directory { 0o755 } else { 0o644 },
         }
