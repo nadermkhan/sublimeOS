@@ -60,6 +60,39 @@ impl PciBus {
         inl(PCI_CONFIG_DATA)
     }
 
+    pub unsafe fn write_config_dword(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+        let address = ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | ((offset as u32) & 0xFC)
+            | 0x80000000;
+
+        outl(PCI_CONFIG_ADDRESS, address);
+        outl(PCI_CONFIG_DATA, value);
+    }
+
+    pub unsafe fn write_config_word(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+        let address = ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | ((offset as u32) & 0xFC)
+            | 0x80000000;
+
+        outl(PCI_CONFIG_ADDRESS, address);
+        let orig = inl(PCI_CONFIG_DATA);
+        let shift = ((offset & 2) * 8) as u32;
+        let mask = !(0xFFFFu32 << shift);
+        let new_val = (orig & mask) | ((value as u32) << shift);
+        outl(PCI_CONFIG_ADDRESS, address);
+        outl(PCI_CONFIG_DATA, new_val);
+    }
+
+    pub unsafe fn enable_bus_mastering(bus: u8, device: u8, function: u8) {
+        let cmd = Self::read_config_dword(bus, device, function, 0x04);
+        // Bit 1: Memory Space Enable (0x02), Bit 2: Bus Master Enable (0x04)
+        Self::write_config_word(bus, device, function, 0x04, (cmd as u16) | 0x0006);
+    }
+
     pub fn scan_bus(&mut self) {
         self.devices.clear();
 

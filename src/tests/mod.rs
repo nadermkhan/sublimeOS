@@ -21,6 +21,7 @@ pub fn run_all_tests() {
     test_exfat();
     test_ext4();
     test_ntfs();
+    test_usb_mass_storage();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -421,6 +422,98 @@ fn test_ntfs() {
     let n = file.lock().read(0, &mut buf).expect("Failed to read TEST.TXT");
     assert_eq!(n, 18);
     assert_eq!(&buf, b"Hello NTFS Driver!");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+struct MockUsbTransport {
+    storage: IrqSafeSpinlock<Vec<u8>>,
+    last_lba: IrqSafeSpinlock<u64>,
+}
+
+impl MockUsbTransport {
+    fn new(sectors: usize) -> Arc<Self> {
+        let mut v = Vec::with_capacity(sectors * 512);
+        v.resize(sectors * 512, 0);
+        Arc::new(Self {
+            storage: IrqSafeSpinlock::new(v),
+            last_lba: IrqSafeSpinlock::new(0),
+        })
+    }
+}
+
+impl crate::drivers::usb::msc::UsbMassStorageTransport for MockUsbTransport {
+    fn bulk_out(&self, data: &[u8]) -> Result<(), &'static str> {
+        if data.len() == 31 {
+            // CBW
+            let cdb_cmd = data[15];
+            if cdb_cmd == crate::drivers::usb::msc::SCSI_READ_10 || cdb_cmd == crate::drivers::usb::msc::SCSI_WRITE_10 {
+                let lba = ((data[17] as u64) << 24) | ((data[18] as u64) << 16) | ((data[19] as u64) << 8) | (data[20] as u64);
+                *self.last_lba.lock() = lba;
+            }
+        } else {
+            // Write data
+            let lba = *self.last_lba.lock();
+            let start = (lba as usize) * 512;
+            let end = start + data.len();
+            let mut store = self.storage.lock();
+            if end <= store.len() {
+                store[start..end].copy_from_slice(data);
+            }
+        }
+        Ok(())
+    }
+
+    fn bulk_in(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
+        if buf.len() == 36 {
+            // SCSI Inquiry response
+            buf[0] = 0x00; // Direct-access block device (disk)
+            buf[1] = 0x80; // Removable media
+            buf[8..16].copy_from_slice(b"SanDisk ");
+            buf[16..32].copy_from_slice(b"Ultra Fit USB3.0");
+            Ok(36)
+        } else if buf.len() == 8 {
+            // SCSI Read Capacity 10 response
+            buf[0] = 0; buf[1] = 0; buf[2] = 0x07; buf[3] = 0xFF; // 2047
+            buf[4] = 0; buf[5] = 0; buf[6] = 0x02; buf[7] = 0x00; // 512 bytes
+            Ok(8)
+        } else if buf.len() == 13 {
+            // CSW response
+            buf[0] = 0x55; buf[1] = 0x53; buf[2] = 0x42; buf[3] = 0x53; // "USBS"
+            buf[12] = 0; // Status: Success
+            Ok(13)
+        } else {
+            // Sector read data
+            let lba = *self.last_lba.lock();
+            let start = (lba as usize) * 512;
+            let end = start + buf.len();
+            let store = self.storage.lock();
+            if end <= store.len() {
+                buf.copy_from_slice(&store[start..end]);
+            }
+            Ok(buf.len())
+        }
+    }
+}
+
+fn test_usb_mass_storage() {
+    print!("  [TEST] USB Mass Storage (SCSI / BOT) ... ");
+    let mock = MockUsbTransport::new(2048);
+    let dev = crate::drivers::usb::msc::UsbBlockDevice::probe(mock, String::from("usb0")).expect("USB probe failed");
+
+    assert_eq!(dev.name(), "usb0");
+    assert_eq!(dev.vendor, "SanDisk");
+    assert_eq!(dev.model, "Ultra Fit USB3.0");
+    assert_eq!(dev.total_sectors(), 2048);
+    assert_eq!(dev.sector_size(), 512);
+
+    // Test writing and reading via SCSI Read(10) / Write(10)
+    let test_data = [0x5A; 512];
+    dev.write_sectors(10, 1, &test_data).expect("USB write_sectors failed");
+
+    let mut read_buf = [0u8; 512];
+    dev.read_sectors(10, 1, &mut read_buf).expect("USB read_sectors failed");
+    assert_eq!(read_buf, test_data);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
