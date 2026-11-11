@@ -5,6 +5,12 @@ use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
 use crate::gui::font::{draw_char, draw_string, FONT_HEIGHT};
 
+pub struct SidebarItem {
+    pub label: &'static str,
+    pub path: &'static str,
+    pub icon: char,
+}
+
 pub struct FileManagerApp {
     pub current_path: String,
     pub entries: Vec<DirEntry>,
@@ -15,7 +21,7 @@ pub struct FileManagerApp {
 impl FileManagerApp {
     pub fn new() -> Self {
         let mut app = Self {
-            current_path: String::from("/etc"),
+            current_path: String::from("/Applications"),
             entries: Vec::new(),
             selected_index: 0,
             preview_text: String::new(),
@@ -65,7 +71,7 @@ impl FileManagerApp {
 
         let entry = &self.entries[self.selected_index];
         if entry.file_type == FileType::Directory {
-            self.preview_text = String::from("(Directory: double click or select to open)");
+            self.preview_text = String::from("Folder (click to navigate)");
             return;
         }
 
@@ -82,25 +88,46 @@ impl FileManagerApp {
                 if let Ok(s) = core::str::from_utf8(&buf[..bytes_read]) {
                     self.preview_text = String::from(s);
                 } else {
-                    self.preview_text = String::from("(Binary content)");
+                    self.preview_text = String::from("(Binary object / Mach-O)");
                 }
             }
         }
     }
 
     pub fn handle_click(&mut self, x: i32, y: i32, inner_x: i32, inner_y: i32, w: i32, _h: i32) {
-        let left_w = 110;
+        let left_w = 136;
 
-        // Check directory tree buttons on left
+        // Check sidebar clicks
         if x >= inner_x && x <= inner_x + left_w {
-            let dirs = ["/", "/etc", "/proc", "/dev", "/bin", "/tmp"];
-            let mut dy = inner_y + 8;
-            for dir in dirs.iter() {
-                if y >= dy && y <= dy + 24 {
-                    self.navigate_to(dir);
+            let mut dy = inner_y + 24; // start below Favorites label
+            let favorites = [
+                "/Applications",
+                "/Users/cosmos/Desktop",
+                "/Users/cosmos/Documents",
+                "/Users/cosmos/Downloads",
+            ];
+
+            for path in favorites.iter() {
+                if y >= dy && y <= dy + 22 {
+                    self.navigate_to(path);
                     return;
                 }
-                dy += 26;
+                dy += 24;
+            }
+
+            dy += 20; // skip Locations label
+            let locations = [
+                "/Volumes/Macintosh HD",
+                "/Volumes/Cosmos USB",
+                "/",
+            ];
+
+            for path in locations.iter() {
+                if y >= dy && y <= dy + 22 {
+                    self.navigate_to(path);
+                    return;
+                }
+                dy += 24;
             }
         }
 
@@ -108,107 +135,149 @@ impl FileManagerApp {
         let right_x = inner_x + left_w + 6;
         let right_w = w - left_w - 12;
         if x >= right_x && x <= right_x + right_w {
-            let mut dy = inner_y + 30;
+            let mut dy = inner_y + 36;
             for idx in 0..self.entries.len() {
-                if y >= dy && y <= dy + 20 {
+                if y >= dy && y <= dy + 22 {
                     self.select_item(idx);
                     return;
                 }
-                dy += 22;
+                dy += 24;
             }
         }
     }
 
     pub fn render(&self, canvas: &mut Canvas, x: i32, y: i32, w: i32, h: i32) {
-        canvas.fill_rect(x, y, w, h, Color::BG_INPUT);
+        canvas.fill_rect(x, y, w, h, Color::argb(255, 30, 32, 44));
 
-        let left_w = 110;
+        let left_w = 136;
         let mid_x = x + left_w;
 
-        // 1. Left Sidebar: Places / Bookmarks
-        canvas.fill_rect(x, y, left_w, h, Color::BG_CARD);
-        canvas.fill_rect(mid_x, y, 1, h, Color::WINDOW_BORDER);
+        // 1. Finder Sidebar (Vibrant Translucent Dark)
+        canvas.fill_rect(x, y, left_w, h, Color::argb(255, 24, 25, 34));
+        canvas.fill_rect(mid_x, y, 1, h, Color::argb(50, 255, 255, 255));
 
-        let dirs = ["/", "/etc", "/proc", "/dev", "/bin", "/tmp"];
         let mut dy = y + 8;
 
-        for &dir in dirs.iter() {
-            let is_curr = self.current_path == dir;
+        // Favorites Category
+        draw_string(canvas, x + 10, dy, "Favorites", Color::TEXT_MUTED);
+        dy += 16;
+
+        let favorites = [
+            ("Applications", "/Applications", 'A'),
+            ("Desktop", "/Users/cosmos/Desktop", 'D'),
+            ("Documents", "/Users/cosmos/Documents", 'F'),
+            ("Downloads", "/Users/cosmos/Downloads", 'v'),
+        ];
+
+        for (name, path, icon) in favorites.iter() {
+            let is_curr = self.current_path == *path;
             if is_curr {
-                canvas.fill_rounded_rect(x + 4, dy, left_w - 8, 22, 4, Color::TITLEBAR_ACTIVE_START);
+                canvas.fill_rounded_rect(x + 6, dy, left_w - 12, 22, 5, Color::ACCENT_BLUE);
             }
-            draw_char(canvas, x + 8, dy + 3, '@', Color::ACCENT_YELLOW);
+            draw_char(canvas, x + 10, dy + 3, *icon, if is_curr { Color::WHITE } else { Color::ACCENT_CYAN });
             draw_string(
                 canvas,
                 x + 24,
                 dy + 3,
-                dir,
+                name,
                 if is_curr { Color::WHITE } else { Color::TEXT_PRIMARY },
             );
-            dy += 26;
+            dy += 24;
         }
 
-        // 2. Right Pane: Current Path Bar
-        let right_x = mid_x + 6;
-        let right_w = w - left_w - 12;
+        dy += 8;
+        // Locations Category
+        draw_string(canvas, x + 10, dy, "Locations", Color::TEXT_MUTED);
+        dy += 16;
 
-        let mut path_bar = String::from("Path: ");
+        let locations = [
+            ("Macintosh HD", "/Volumes/Macintosh HD", 'M'),
+            ("Cosmos USB", "/Volumes/Cosmos USB", 'U'),
+            ("Root /", "/", '/'),
+        ];
+
+        for (name, path, icon) in locations.iter() {
+            let is_curr = self.current_path == *path;
+            if is_curr {
+                canvas.fill_rounded_rect(x + 6, dy, left_w - 12, 22, 5, Color::ACCENT_BLUE);
+            }
+            draw_char(canvas, x + 10, dy + 3, *icon, if is_curr { Color::WHITE } else { Color::ACCENT_YELLOW });
+            draw_string(
+                canvas,
+                x + 24,
+                dy + 3,
+                name,
+                if is_curr { Color::WHITE } else { Color::TEXT_PRIMARY },
+            );
+            dy += 24;
+        }
+
+        // 2. Right Pane: Toolbar Breadcrumb & Controls
+        let right_x = mid_x + 8;
+        let right_w = w - left_w - 16;
+
+        // Finder Toolbar Header
+        canvas.fill_rounded_rect(right_x, y + 6, right_w, 24, 4, Color::argb(35, 255, 255, 255));
+        let mut path_bar = String::from("  ");
         path_bar.push_str(&self.current_path);
-        draw_string(canvas, right_x, y + 8, &path_bar, Color::ACCENT_CYAN);
-        canvas.fill_rect(right_x, y + 26, right_w, 1, Color::WINDOW_BORDER);
+        draw_string(canvas, right_x + 6, y + 10, &path_bar, Color::ACCENT_CYAN);
 
-        // 3. File List
-        let mut item_y = y + 32;
+        // 3. File List Items
+        let mut item_y = y + 36;
         for (idx, entry) in self.entries.iter().enumerate() {
-            if item_y + 20 > y + h - 110 {
+            if item_y + 22 > y + h - 100 {
                 break;
             }
 
             let is_sel = idx == self.selected_index;
             if is_sel {
-                canvas.fill_rounded_rect(right_x, item_y, right_w, 20, 3, Color::TITLEBAR_ACTIVE_START);
+                canvas.fill_rounded_rect(right_x, item_y, right_w, 22, 4, Color::ACCENT_BLUE);
+            } else if idx % 2 == 1 {
+                canvas.fill_rect(right_x, item_y, right_w, 22, Color::argb(15, 255, 255, 255));
             }
 
             let icon = match entry.file_type {
-                FileType::Directory => '@',
-                FileType::Regular => '#',
-                FileType::CharDevice => '!',
+                FileType::Directory => 'D',
+                FileType::Regular => if entry.name.ends_with(".app") { 'A' } else if entry.name.ends_with(".plist") { 'P' } else { 'F' },
+                FileType::CharDevice => 'C',
                 _ => '?',
             };
             let icon_col = match entry.file_type {
-                FileType::Directory => Color::ACCENT_YELLOW,
-                FileType::Regular => Color::ACCENT_BLUE,
+                FileType::Directory => Color::ACCENT_CYAN,
+                FileType::Regular => if entry.name.ends_with(".app") { Color::ACCENT_YELLOW } else { Color::TEXT_PRIMARY },
                 FileType::CharDevice => Color::ACCENT_GREEN,
                 _ => Color::TEXT_MUTED,
             };
 
-            draw_char(canvas, right_x + 4, item_y + 2, icon, icon_col);
+            draw_char(canvas, right_x + 8, item_y + 3, icon, if is_sel { Color::WHITE } else { icon_col });
             draw_string(
                 canvas,
-                right_x + 20,
-                item_y + 2,
+                right_x + 24,
+                item_y + 3,
                 &entry.name,
                 if is_sel { Color::WHITE } else { Color::TEXT_PRIMARY },
             );
 
-            item_y += 22;
+            item_y += 24;
         }
 
         // 4. File Content Preview Pane at bottom
-        let prev_y = y + h - 100;
-        canvas.fill_rect(right_x, prev_y - 4, right_w, 1, Color::WINDOW_BORDER);
-        draw_string(canvas, right_x, prev_y, "Preview:", Color::ACCENT_YELLOW);
+        let prev_y = y + h - 94;
+        canvas.fill_rounded_rect(right_x, prev_y, right_w, 86, 6, Color::argb(45, 0, 0, 0));
+        canvas.draw_rounded_rect(right_x, prev_y, right_w, 86, 6, Color::argb(50, 255, 255, 255));
 
-        let mut py = prev_y + FONT_HEIGHT + 2;
-        for line in self.preview_text.lines().take(4) {
+        draw_string(canvas, right_x + 8, prev_y + 6, "Quick Look / Info:", Color::ACCENT_YELLOW);
+
+        let mut py = prev_y + 24;
+        for line in self.preview_text.lines().take(3) {
             let max_chars = (right_w / 8) as usize;
             let display_line = if line.len() > max_chars {
                 &line[..max_chars]
             } else {
                 line
             };
-            draw_string(canvas, right_x + 4, py, display_line, Color::TEXT_MUTED);
-            py += FONT_HEIGHT;
+            draw_string(canvas, right_x + 8, py, display_line, Color::TEXT_MUTED);
+            py += FONT_HEIGHT + 2;
         }
     }
 }

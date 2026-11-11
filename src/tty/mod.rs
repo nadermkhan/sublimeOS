@@ -19,10 +19,10 @@ impl TtyManager {
     pub const fn new() -> Self {
         Self {
             consoles: [
-                VirtualConsole::new(1, "tty1"),
-                VirtualConsole::new(2, "tty2"),
-                VirtualConsole::new(3, "tty3"),
-                VirtualConsole::new(4, "tty4"),
+                VirtualConsole::new(1, "ttys000"),
+                VirtualConsole::new(2, "ttys001"),
+                VirtualConsole::new(3, "ttys002"),
+                VirtualConsole::new(4, "ttys003"),
             ],
             active_index: 0,
         }
@@ -117,17 +117,17 @@ pub fn init() {
     let mut tty = TTY.lock();
     let vga_ptr = VGA_BUFFER_ADDR as *mut ScreenChar;
 
-    // Initialize TTY 2 with a secondary shell banner
-    tty.consoles[1].write_string("\x1b[36m=== CosmosKernel Virtual Console [TTY 2] ===\x1b[0m\n");
-    tty.consoles[1].write_string("Secondary interactive session ready.\n\n");
+    // Initialize ttys001 with a secondary shell banner
+    tty.consoles[1].write_string("\x1b[36m=== Cosmos Darwin Virtual Console [ttys001] ===\x1b[0m\n");
+    tty.consoles[1].write_string("Secondary zsh session ready.\n\n");
 
-    // Initialize TTY 3 as Kernel Logs / dmesg
-    tty.consoles[2].write_string("\x1b[33m=== CosmosKernel System Event Log [TTY 3 - dmesg] ===\x1b[0m\n");
-    tty.consoles[2].write_string("Streaming live kernel diagnostics and hardware IRQ logs...\n\n");
+    // Initialize ttys002 as Console.app / dmesg
+    tty.consoles[2].write_string("\x1b[33m=== Cosmos Darwin Console [ttys002 - log stream] ===\x1b[0m\n");
+    tty.consoles[2].write_string("Streaming live XNU/Darwin system diagnostics and hardware IRQ logs...\n\n");
 
-    // Initialize TTY 4 as Task Monitor
-    tty.consoles[3].write_string("\x1b[35m=== CosmosKernel Task Manager [TTY 4 - top] ===\x1b[0m\n");
-    tty.consoles[3].write_string("Preemptive multitasking scheduler telemetry active.\n\n");
+    // Initialize ttys003 as Activity Monitor / top
+    tty.consoles[3].write_string("\x1b[35m=== Cosmos Darwin Activity Monitor [ttys003 - top] ===\x1b[0m\n");
+    tty.consoles[3].write_string("Mach thread and XNU task telemetry active.\n\n");
 
     // TTY 1 is active by default
     tty.consoles[0].flush_to_vga(vga_ptr);

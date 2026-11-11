@@ -13,37 +13,82 @@ pub fn init() {
     // 1. Create root directory Inode
     let root = RamInode::new_dir();
 
-    // 2. Mount /dev
+    // 2. Mount /dev (Devices: disk0, disk0s1, ttys000, null, zero, random)
     let devfs = DevFsDirectory::new();
     root.lock().add_child("dev", devfs);
 
-    // 3. Mount /proc
+    // 3. Mount /proc (Darwin kernel diagnostic nodes)
     let procfs = ProcFsDirectory::new();
     root.lock().add_child("proc", procfs);
 
-    // 4. Create standard POSIX directories
-    let etc = RamInode::new_dir();
+    // 4. Create macOS Directory Hierarchy
+    let system = RamInode::new_dir();
+    let library = RamInode::new_dir();
+    let applications = RamInode::new_dir();
+    let users = RamInode::new_dir();
+    let volumes = RamInode::new_dir();
+    let private = RamInode::new_dir();
     let bin = RamInode::new_dir();
+    let etc = RamInode::new_dir();
     let tmp = RamInode::new_dir();
-    let home = RamInode::new_dir();
+    let var = RamInode::new_dir();
 
-    // Populate /etc/os-release
-    let os_release_content = b"NAME=\"CosmosKernel\"\nVERSION=\"0.1.0\"\nID=cosmos\nPRETTY_NAME=\"CosmosKernel Monolithic OS 0.1.0 (x86_64)\"\n";
-    let os_release = RamInode::new_file(os_release_content);
-    etc.lock().add_child("os-release", os_release);
+    // /System/Library/CoreServices/SystemVersion.plist
+    let sys_lib = RamInode::new_dir();
+    let core_services = RamInode::new_dir();
+    let sys_version_plist = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>ProductBuildVersion</key>\n\t<string>24B83</string>\n\t<key>ProductName</key>\n\t<string>macOS</string>\n\t<key>ProductUserVisibleVersion</key>\n\t<string>15.1</string>\n\t<key>ProductVersion</key>\n\t<string>15.1</string>\n\t<key>iOSSupportVersion</key>\n\t<string>18.1</string>\n</dict>\n</plist>\n";
+    core_services.lock().add_child("SystemVersion.plist", RamInode::new_file(sys_version_plist));
+    sys_lib.lock().add_child("CoreServices", core_services);
+    system.lock().add_child("Library", sys_lib);
 
-    // Populate /etc/motd
-    let motd_content = b"\n=======================================================\n  Welcome to CosmosKernel - Modern Rust Monolithic OS  \n=======================================================\nType 'help' for a list of available commands.\n\n";
-    let motd = RamInode::new_file(motd_content);
-    etc.lock().add_child("motd", motd);
+    // /Library/Preferences/com.apple.HIToolbox.plist
+    let lib_prefs = RamInode::new_dir();
+    let apple_prefs = b"AppleInterfaceStyle = Dark\nAppleFontSmoothing = 2\nAppleKeyboardLayout = US\n";
+    lib_prefs.lock().add_child(".GlobalPreferences.plist", RamInode::new_file(apple_prefs));
+    library.lock().add_child("Preferences", lib_prefs);
 
-    root.lock().add_child("etc", etc);
+    // /Applications/
+    let apps_utilities = RamInode::new_dir();
+    apps_utilities.lock().add_child("Terminal.app", RamInode::new_file(b"Mach-O 64-bit executable Terminal\n"));
+    apps_utilities.lock().add_child("Activity Monitor.app", RamInode::new_file(b"Mach-O 64-bit executable ActivityMonitor\n"));
+    apps_utilities.lock().add_child("Console.app", RamInode::new_file(b"Mach-O 64-bit executable Console\n"));
+    applications.lock().add_child("Utilities", apps_utilities);
+    applications.lock().add_child("Finder.app", RamInode::new_file(b"Mach-O 64-bit executable Finder\n"));
+    applications.lock().add_child("System Settings.app", RamInode::new_file(b"Mach-O 64-bit executable SystemSettings\n"));
+
+    // /Users/cosmos/
+    let user_cosmos = RamInode::new_dir();
+    user_cosmos.lock().add_child("Desktop", RamInode::new_dir());
+    user_cosmos.lock().add_child("Documents", RamInode::new_dir());
+    user_cosmos.lock().add_child("Downloads", RamInode::new_dir());
+    let zshrc = b"# macOS zsh configuration\nexport PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\nalias ll=\"ls -la\"\n";
+    user_cosmos.lock().add_child(".zshrc", RamInode::new_file(zshrc));
+    users.lock().add_child("cosmos", user_cosmos);
+
+    // /Volumes/
+    let mac_hd = RamInode::new_dir();
+    mac_hd.lock().add_child(".apfs_container", RamInode::new_file(b"APFS Container Version 2.0\n"));
+    volumes.lock().add_child("Macintosh HD", mac_hd);
+    volumes.lock().add_child("Cosmos USB", RamInode::new_dir());
+
+    // /etc/hosts & /etc/motd
+    let motd_content = b"\n=======================================================\n  Welcome to Cosmos macOS Sequoia (Darwin 24.1.0 x86_64)\n=======================================================\nType 'sw_vers' or 'system_profiler' for system info.\n\n";
+    etc.lock().add_child("motd", RamInode::new_file(motd_content));
+    etc.lock().add_child("hosts", RamInode::new_file(b"127.0.0.1\tlocalhost\n255.255.255.255\tbroadcast\n::1\t\tlocalhost\n"));
+
+    root.lock().add_child("System", system);
+    root.lock().add_child("Library", library);
+    root.lock().add_child("Applications", applications);
+    root.lock().add_child("Users", users);
+    root.lock().add_child("Volumes", volumes);
+    root.lock().add_child("private", private);
     root.lock().add_child("bin", bin);
+    root.lock().add_child("etc", etc);
     root.lock().add_child("tmp", tmp);
-    root.lock().add_child("home", home);
+    root.lock().add_child("var", var);
 
     // Register root with global VFS manager
     VFS.lock().set_root(root);
 
-    kinfo!("VFS initialized with rootfs, /dev, /proc, /etc, /bin, /tmp, /home");
+    kinfo!("VFS initialized: macOS hierarchy (/System, /Library, /Applications, /Users, /Volumes)");
 }

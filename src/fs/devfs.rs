@@ -32,6 +32,10 @@ impl DevFsDirectory {
         entries.insert(String::from("urandom"), Arc::new(IrqSafeSpinlock::new(RandomDev)));
         entries.insert(String::from("tty"), Arc::new(IrqSafeSpinlock::new(TtyDev)));
         entries.insert(String::from("console"), Arc::new(IrqSafeSpinlock::new(TtyDev)));
+        entries.insert(String::from("ttys000"), Arc::new(IrqSafeSpinlock::new(TtyDev)));
+        entries.insert(String::from("ttys001"), Arc::new(IrqSafeSpinlock::new(TtyDev)));
+        entries.insert(String::from("disk0"), Arc::new(IrqSafeSpinlock::new(NullDev)));
+        entries.insert(String::from("disk0s1"), Arc::new(IrqSafeSpinlock::new(NullDev)));
         entries.insert(String::from("rtc"), Arc::new(IrqSafeSpinlock::new(RtcDev)));
 
         Arc::new(IrqSafeSpinlock::new(Self { entries }))

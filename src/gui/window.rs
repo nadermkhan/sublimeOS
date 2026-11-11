@@ -3,7 +3,7 @@ use crate::gui::apps::{AboutApp, FileManagerApp, SysmonApp, TerminalApp};
 use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
 use crate::gui::desktop::DesktopAppId;
-use crate::gui::font::{draw_char, draw_string};
+use crate::gui::font::{draw_string, measure_string};
 
 pub const TITLEBAR_HEIGHT: i32 = 28;
 pub const BTN_RADIUS: i32 = 5;
@@ -87,21 +87,21 @@ impl Window {
     }
 
     pub fn contains_close_btn(&self, px: i32, py: i32) -> bool {
-        let btn_x = self.x + self.width - 18;
+        let btn_x = self.x + 16;
         let btn_y = self.y + 14;
-        (px - btn_x) * (px - btn_x) + (py - btn_y) * (py - btn_y) <= (BTN_RADIUS + 2) * (BTN_RADIUS + 2)
-    }
-
-    pub fn contains_maximize_btn(&self, px: i32, py: i32) -> bool {
-        let btn_x = self.x + self.width - 36;
-        let btn_y = self.y + 14;
-        (px - btn_x) * (px - btn_x) + (py - btn_y) * (py - btn_y) <= (BTN_RADIUS + 2) * (BTN_RADIUS + 2)
+        (px - btn_x) * (px - btn_x) + (py - btn_y) * (py - btn_y) <= (BTN_RADIUS + 3) * (BTN_RADIUS + 3)
     }
 
     pub fn contains_minimize_btn(&self, px: i32, py: i32) -> bool {
-        let btn_x = self.x + self.width - 54;
+        let btn_x = self.x + 32;
         let btn_y = self.y + 14;
-        (px - btn_x) * (px - btn_x) + (py - btn_y) * (py - btn_y) <= (BTN_RADIUS + 2) * (BTN_RADIUS + 2)
+        (px - btn_x) * (px - btn_x) + (py - btn_y) * (py - btn_y) <= (BTN_RADIUS + 3) * (BTN_RADIUS + 3)
+    }
+
+    pub fn contains_maximize_btn(&self, px: i32, py: i32) -> bool {
+        let btn_x = self.x + 48;
+        let btn_y = self.y + 14;
+        (px - btn_x) * (px - btn_x) + (py - btn_y) * (py - btn_y) <= (BTN_RADIUS + 3) * (BTN_RADIUS + 3)
     }
 
     pub fn toggle_maximize(&mut self, screen_w: i32, screen_h: i32) {
@@ -182,43 +182,25 @@ impl Window {
             Color::WINDOW_BORDER,
         );
 
-        // Window icon
-        let icon_char = match self.app {
-            WindowApp::Terminal(_) => '>',
-            WindowApp::Sysmon(_) => '#',
-            WindowApp::Files(_) => '@',
-            WindowApp::About(_) => '✦',
-        };
-        draw_char(
-            canvas,
-            self.x + 10,
-            self.y + 6,
-            icon_char,
-            if self.is_active { Color::ACCENT_CYAN } else { Color::TEXT_MUTED },
-        );
+        // macOS Window Control Buttons (Traffic Lights on top-LEFT)
+        let cy = self.y + 14;
+        // Close (Red)
+        canvas.fill_circle(self.x + 16, cy, BTN_RADIUS, Color::BTN_CLOSE);
+        // Minimize (Yellow)
+        canvas.fill_circle(self.x + 32, cy, BTN_RADIUS, Color::BTN_MINIMIZE);
+        // Zoom/Maximize (Green)
+        canvas.fill_circle(self.x + 48, cy, BTN_RADIUS, Color::BTN_MAXIMIZE);
 
-        // Window title text
+        // Window title text (CENTERED like macOS)
+        let title_w = measure_string(&self.title);
+        let title_x = self.x + (self.width - title_w) / 2;
         draw_string(
             canvas,
-            self.x + 24,
+            title_x,
             self.y + 6,
             &self.title,
             if self.is_active { Color::WHITE } else { Color::TEXT_MUTED },
         );
-
-        // Window Control Buttons (macOS-style round buttons on top-right)
-        // Close (Red)
-        let close_x = self.x + self.width - 18;
-        let cy = self.y + 14;
-        canvas.fill_circle(close_x, cy, BTN_RADIUS, Color::BTN_CLOSE);
-
-        // Maximize (Green)
-        let max_x = self.x + self.width - 36;
-        canvas.fill_circle(max_x, cy, BTN_RADIUS, Color::BTN_MAXIMIZE);
-
-        // Minimize (Yellow)
-        let min_x = self.x + self.width - 54;
-        canvas.fill_circle(min_x, cy, BTN_RADIUS, Color::BTN_MINIMIZE);
 
         // 4. Render App Content inside inner bounds
         let (ix, iy, iw, ih) = self.inner_bounds();

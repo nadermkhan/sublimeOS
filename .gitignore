@@ -2,3 +2,4 @@
 *.elf
 *.log
 *.bin
+usb_payload/

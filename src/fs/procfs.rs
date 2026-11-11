@@ -67,11 +67,11 @@ fn read_dynamic_string(s: &str, offset: usize, buf: &mut [u8]) -> Result<usize, 
 pub struct ProcVersion;
 impl InodeOperations for ProcVersion {
     fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
-        let s = "CosmosKernel version 0.1.0-monolithic (rustc x86_64-unknown-none) #1 SMP PREEMPT\n";
+        let s = "Darwin Kernel Version 24.1.0: xnu-11215.1.31~1/RELEASE_X86_64; root:xnu/RELEASE_X86_64 x86_64\n";
         read_dynamic_string(s, offset, buf)
     }
     fn stat(&self) -> Stat {
-        Stat { inode: 200, size: 75, file_type: FileType::Regular, mode: 0o444 }
+        Stat { inode: 200, size: 95, file_type: FileType::Regular, mode: 0o444 }
     }
 }
 

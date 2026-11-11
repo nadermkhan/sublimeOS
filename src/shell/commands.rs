@@ -1,4 +1,5 @@
 extern crate alloc;
+use alloc::format;
 use alloc::vec::Vec;
 use crate::fs::vfs::{FileType, VFS};
 use crate::print;
@@ -14,13 +15,23 @@ pub fn execute_command(line: &str) {
     let args = &parts[1..];
 
     match cmd {
+        "sw_vers" => cmd_sw_vers(),
+        "system_profiler" => cmd_system_profiler(),
+        "sysctl" => cmd_sysctl(args),
+        "diskutil" => cmd_diskutil(args),
+        "open" => cmd_open(args),
+        "say" => cmd_say(args),
+        "defaults" => cmd_defaults(args),
+        "whoami" => println!("cosmos"),
+        "hostname" => println!("Cosmos-Mac.local"),
+        "top" => cmd_top(),
         "help" => cmd_help(),
         "clear" => cmd_clear(),
         "uname" => cmd_uname(),
         "uptime" => cmd_uptime(),
         "date" => cmd_date(),
         "mem" => cmd_mem(),
-        "ps" | "tasks" => cmd_tasks(),
+        "ps" => cmd_ps(),
         "lspci" => cmd_lspci(),
         "ls" => cmd_ls(args),
         "cat" => cmd_cat(args),
@@ -33,54 +44,173 @@ pub fn execute_command(line: &str) {
         "reboot" => cmd_reboot(),
         "halt" => cmd_halt(),
         unknown => {
-            println!("cosmos: command not found: {}. Type 'help' for available commands.", unknown);
+            println!("zsh: command not found: {}. Type 'help' for available macOS commands.", unknown);
         }
     }
 }
 
+fn cmd_sw_vers() {
+    println!("ProductName:\t\tmacOS");
+    println!("ProductVersion:\t\t15.1");
+    println!("BuildVersion:\t\t24B83");
+    println!("KernelVersion:\t\tDarwin 24.1.0");
+}
+
+fn cmd_system_profiler() {
+    println!("\x1b[1mHardware:\x1b[0m\n");
+    println!("    \x1b[1mHardware Overview:\x1b[0m\n");
+    println!("      Model Name:            Cosmos Mac");
+    println!("      Model Identifier:      Mac15,3");
+    println!("      Model Number:          A2992");
+    println!("      Chip:                  Apple M-Series (AMD64 / x86_64)");
+    println!("      Total Number of Cores: 1 Performance");
+    println!("      Memory:                128 MB Unified RAM");
+    println!("      System Firmware:       11215.1.31");
+    println!("      OS Loader:             Cosmos-XNU Bootloader");
+    println!("      Serial Number (system):C02C1234MD6R");
+    println!("      Hardware UUID:         4C4C4544-0051-5010-8043-B5C04F345233\n");
+}
+
+fn cmd_sysctl(args: &[&str]) {
+    let key = args.first().copied().unwrap_or("-a");
+    match key {
+        "hw.model" => println!("hw.model: Mac15,3"),
+        "hw.ncpu" => println!("hw.ncpu: 1"),
+        "hw.memsize" => {
+            let (total_frames, _, _) = crate::mm::pmm::PMM.lock().stats();
+            println!("hw.memsize: {}", total_frames * 4096);
+        }
+        "hw.pagesize" => println!("hw.pagesize: 4096"),
+        "kern.ostype" => println!("kern.ostype: Darwin"),
+        "kern.osrelease" => println!("kern.osrelease: 24.1.0"),
+        "kern.version" => println!("kern.version: Darwin Kernel Version 24.1.0: xnu-11215.1.31~1/RELEASE_X86_64"),
+        "-a" | "all" => {
+            println!("kern.ostype = Darwin");
+            println!("kern.osrelease = 24.1.0");
+            println!("kern.osrevision = 199506");
+            println!("kern.version = Darwin Kernel Version 24.1.0: xnu-cosmos/RELEASE_X86_64");
+            println!("hw.model = Mac15,3");
+            println!("hw.ncpu = 1");
+            println!("hw.byteorder = 1234");
+            println!("hw.pagesize = 4096");
+            let (total_frames, _, _) = crate::mm::pmm::PMM.lock().stats();
+            println!("hw.memsize = {}", total_frames * 4096);
+        }
+        _ => println!("sysctl: unknown oid '{}'", key),
+    }
+}
+
+fn cmd_diskutil(args: &[&str]) {
+    let sub = args.first().copied().unwrap_or("list");
+    if sub == "list" {
+        println!("/dev/disk0 (internal, physical):");
+        println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
+        println!("   0:      GUID_partition_scheme                        *128.0 MB   disk0");
+        println!("   1:                        EFI EFI                     100.0 MB   disk0s1");
+        println!("   2:                 Apple_APFS Container disk1         *28.0 MB   disk0s2\n");
+        println!("/dev/disk1 (synthesized):");
+        println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
+        println!("   0:      APFS Container Scheme -                      +28.0 MB    disk1");
+        println!("                                 Physical Store disk0s2");
+        println!("   1:                APFS Volume Macintosh HD            12.4 MB    disk1s1");
+        println!("   2:                APFS Volume Preboot                 1.2 MB     disk1s2");
+    } else {
+        println!("Usage: diskutil list");
+    }
+}
+
+fn cmd_open(args: &[&str]) {
+    if args.is_empty() {
+        println!("The file does not exist.");
+        return;
+    }
+    let target = args[0];
+    if target.contains("Finder.app") || target == "gui" || target == "." {
+        println!("\x1b[35m[macOS LaunchServices] Launching Finder.app...\x1b[0m");
+        crate::gui::launch_desktop();
+    } else {
+        println!("[macOS LaunchServices] Opening '{}'...", target);
+        cmd_cat(args);
+    }
+}
+
+fn cmd_say(args: &[&str]) {
+    let text = if args.is_empty() { "Hello, I am Cosmos Mac." } else {
+        // print all args
+        &args.join(" ")
+    };
+    println!("\x1b[35m[SpeechSynthesis (Alex / Siri)]\x1b[0m \"{}\"", text);
+}
+
+fn cmd_defaults(args: &[&str]) {
+    let action = args.first().copied().unwrap_or("read");
+    if action == "read" {
+        println!("{{\n    AppleInterfaceStyle = Dark;\n    AppleFontSmoothing = 2;\n    AppleKeyboardLayout = US;\n    AppleMetricUnits = 1;\n    AppleTemperatureUnit = Celsius;\n}}");
+    } else {
+        println!("Usage: defaults read");
+    }
+}
+
+fn cmd_top() {
+    let (_total_frames, used_frames, free_frames) = crate::mm::pmm::PMM.lock().stats();
+    let uptime_secs = crate::arch::x86_64::pit::get_ticks() / 1000;
+    println!("Processes: 3 total, 1 running, 2 sleeping, 3 threads");
+    println!("Load Avg: 0.12, 0.08, 0.02  CPU usage: 1.2% user, 2.4% sys, 96.4% idle");
+    println!("SharedLibs: numLib=12, resident=1.4M");
+    println!("MemRegions: num=48, resident=12M, private=2M");
+    println!(
+        "PhysMem: {}M used (12M wired), {}M unused.",
+        (used_frames * 4096) / (1024 * 1024),
+        (free_frames * 4096) / (1024 * 1024)
+    );
+    println!("Uptime: {} seconds\n", uptime_secs);
+    cmd_ps();
+}
+
 fn cmd_help() {
-    println!("\x1b[36mCosmosKernel Built-in Commands:\x1b[0m");
-    println!("  help            Show this help reference");
-    println!("  clear           Clear the VGA and terminal screen");
-    println!("  uname           Print kernel and operating system info");
-    println!("  uptime          Display kernel uptime and timer ticks");
-    println!("  date            Display current UTC date/time from CMOS RTC");
-    println!("  mem             Display physical frame allocator and heap status");
-    println!("  ps / tasks      List all active tasks and kernel threads");
-    println!("  lspci           Enumerate PCI devices and controllers");
+    println!("\x1b[36mCosmos macOS Darwin Shell Commands:\x1b[0m");
+    println!("  sw_vers         Display macOS product and build version");
+    println!("  system_profiler Display Apple hardware overview");
+    println!("  sysctl [-a]     Get kernel and hardware state (hw.model, hw.memsize)");
+    println!("  diskutil [list] Manage APFS containers and disk volumes");
+    println!("  open <app/path> Open application or document (e.g. 'open Finder.app')");
+    println!("  say <text>      Text-to-speech audio banner");
+    println!("  defaults [read] Access macOS user preferences and defaults");
+    println!("  top             Display live Darwin processes & memory stats");
+    println!("  ps              List active Mach tasks and kernel threads");
+    println!("  uname           Print Darwin kernel version info");
+    println!("  uptime          Show system uptime in seconds");
+    println!("  date            Current UTC hardware clock timestamp");
+    println!("  mem             Memory usage (Physical Unified RAM & Heap)");
+    println!("  lspci           Enumerate PCI Express controller devices");
     println!("  ls [path]       List contents of a directory (default '/')");
-    println!("  cat <path>      Display file contents (try /proc/version or /etc/motd)");
-    println!("  echo <text>     Print text to console");
-    println!("  mkdir <path>    Create a directory in the VFS");
-    println!("  touch <path>    Create an empty file in the VFS");
-    println!("  rm <path>       Remove a file from the VFS");
-    println!("  gui             Launch the interactive Cosmos Desktop GUI (1024x768)");
-    println!("  test            Execute kernel verification self-test suite");
-    println!("  reboot          Reboot the system");
-    println!("  halt            Power off / halt processor");
+    println!("  cat <path>      Read file content");
+    println!("  mkdir <path>    Create directory");
+    println!("  touch <path>    Create empty file");
+    println!("  rm <path>       Remove file");
+    println!("  clear           Clear the terminal screen");
+    println!("  reboot          Restart computer");
+    println!("  halt            Shut down computer");
 }
 
 fn cmd_gui() {
-    println!("\x1b[35mStarting Cosmos Desktop Graphical Environment...\x1b[0m");
+    println!("\x1b[35m[LaunchServices] Starting macOS Aqua Desktop...\x1b[0m");
     crate::gui::launch_desktop();
 }
 
 fn cmd_clear() {
     crate::arch::x86_64::vga::VGA_WRITER.lock().clear_screen();
-    print!("\x1b[2J\x1b[H"); // ANSI clear screen escape code for serial
+    print!("\x1b[2J\x1b[H");
 }
 
 fn cmd_uname() {
-    println!("CosmosKernel 0.1.0-monolithic x86_64 GNU/Cosmos #1 SMP PREEMPT 2026");
+    println!("Darwin Cosmos-Mac.local 24.1.0 Darwin Kernel Version 24.1.0: xnu-11215.1.31~1/RELEASE_X86_64 x86_64");
 }
 
 fn cmd_uptime() {
     let ticks = crate::arch::x86_64::pit::get_ticks();
-    let total_secs = ticks / 1000;
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    let ms = ticks % 1000;
-    println!("Uptime: {}m {}.{:03}s ({} timer ticks)", mins, secs, ms, ticks);
+    let seconds = ticks / 1000;
+    println!("up {} seconds ({} ticks at 1000 Hz)", seconds, ticks);
 }
 
 fn cmd_date() {
@@ -89,30 +219,20 @@ fn cmd_date() {
 }
 
 fn cmd_mem() {
-    let (total_f, used_f, free_f) = crate::mm::pmm::PMM.lock().stats();
-    let (heap_tot, heap_used, heap_free) = crate::mm::heap::HEAP_ALLOCATOR.stats();
+    let (total_frames, used_frames, free_frames) = crate::mm::pmm::PMM.lock().stats();
+    let (heap_total, heap_allocated, heap_free) = crate::mm::heap::HEAP_ALLOCATOR.stats();
 
-    println!("\x1b[33m--- Memory Statistics ---\x1b[0m");
-    println!("Physical RAM:  {} MB Total ({} frames)", (total_f * 4096) / (1024 * 1024), total_f);
-    println!("RAM Used:      {} MB ({} frames)", (used_f * 4096) / (1024 * 1024), used_f);
-    println!("RAM Free:      {} MB ({} frames)", (free_f * 4096) / (1024 * 1024), free_f);
-    println!("Kernel Heap:   {} KB Total, {} KB Used, {} KB Free", heap_tot / 1024, heap_used / 1024, heap_free / 1024);
+    println!("Unified Memory:    {} MB Total", (total_frames * 4096) / (1024 * 1024));
+    println!("Wired Memory:      {} KB Used", (used_frames * 4096) / 1024);
+    println!("Free Memory:       {} KB Free", (free_frames * 4096) / 1024);
+    println!("XNU Kernel Heap:   {} KB Total ({} KB Allocated, {} KB Free)", heap_total / 1024, heap_allocated / 1024, heap_free / 1024);
 }
 
-fn cmd_tasks() {
-    let tasks = crate::task::scheduler::get_task_list();
-    println!("{:<5} {:<15} {:<10} {:<10}", "TID", "NAME", "STATE", "TICKS");
-    println!("-------------------------------------------");
-    for (tid, name, state, ticks) in tasks {
-        let state_str = match state {
-            crate::task::thread::ThreadState::Running => "Running",
-            crate::task::thread::ThreadState::Ready => "Ready",
-            crate::task::thread::ThreadState::Sleeping(_) => "Sleeping",
-            crate::task::thread::ThreadState::Blocked => "Blocked",
-            crate::task::thread::ThreadState::Dead => "Dead",
-        };
-        println!("{:<5} {:<15} {:<10} {:<10}", tid, name, state_str, ticks);
-    }
+fn cmd_ps() {
+    println!("  PID TTY           TIME CMD");
+    println!("    0 ttys000    0:00.02 kernel_idle");
+    println!("    1 ttys000    0:00.08 launchd");
+    println!("    2 ttys000    0:00.05 zsh");
 }
 
 fn cmd_lspci() {
@@ -127,57 +247,40 @@ fn cmd_lspci() {
 }
 
 fn cmd_ls(args: &[&str]) {
-    let path = if args.is_empty() { "/" } else { args[0] };
+    let path = args.first().copied().unwrap_or("/");
     let vfs = VFS.lock();
-
-    match vfs.resolve_path(path) {
-        Ok(inode) => {
-            match inode.lock().readdir() {
-                Ok(entries) => {
-                    for entry in entries {
-                        let type_char = match entry.file_type {
-                            FileType::Directory => "d",
-                            FileType::Regular => "-",
-                            FileType::CharDevice => "c",
-                            FileType::BlockDevice => "b",
-                            FileType::Pipe => "p",
-                        };
-                        println!("{} {:<16} (inode {})", type_char, entry.name, entry.inode);
-                    }
-                }
-                Err(e) => println!("ls: cannot list {}: {}", path, e),
+    match vfs.resolve_path(path).and_then(|node| node.lock().readdir()) {
+        Ok(entries) => {
+            for entry in entries {
+                let suffix = if entry.file_type == FileType::Directory { "/" } else { "" };
+                print!("{}  ", format!("{}{}", entry.name, suffix));
             }
+            println!();
         }
-        Err(e) => println!("ls: cannot access {}: {}", path, e),
+        Err(e) => println!("ls: {}: {}", path, e),
     }
 }
 
 fn cmd_cat(args: &[&str]) {
     if args.is_empty() {
-        println!("Usage: cat <file>");
+        println!("usage: cat <file>");
         return;
     }
-
     let path = args[0];
     let vfs = VFS.lock();
-
     match vfs.open(path, 0) {
         Ok(file) => {
-            let mut buf = [0u8; 512];
+            let mut buf = [0u8; 1024];
             loop {
                 match file.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
                         if let Ok(s) = core::str::from_utf8(&buf[..n]) {
                             print!("{}", s);
-                        } else {
-                            for &b in &buf[..n] {
-                                print!("{}", b as char);
-                            }
                         }
                     }
                     Err(e) => {
-                        println!("cat: error reading {}: {}", path, e);
+                        println!("cat: error: {}", e);
                         break;
                     }
                 }
@@ -188,110 +291,90 @@ fn cmd_cat(args: &[&str]) {
 }
 
 fn cmd_echo(args: &[&str]) {
-    for (i, arg) in args.iter().enumerate() {
-        if i > 0 {
-            print!(" ");
-        }
-        print!("{}", arg);
-    }
-    println!();
+    println!("{}", args.join(" "));
 }
 
 fn cmd_mkdir(args: &[&str]) {
     if args.is_empty() {
-        println!("Usage: mkdir <path>");
+        println!("usage: mkdir <directory>");
         return;
     }
-
     let path = args[0];
+    let mut parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return;
+    }
+    let new_dir_name = parts.pop().unwrap();
+    let parent_path = if parts.is_empty() { "/" } else { &path[..path.rfind('/').unwrap_or(0)] };
+
     let vfs = VFS.lock();
-
-    let (parent_path, name) = if let Some(idx) = path.rfind('/') {
-        let parent = if idx == 0 { "/" } else { &path[..idx] };
-        (parent, &path[idx + 1..])
-    } else {
-        ("/", path)
-    };
-
     match vfs.resolve_path(parent_path) {
         Ok(parent_node) => {
-            if let Err(e) = parent_node.lock().create(name, FileType::Directory) {
-                println!("mkdir: failed to create directory {}: {}", path, e);
+            if let Err(e) = parent_node.lock().create(new_dir_name, FileType::Directory) {
+                println!("mkdir: {}: {}", path, e);
             }
         }
-        Err(e) => println!("mkdir: cannot access {}: {}", parent_path, e),
+        Err(e) => println!("mkdir: {}: {}", parent_path, e),
     }
 }
 
 fn cmd_touch(args: &[&str]) {
     if args.is_empty() {
-        println!("Usage: touch <path>");
+        println!("usage: touch <file>");
         return;
     }
-
     let path = args[0];
+    let mut parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return;
+    }
+    let new_file_name = parts.pop().unwrap();
+    let parent_path = if parts.is_empty() { "/" } else { &path[..path.rfind('/').unwrap_or(0)] };
+
     let vfs = VFS.lock();
-
-    let (parent_path, name) = if let Some(idx) = path.rfind('/') {
-        let parent = if idx == 0 { "/" } else { &path[..idx] };
-        (parent, &path[idx + 1..])
-    } else {
-        ("/", path)
-    };
-
     match vfs.resolve_path(parent_path) {
         Ok(parent_node) => {
-            if let Err(e) = parent_node.lock().create(name, FileType::Regular) {
-                println!("touch: failed to create file {}: {}", path, e);
+            if let Err(e) = parent_node.lock().create(new_file_name, FileType::Regular) {
+                println!("touch: {}: {}", path, e);
             }
         }
-        Err(e) => println!("touch: cannot access {}: {}", parent_path, e),
+        Err(e) => println!("touch: {}: {}", parent_path, e),
     }
 }
 
 fn cmd_rm(args: &[&str]) {
     if args.is_empty() {
-        println!("Usage: rm <path>");
+        println!("usage: rm <file>");
         return;
     }
-
     let path = args[0];
+    let mut parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return;
+    }
+    let file_name = parts.pop().unwrap();
+    let parent_path = if parts.is_empty() { "/" } else { &path[..path.rfind('/').unwrap_or(0)] };
+
     let vfs = VFS.lock();
-
-    let (parent_path, name) = if let Some(idx) = path.rfind('/') {
-        let parent = if idx == 0 { "/" } else { &path[..idx] };
-        (parent, &path[idx + 1..])
-    } else {
-        ("/", path)
-    };
-
     match vfs.resolve_path(parent_path) {
         Ok(parent_node) => {
-            if let Err(e) = parent_node.lock().unlink(name) {
-                println!("rm: cannot remove {}: {}", path, e);
+            if let Err(e) = parent_node.lock().unlink(file_name) {
+                println!("rm: {}: {}", path, e);
             }
         }
-        Err(e) => println!("rm: cannot access {}: {}", parent_path, e),
+        Err(e) => println!("rm: {}: {}", parent_path, e),
     }
 }
 
 fn cmd_reboot() {
-    println!("Rebooting system...");
+    println!("\x1b[31mRestarting macOS...\x1b[0m");
     unsafe {
-        // Pulse 8042 reset line
-        let mut good = 0x02u8;
-        while (good & 0x02) != 0 {
-            good = crate::arch::x86_64::io::inb(0x64);
-        }
         crate::arch::x86_64::io::outb(0x64, 0xFE);
-    }
-    loop {
-        crate::arch::x86_64::registers::hlt();
     }
 }
 
 fn cmd_halt() {
-    println!("System halted. You may safely turn off the computer.");
+    println!("\x1b[31mShutting down macOS...\x1b[0m");
     crate::arch::x86_64::registers::disable_interrupts();
     loop {
         crate::arch::x86_64::registers::hlt();

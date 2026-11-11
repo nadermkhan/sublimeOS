@@ -30,8 +30,8 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     arch::x86_64::init();
 
     kinfo!("=======================================================");
-    kinfo!("  CosmosKernel Monolithic Kernel 0.1.0 (x86_64)");
-    kinfo!("  Bootloader Magic: 0x{:08X}, Info: 0x{:08X}", magic, mb_info);
+    kinfo!("  Cosmos Darwin Kernel Version 24.1.0 (x86_64)");
+    kinfo!("  Darwin/XNU Monolithic Core | Boot Magic: 0x{:08X}", magic);
     kinfo!("=======================================================");
 
     // 2. Initialize Memory Management Subsystem

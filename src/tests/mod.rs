@@ -54,10 +54,10 @@ fn test_vfs() {
     print!("  [TEST] Virtual File System & Mounts ... ");
     let vfs = VFS.lock();
 
-    // Test /etc/os-release
-    let file = vfs.open("/etc/os-release", 0).expect("Failed to open /etc/os-release");
-    let mut buf = [0u8; 64];
-    let n = file.read(&mut buf).expect("Failed to read /etc/os-release");
+    // Test macOS /System/Library/CoreServices/SystemVersion.plist
+    let file = vfs.open("/System/Library/CoreServices/SystemVersion.plist", 0).expect("Failed to open SystemVersion.plist");
+    let mut buf = [0u8; 128];
+    let n = file.read(&mut buf).expect("Failed to read SystemVersion.plist");
     assert!(n > 0);
 
     // Test writing and reading temporary file in /tmp
