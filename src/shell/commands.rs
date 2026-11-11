@@ -44,6 +44,8 @@ pub fn execute_command(line: &str) {
         "ifconfig" => cmd_ifconfig(),
         "ping" => cmd_ping(args),
         "nslookup" => cmd_nslookup(args),
+        "curl" | "http" => cmd_curl(args),
+        "httpd" => cmd_httpd(args),
         "gui" => cmd_gui(),
         "test" => crate::tests::run_all_tests(),
         "reboot" => cmd_reboot(),
@@ -229,6 +231,8 @@ fn cmd_help() {
     println!("  ifconfig        Display network interface configuration (lo0, en0, wlan0)");
     println!("  ping <target>   Send ICMP ECHO_REQUEST packets to network hosts");
     println!("  nslookup <host> Query DNS nameservers for IPv4 host address");
+    println!("  curl [-i] <url> Fetch web pages & REST APIs over TCP / HTTP");
+    println!("  httpd [status]  CosmicOS Embedded Web Server dashboard");
     println!("  open <app/path> Open application or document (e.g. 'open Finder.app')");
     println!("  say <text>      Speech synthesis simulated audio banner");
     println!("  defaults [read] Access CosmicOS user preferences and defaults");
@@ -604,6 +608,71 @@ fn cmd_nslookup(args: &[&str]) {
         }
         Err(e) => {
             println!("** server can't find {}: {}", target, e);
+        }
+    }
+}
+
+fn cmd_curl(args: &[&str]) {
+    if args.is_empty() {
+        println!("Usage: curl [-i] <url>");
+        println!("Example: curl http://127.0.0.1:8080/api/status");
+        return;
+    }
+
+    let mut include_headers = false;
+    let mut url_target = args[0];
+
+    if args[0] == "-i" {
+        include_headers = true;
+        if args.len() < 2 {
+            println!("Usage: curl [-i] <url>");
+            return;
+        }
+        url_target = args[1];
+    }
+
+    println!("\x1b[36mConnecting to {} via TCP...\x1b[0m", url_target);
+    match crate::net::http::http_get(url_target) {
+        Ok(resp) => {
+            if resp.status_code == 200 {
+                println!("\x1b[32mHTTP/1.1 {} {}\x1b[0m", resp.status_code, resp.status_text);
+            } else {
+                println!("\x1b[33mHTTP/1.1 {} {}\x1b[0m", resp.status_code, resp.status_text);
+            }
+
+            if include_headers {
+                for (k, v) in &resp.headers {
+                    println!("{}: {}", k, v);
+                }
+                println!();
+            }
+
+            println!("{}", resp.body_as_str());
+        }
+        Err(e) => {
+            println!("\x1b[31mcurl error: {}\x1b[0m", e);
+        }
+    }
+}
+
+fn cmd_httpd(args: &[&str]) {
+    let sub = args.first().copied().unwrap_or("status");
+    match sub {
+        "status" => {
+            println!("CosmicOS Embedded Web Server (httpd):");
+            println!("  Port:       8080 / 80 (TCP)");
+            println!("  Status:     \x1b[32mActive (Listening on all interfaces)\x1b[0m");
+            println!("  Endpoints:  /");
+            println!("              /api/status");
+            println!("  Try:        curl http://127.0.0.1:8080/api/status");
+        }
+        "test" => {
+            println!("Testing local httpd response on /api/status:");
+            let resp = crate::net::http::generate_httpd_response("/api/status");
+            println!("{}", resp);
+        }
+        _ => {
+            println!("Usage: httpd [status | test]");
         }
     }
 }

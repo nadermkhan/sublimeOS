@@ -12,8 +12,11 @@ pub mod device;
 pub mod dhcp;
 pub mod dns;
 pub mod ethernet;
+pub mod http;
 pub mod icmp;
 pub mod ip;
+pub mod socket;
+pub mod tcp;
 pub mod udp;
 pub mod wifi;
 
@@ -76,6 +79,99 @@ pub fn poll() {
                                                 let _ = dev.send_packet(&frame);
                                             } else if msg_type == dhcp::DHCP_ACK {
                                                 dhcp::apply_dhcp_lease(dev.name(), lease);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ip::IP_PROTO_TCP => {
+                                if let Some((tcp_hdr, tcp_payload)) = tcp::parse_tcp_packet(ip_payload) {
+                                    // 1. Check if packet belongs to an active client/server TCP connection
+                                    let mut table = tcp::TCP_TABLE.lock();
+                                    if let Some(conn) = table.find_by_endpoint(tcp_hdr.dst_port, src_ip, tcp_hdr.src_port) {
+                                        let local_ip = conn.local_ip;
+                                        let local_port = conn.local_port;
+                                        let remote_port = tcp_hdr.src_port;
+
+                                        // Handshake: Receive SYN-ACK when in SynSent
+                                        if conn.state == tcp::TcpState::SynSent && (tcp_hdr.flags & tcp::TCP_FLAG_SYN) != 0 {
+                                            conn.local_ack = tcp_hdr.seq_num.wrapping_add(1);
+                                            conn.local_seq = conn.local_seq.wrapping_add(1);
+                                            conn.state = tcp::TcpState::Established;
+                                            let seq = conn.local_seq;
+                                            let ack = conn.local_ack;
+                                            drop(table);
+
+                                            // Send final handshake ACK
+                                            let _ = tcp::send_tcp_packet(local_ip, src_ip, local_port, remote_port, seq, ack, tcp::TCP_FLAG_ACK, &[]);
+                                        } else if conn.state == tcp::TcpState::Established {
+                                            // Handle incoming data payload
+                                            if !tcp_payload.is_empty() {
+                                                for &b in tcp_payload {
+                                                    if conn.rx_buffer.len() < 65536 {
+                                                        conn.rx_buffer.push_back(b);
+                                                    }
+                                                }
+                                                conn.local_ack = conn.local_ack.wrapping_add(tcp_payload.len() as u32);
+                                                let seq = conn.local_seq;
+                                                let ack = conn.local_ack;
+                                                drop(table);
+
+                                                // Acknowledge received data
+                                                let _ = tcp::send_tcp_packet(local_ip, src_ip, local_port, remote_port, seq, ack, tcp::TCP_FLAG_ACK, &[]);
+                                            } else if (tcp_hdr.flags & tcp::TCP_FLAG_FIN) != 0 {
+                                                // Handle remote FIN
+                                                conn.local_ack = conn.local_ack.wrapping_add(1);
+                                                conn.state = tcp::TcpState::CloseWait;
+                                                let seq = conn.local_seq;
+                                                let ack = conn.local_ack;
+                                                drop(table);
+
+                                                // Acknowledge remote FIN
+                                                let _ = tcp::send_tcp_packet(local_ip, src_ip, local_port, remote_port, seq, ack, tcp::TCP_FLAG_ACK, &[]);
+                                            }
+                                        } else if (tcp_hdr.flags & tcp::TCP_FLAG_RST) != 0 {
+                                            conn.state = tcp::TcpState::Closed;
+                                        }
+                                    } else {
+                                        drop(table);
+
+                                        // 2. Automated Loopback / Local Web Server Responder for Ports 80 & 8080
+                                        if tcp_hdr.dst_port == 80 || tcp_hdr.dst_port == 8080 {
+                                            if (tcp_hdr.flags & tcp::TCP_FLAG_SYN) != 0 && (tcp_hdr.flags & tcp::TCP_FLAG_ACK) == 0 {
+                                                // Respond to SYN with SYN-ACK
+                                                let _ = tcp::send_tcp_packet(
+                                                    dst_ip,
+                                                    src_ip,
+                                                    tcp_hdr.dst_port,
+                                                    tcp_hdr.src_port,
+                                                    0x5000,
+                                                    tcp_hdr.seq_num.wrapping_add(1),
+                                                    tcp::TCP_FLAG_SYN | tcp::TCP_FLAG_ACK,
+                                                    &[],
+                                                );
+                                            } else if !tcp_payload.is_empty() {
+                                                // Generate and send HTTP response
+                                                let req_str = core::str::from_utf8(tcp_payload).unwrap_or("");
+                                                let path = if req_str.starts_with("GET ") {
+                                                    let mut parts = req_str.split_whitespace();
+                                                    let _ = parts.next();
+                                                    parts.next().unwrap_or("/")
+                                                } else {
+                                                    "/"
+                                                };
+
+                                                let resp_content = http::generate_httpd_response(path);
+                                                let _ = tcp::send_tcp_packet(
+                                                    dst_ip,
+                                                    src_ip,
+                                                    tcp_hdr.dst_port,
+                                                    tcp_hdr.src_port,
+                                                    0x5001,
+                                                    tcp_hdr.seq_num.wrapping_add(tcp_payload.len() as u32),
+                                                    tcp::TCP_FLAG_ACK | tcp::TCP_FLAG_PSH | tcp::TCP_FLAG_FIN,
+                                                    resp_content.as_bytes(),
+                                                );
                                             }
                                         }
                                     }

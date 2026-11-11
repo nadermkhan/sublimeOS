@@ -25,6 +25,8 @@ pub fn run_all_tests() {
     test_net_crypto();
     test_wifi_subsystem();
     test_tcpip_stack();
+    test_tcp_sockets();
+    test_http_engine();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -639,6 +641,61 @@ fn test_tcpip_stack() {
     // 5. Test Live Loopback Ping
     let rtt = crate::net::ping("127.0.0.1").expect("Loopback ping failed");
     assert!(rtt >= 1);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_tcp_sockets() {
+    print!("  [TEST] TCP Protocol & Socket Engine ... ");
+
+    // 1. Test TCP Packet serialization and checksum
+    let src_ip = [192, 168, 1, 100];
+    let dst_ip = [192, 168, 1, 1];
+    let tcp_seg = crate::net::tcp::build_tcp_packet(
+        src_ip,
+        dst_ip,
+        50000,
+        80,
+        0x1000,
+        0x2000,
+        crate::net::tcp::TCP_FLAG_SYN | crate::net::tcp::TCP_FLAG_ACK,
+        65535,
+        b"Hello TCP",
+    );
+
+    let (hdr, payload) = crate::net::tcp::parse_tcp_packet(&tcp_seg).expect("Failed to parse TCP segment");
+    assert_eq!(hdr.src_port, 50000);
+    assert_eq!(hdr.dst_port, 80);
+    assert_eq!(hdr.seq_num, 0x1000);
+    assert_eq!(hdr.ack_num, 0x2000);
+    assert_eq!(hdr.flags, crate::net::tcp::TCP_FLAG_SYN | crate::net::tcp::TCP_FLAG_ACK);
+    assert_eq!(payload, b"Hello TCP");
+
+    // 2. Test Socket Descriptor Allocation & Lifecycle
+    let sock = crate::net::socket::socket_open().expect("Failed to allocate socket");
+    assert!(sock > 0);
+    crate::net::socket::socket_close(sock).expect("Failed to close socket");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_http_engine() {
+    print!("  [TEST] HTTP Client & Embedded Server ... ");
+
+    // 1. Test HTTP Response Parser
+    let raw_http = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nServer: CosmicOS\r\n\r\nHello CosmicOS!";
+    let resp = crate::net::http::parse_http_response(raw_http).expect("Failed to parse HTTP response");
+    assert_eq!(resp.status_code, 200);
+    assert_eq!(resp.status_text, "OK");
+    assert_eq!(resp.headers.get("Server"), Some(&String::from("CosmicOS")));
+    assert_eq!(resp.body, b"Hello CosmicOS!");
+
+    // 2. Test Embedded httpd response generation
+    let api_resp = crate::net::http::generate_httpd_response("/api/status");
+    assert!(api_resp.contains("CosmicOS") && api_resp.contains("uptime_seconds"));
+
+    let html_resp = crate::net::http::generate_httpd_response("/");
+    assert!(html_resp.contains("Sublime Dashboard") && html_resp.contains("200 OK"));
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
