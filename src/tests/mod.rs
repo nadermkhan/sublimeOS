@@ -62,12 +62,14 @@ fn test_vfs() {
 
     // Test writing and reading temporary file in /tmp
     let tmp = vfs.resolve_path("/tmp").expect("Failed to resolve /tmp");
+    let _ = tmp.lock().unlink("test.txt");
     let test_file_node = tmp.lock().create("test.txt", FileType::Regular).expect("Failed to create /tmp/test.txt");
     test_file_node.lock().write(0, b"Hello Cosmos!").expect("Failed to write to /tmp/test.txt");
 
     let mut read_buf = [0u8; 13];
     test_file_node.lock().read(0, &mut read_buf).expect("Failed to read from /tmp/test.txt");
     assert_eq!(&read_buf, b"Hello Cosmos!");
+    let _ = tmp.lock().unlink("test.txt");
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
