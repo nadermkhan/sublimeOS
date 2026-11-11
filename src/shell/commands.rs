@@ -24,6 +24,7 @@ pub fn execute_command(line: &str) {
         "beep" => cmd_beep(args),
         "chime" => cmd_chime(),
         "play" => cmd_play(args),
+        "exec" => cmd_exec(args),
         "defaults" => cmd_defaults(args),
         "whoami" => println!("cosmos"),
         "hostname" => println!("CosmicOS.local"),
@@ -224,6 +225,44 @@ fn cmd_play(args: &[&str]) {
     }
 }
 
+fn cmd_exec(args: &[&str]) {
+    if args.is_empty() {
+        println!("Usage: exec <elf_binary_path>");
+        return;
+    }
+    let path = args[0];
+    println!("\x1b[36m[LaunchServices] Loading ELF64 binary '{}' into Ring 3 user space...\x1b[0m", path);
+
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = match vfs.open(path, 0) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("\x1b[31mexec: Failed to open '{}': {}\x1b[0m", path, e);
+            return;
+        }
+    };
+    drop(vfs);
+
+    let mut buf = alloc::vec![0u8; 262144]; // Read up to 256 KiB
+    let bytes_read = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(e) => {
+            println!("\x1b[31mexec: Failed to read file: {}\x1b[0m", e);
+            return;
+        }
+    };
+
+    if bytes_read == 0 {
+        println!("\x1b[31mexec: Binary file is empty\x1b[0m");
+        return;
+    }
+
+    match crate::task::user::execute_user_binary(&buf[..bytes_read]) {
+        Ok(code) => println!("\x1b[32m[Process Terminated] Exit code: {}\x1b[0m", code),
+        Err(e) => println!("\x1b[31mexec error: {}\x1b[0m", e),
+    }
+}
+
 fn cmd_defaults(args: &[&str]) {
     let action = args.first().copied().unwrap_or("read");
     if action == "read" {
@@ -267,6 +306,7 @@ fn cmd_help() {
     println!("  beep [freq] [ms]Play audio tone via Intel HDA / PC Speaker");
     println!("  chime           Play CosmicOS Sublime Startup Chime (F-Major chord)");
     println!("  play <file.wav> Play RIFF/WAVE PCM audio file");
+    println!("  exec <binary>   Execute 64-bit ELF user binary in Ring 3 user space");
     println!("  defaults [read] Access CosmicOS user preferences and defaults");
     println!("  top             Display live Sublime tasks & memory stats");
     println!("  ps              List active Sublime tasks and kernel threads");

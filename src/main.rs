@@ -9,6 +9,7 @@ use core::panic::PanicInfo;
 global_asm!(include_str!("arch/x86_64/boot.s"));
 global_asm!(include_str!("arch/x86_64/interrupts.s"));
 global_asm!(include_str!("task/switch.s"));
+global_asm!(include_str!("task/user_switch.s"));
 global_asm!(include_str!("syscall/syscall_entry.s"));
 
 pub mod arch;

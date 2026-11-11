@@ -22,28 +22,33 @@ syscall_entry:
 
     /*
      * AMD64 syscall calling convention:
-     *   RAX: syscall number
+     *   RAX: syscall number (num)
      *   RDI: arg1
      *   RSI: arg2
      *   RDX: arg3
-     *   R10: arg4 (syscall changes RCX to user RIP, so Linux uses R10 instead of RCX)
+     *   R10: arg4 (syscall changes RCX to user RIP, so R10 carries arg4)
      *   R8:  arg5
      *   R9:  arg6
-     * Pass to syscall_dispatcher(num, a1, a2, a3, a4, a5, a6):
+     *
+     * SysV ABI for syscall_dispatcher(num, a1, a2, a3, a4, a5, a6):
+     *   RDI: num
+     *   RSI: a1
+     *   RDX: a2
+     *   RCX: a3
+     *   R8:  a4
+     *   R9:  a5
+     *   [RSP]: a6
      */
-    mov rcx, r10 /* arg4 */
-    /* System V ABI: rdi=a1, rsi=a2, rdx=a3, rcx=a4, r8=a5, r9=a6 */
-    /* We push num or pass in rdi: */
-    push r9      /* arg6 */
-    push r8      /* arg5 */
-    mov r9, rcx  /* arg4 */
-    mov r8, rdx  /* arg3 */
-    mov rcx, rsi /* arg2 */
-    mov rdx, rdi /* arg1 */
-    mov rsi, rax /* num */
+    push r9      /* 7th param: a6 */
+    mov r9, r8  /* 6th param: a5 */
+    mov r8, r10 /* 5th param: a4 */
+    mov rcx, rdx /* 4th param: a3 */
+    mov rdx, rsi /* 3rd param: a2 */
+    mov rsi, rdi /* 2nd param: a1 */
+    mov rdi, rax /* 1st param: num */
 
     call syscall_dispatcher
-    add rsp, 16
+    add rsp, 8
 
     /* Restore registers */
     pop r15

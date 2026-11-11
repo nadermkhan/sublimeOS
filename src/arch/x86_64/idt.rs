@@ -192,6 +192,27 @@ pub extern "C" fn interrupt_dispatch(ctx: *mut InterruptContext) {
 }
 
 fn handle_exception(ctx: &InterruptContext) {
+    let is_user_mode = (ctx.cs & 3) == 3 || (ctx.vector == 14 && (ctx.error_code & 4) != 0);
+    if is_user_mode {
+        if ctx.vector == 14 {
+            let fault_addr = unsafe { read_cr2() };
+            crate::kerror!("User Segmentation Fault (SIGSEGV) at 0x{:016X}! RIP: 0x{:016X}", fault_addr, ctx.rip);
+            crate::task::user::handle_user_fault(139);
+        } else if ctx.vector == 13 {
+            crate::kerror!("User General Protection Fault (SIGSEGV) at RIP: 0x{:016X}", ctx.rip);
+            crate::task::user::handle_user_fault(139);
+        } else if ctx.vector == 6 {
+            crate::kerror!("User Illegal Instruction (SIGILL) at RIP: 0x{:016X}", ctx.rip);
+            crate::task::user::handle_user_fault(132);
+        } else if ctx.vector == 0 {
+            crate::kerror!("User Divide By Zero (SIGFPE) at RIP: 0x{:016X}", ctx.rip);
+            crate::task::user::handle_user_fault(136);
+        } else {
+            crate::kerror!("User CPU Exception #{} at RIP: 0x{:016X}", ctx.vector, ctx.rip);
+            crate::task::user::handle_user_fault(128 + ctx.vector as i32);
+        }
+    }
+
     match ctx.vector {
         14 => {
             // Page Fault

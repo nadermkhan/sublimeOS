@@ -27,7 +27,7 @@ pub extern "C" fn syscall_dispatcher(
             0
         }
         SYS_GETPID => 1,
-        SYS_EXIT => crate::task::scheduler::exit_current_thread(a1 as i32),
+        SYS_EXIT => crate::task::user::handle_user_exit(a1 as i32),
         _ => -38, // -ENOSYS
     }
 }

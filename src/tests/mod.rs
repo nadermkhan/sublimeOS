@@ -28,6 +28,7 @@ pub fn run_all_tests() {
     test_tcp_sockets();
     test_http_engine();
     test_audio_subsystem();
+    test_elf_loader();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -752,6 +753,77 @@ fn test_audio_subsystem() {
     assert_eq!(wav.samples.len(), 4);
     assert_eq!(wav.samples[0], 1000);
     assert_eq!(wav.samples[1], -1000);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_elf_loader() {
+    print!("  [TEST] ELF64 Loader & Ring 3 User Mode ... ");
+
+    // 1. Synthesize a valid 64-bit ELF binary in memory:
+    // Header (64 bytes) + Program Header (56 bytes) + Code Payload
+    let mut elf_bytes = Vec::new();
+
+    // ELF Header (64 bytes)
+    elf_bytes.extend_from_slice(&[0x7F, b'E', b'L', b'F']); // e_ident[0..4]
+    elf_bytes.push(2); // e_ident[4]: 64-bit (ELFCLASS64)
+    elf_bytes.push(1); // e_ident[5]: Little-endian (ELFDATA2LSB)
+    elf_bytes.push(1); // e_ident[6]: ELF Version 1
+    elf_bytes.extend_from_slice(&[0u8; 9]); // OS ABI and padding
+
+    elf_bytes.extend_from_slice(&2u16.to_le_bytes()); // e_type: ET_EXEC (2)
+    elf_bytes.extend_from_slice(&0x3Eu16.to_le_bytes()); // e_machine: EM_X86_64 (0x3E)
+    elf_bytes.extend_from_slice(&1u32.to_le_bytes()); // e_version: 1
+    elf_bytes.extend_from_slice(&0x0000000000400078u64.to_le_bytes()); // e_entry: 0x400078
+    elf_bytes.extend_from_slice(&64u64.to_le_bytes()); // e_phoff: 64 (immediately follows Ehdr)
+    elf_bytes.extend_from_slice(&0u64.to_le_bytes()); // e_shoff: 0
+    elf_bytes.extend_from_slice(&0u32.to_le_bytes()); // e_flags: 0
+    elf_bytes.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize: 64
+    elf_bytes.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize: 56
+    elf_bytes.extend_from_slice(&1u16.to_le_bytes()); // e_phnum: 1
+    elf_bytes.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize: 64
+    elf_bytes.extend_from_slice(&0u16.to_le_bytes()); // e_shnum: 0
+    elf_bytes.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx: 0
+    assert_eq!(elf_bytes.len(), 64);
+
+    // Code payload:
+    // mov eax, 60 (SYS_EXIT) -> b8 3c 00 00 00
+    // mov edi, 42            -> bf 2a 00 00 00
+    // int 0x80               -> cd 80
+    let code: [u8; 12] = [
+        0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60
+        0xBF, 0x2A, 0x00, 0x00, 0x00, // mov edi, 42
+        0xCD, 0x80,                   // int 0x80
+    ];
+
+    let total_file_size = 64u64 + 56u64 + code.len() as u64;
+
+    // ELF Program Header (56 bytes)
+    elf_bytes.extend_from_slice(&1u32.to_le_bytes()); // p_type: PT_LOAD (1)
+    elf_bytes.extend_from_slice(&7u32.to_le_bytes()); // p_flags: PF_R | PF_W | PF_X (7)
+    elf_bytes.extend_from_slice(&0u64.to_le_bytes()); // p_offset: 0
+    elf_bytes.extend_from_slice(&0x0000000000400000u64.to_le_bytes()); // p_vaddr: 0x400000
+    elf_bytes.extend_from_slice(&0x0000000000400000u64.to_le_bytes()); // p_paddr: 0x400000
+    elf_bytes.extend_from_slice(&total_file_size.to_le_bytes()); // p_filesz
+    elf_bytes.extend_from_slice(&total_file_size.to_le_bytes()); // p_memsz
+    elf_bytes.extend_from_slice(&4096u64.to_le_bytes()); // p_align: 4096
+    assert_eq!(elf_bytes.len(), 120);
+
+    // Append code payload
+    elf_bytes.extend_from_slice(&code);
+    assert_eq!(elf_bytes.len(), 132);
+
+    // 2. Validate ELF parsing
+    let elf = crate::task::elf::ElfBinary::parse(&elf_bytes).expect("Failed to parse valid ELF64");
+    assert_eq!(elf.entry_point(), 0x0000000000400078);
+    assert_eq!(elf.program_headers.len(), 1);
+    assert_eq!(elf.program_headers[0].p_type, crate::task::elf::PT_LOAD);
+    assert_eq!(elf.program_headers[0].p_vaddr, 0x0000000000400000);
+
+    // 3. Execute in Ring 3 and verify exit code 42
+    let exit_code = crate::task::user::execute_user_binary(&elf_bytes)
+        .expect("Failed to execute user binary in Ring 3");
+    assert_eq!(exit_code, 42);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
