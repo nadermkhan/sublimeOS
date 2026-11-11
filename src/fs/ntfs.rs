@@ -243,7 +243,10 @@ impl NtfsInode {
             curr_lcn += lcn_delta;
 
             let run_bytes = (run_len as usize) * cluster_bytes;
-            if offset + bytes_read >= logical_byte_pos && offset + bytes_read < logical_byte_pos + run_bytes {
+            while bytes_read < buf.len() && (offset + bytes_read) < (logical_byte_pos + run_bytes) {
+                if (offset + bytes_read) < logical_byte_pos {
+                    break;
+                }
                 let offset_in_run = (offset + bytes_read) - logical_byte_pos;
                 let cluster_idx_in_run = offset_in_run / cluster_bytes;
                 let offset_in_cluster = offset_in_run % cluster_bytes;

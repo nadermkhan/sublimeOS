@@ -28,6 +28,23 @@ multiboot2_header:
 .long MB2_LEN
 .long MB2_CHECKSUM
 
+/* Multiboot 2 Framebuffer Request Tag (Type 5) for modern UEFI GOP boot */
+.align 8
+.short 5           /* type: 5 = framebuffer request */
+.short 0           /* flags: 0 */
+.long 20           /* size: 20 bytes */
+.long 1024         /* width: 1024 */
+.long 768          /* height: 768 */
+.long 32           /* depth: 32 bpp */
+
+/* Multiboot 2 Information Request Tag (Type 1) */
+.align 8
+.short 1           /* type: 1 = information request */
+.short 0           /* flags: 0 */
+.long 16           /* size: 16 bytes */
+.long 8            /* requested tag: 8 = framebuffer info */
+.long 6            /* requested tag: 6 = memory map */
+
 /* End tag */
 .align 8
 .short 0
