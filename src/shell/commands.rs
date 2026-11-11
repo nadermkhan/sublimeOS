@@ -21,6 +21,9 @@ pub fn execute_command(line: &str) {
         "diskutil" => cmd_diskutil(args),
         "open" => cmd_open(args),
         "say" => cmd_say(args),
+        "beep" => cmd_beep(args),
+        "chime" => cmd_chime(),
+        "play" => cmd_play(args),
         "defaults" => cmd_defaults(args),
         "whoami" => println!("cosmos"),
         "hostname" => println!("CosmicOS.local"),
@@ -193,6 +196,32 @@ fn cmd_say(args: &[&str]) {
         &args.join(" ")
     };
     println!("\x1b[35m[SpeechSynthesis (Cosmic Voice)]\x1b[0m \"{}\"", text);
+    crate::drivers::audio::play_speech(text);
+}
+
+fn cmd_beep(args: &[&str]) {
+    let freq = args.first().and_then(|s| s.parse::<u32>().ok()).unwrap_or(880);
+    let ms = args.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(250);
+    println!("\x1b[36mBeeping at {} Hz for {} ms...\x1b[0m", freq, ms);
+    crate::drivers::audio::play_tone(freq, ms);
+}
+
+fn cmd_chime() {
+    println!("\x1b[35m[CosmicOS Audio] Playing Sublime Startup Chime (F-Major Harmonic Chord)...\x1b[0m");
+    crate::drivers::audio::play_cosmic_chime();
+}
+
+fn cmd_play(args: &[&str]) {
+    if args.is_empty() {
+        println!("Usage: play <audio_file.wav>");
+        return;
+    }
+    let path = args[0];
+    println!("\x1b[36mPlaying audio file '{}'...\x1b[0m", path);
+    match crate::drivers::audio::play_wav_file(path) {
+        Ok(()) => println!("\x1b[32mAudio playback complete.\x1b[0m"),
+        Err(e) => println!("\x1b[31mplay error: {}\x1b[0m", e),
+    }
 }
 
 fn cmd_defaults(args: &[&str]) {
@@ -235,6 +264,9 @@ fn cmd_help() {
     println!("  httpd [status]  CosmicOS Embedded Web Server dashboard");
     println!("  open <app/path> Open application or document (e.g. 'open Finder.app')");
     println!("  say <text>      Speech synthesis simulated audio banner");
+    println!("  beep [freq] [ms]Play audio tone via Intel HDA / PC Speaker");
+    println!("  chime           Play CosmicOS Sublime Startup Chime (F-Major chord)");
+    println!("  play <file.wav> Play RIFF/WAVE PCM audio file");
     println!("  defaults [read] Access CosmicOS user preferences and defaults");
     println!("  top             Display live Sublime tasks & memory stats");
     println!("  ps              List active Sublime tasks and kernel threads");

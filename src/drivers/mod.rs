@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod keyboard;
 pub mod mouse;
 pub mod net;
@@ -11,8 +12,9 @@ use crate::kinfo;
 pub fn init() {
     keyboard::init();
     pci::init();
+    audio::init();
     storage::init();
     usb::init();
     mouse::init(1024, 768);
-    kinfo!("Device drivers initialized (Keyboard, Mouse, PCI, Storage, USB)");
+    kinfo!("Device drivers initialized (Keyboard, Mouse, PCI, Audio, Storage, USB)");
 }

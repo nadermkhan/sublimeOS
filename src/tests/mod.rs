@@ -27,6 +27,7 @@ pub fn run_all_tests() {
     test_tcpip_stack();
     test_tcp_sockets();
     test_http_engine();
+    test_audio_subsystem();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -696,6 +697,61 @@ fn test_http_engine() {
 
     let html_resp = crate::net::http::generate_httpd_response("/");
     assert!(html_resp.contains("Sublime Dashboard") && html_resp.contains("200 OK"));
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_audio_subsystem() {
+    print!("  [TEST] Audio Subsystem & PCM Synthesis ... ");
+
+    // 1. Test fast integer sine
+    assert_eq!(crate::drivers::audio::pcm::integer_sin(0), 0);
+    assert!(crate::drivers::audio::pcm::integer_sin(32) > 0);
+    assert_eq!(crate::drivers::audio::pcm::integer_sin(64), 32767);
+    assert_eq!(crate::drivers::audio::pcm::integer_sin(128), 0);
+    assert_eq!(crate::drivers::audio::pcm::integer_sin(192), -32767);
+
+    // 2. Test Tone Generator
+    let tone = crate::drivers::audio::pcm::generate_sine_wave(440, 20, 44100);
+    let expected_samples = (44100 * 20 / 1000) * 2; // Stereo
+    assert_eq!(tone.len(), expected_samples);
+
+    // 3. Test Cosmic Startup Chime generator
+    let chime = crate::drivers::audio::pcm::generate_cosmic_chime(44100);
+    assert!(chime.len() > 44100);
+
+    // 4. Test Phonetic formant generator
+    let phoneme = crate::drivers::audio::pcm::generate_phoneme_tone(b'A', 30, 44100);
+    assert_eq!(phoneme.len(), (44100 * 30 / 1000) * 2);
+
+    // 5. Test RIFF/WAVE PCM parser
+    let mut wav_bytes = Vec::new();
+    wav_bytes.extend_from_slice(b"RIFF");
+    let file_len = 36u32 + 8u32;
+    wav_bytes.extend_from_slice(&file_len.to_le_bytes());
+    wav_bytes.extend_from_slice(b"WAVE");
+    wav_bytes.extend_from_slice(b"fmt ");
+    wav_bytes.extend_from_slice(&16u32.to_le_bytes()); // Subchunk1Size
+    wav_bytes.extend_from_slice(&1u16.to_le_bytes());  // AudioFormat (PCM)
+    wav_bytes.extend_from_slice(&2u16.to_le_bytes());  // NumChannels (Stereo)
+    wav_bytes.extend_from_slice(&44100u32.to_le_bytes()); // SampleRate
+    wav_bytes.extend_from_slice(&(44100u32 * 4).to_le_bytes()); // ByteRate
+    wav_bytes.extend_from_slice(&4u16.to_le_bytes());  // BlockAlign
+    wav_bytes.extend_from_slice(&16u16.to_le_bytes()); // BitsPerSample
+    wav_bytes.extend_from_slice(b"data");
+    wav_bytes.extend_from_slice(&8u32.to_le_bytes());  // Subchunk2Size (4 samples of 16-bit)
+    wav_bytes.extend_from_slice(&1000i16.to_le_bytes());
+    wav_bytes.extend_from_slice(&(-1000i16).to_le_bytes());
+    wav_bytes.extend_from_slice(&2000i16.to_le_bytes());
+    wav_bytes.extend_from_slice(&(-2000i16).to_le_bytes());
+
+    let wav = crate::drivers::audio::pcm::parse_wav(&wav_bytes).expect("Failed to parse valid WAV");
+    assert_eq!(wav.sample_rate, 44100);
+    assert_eq!(wav.channels, 2);
+    assert_eq!(wav.bits_per_sample, 16);
+    assert_eq!(wav.samples.len(), 4);
+    assert_eq!(wav.samples[0], 1000);
+    assert_eq!(wav.samples[1], -1000);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

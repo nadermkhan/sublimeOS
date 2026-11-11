@@ -20,7 +20,7 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host "        Launching CosmosKernel in QEMU        " -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-$qemuArgs = @("-kernel", "cosmoskernel32.elf", "-m", "128M")
+$qemuArgs = @("-kernel", "cosmoskernel32.elf", "-m", "128M", "-audiodev", "none,id=snd0", "-device", "intel-hda", "-device", "hda-duplex,audiodev=snd0")
 
 if ($Headless) {
     Write-Host "Starting QEMU in headless terminal mode (COM1 serial stdio)..." -ForegroundColor Green
