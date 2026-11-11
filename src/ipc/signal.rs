@@ -1,3 +1,39 @@
+pub const SIG_DFL: usize = 0;
+pub const SIG_IGN: usize = 1;
+
+pub const SIG_BLOCK: i32 = 0;
+pub const SIG_UNBLOCK: i32 = 1;
+pub const SIG_SETMASK: i32 = 2;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SigAction {
+    pub sa_handler: usize,
+    pub sa_flags: u64,
+    pub sa_restorer: usize,
+    pub sa_mask: u64,
+}
+
+impl SigAction {
+    pub const fn default() -> Self {
+        Self {
+            sa_handler: SIG_DFL,
+            sa_flags: 0,
+            sa_restorer: 0,
+            sa_mask: 0,
+        }
+    }
+
+    pub const fn new(handler: usize) -> Self {
+        Self {
+            sa_handler: handler,
+            sa_flags: 0,
+            sa_restorer: 0,
+            sa_mask: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Signal {

@@ -6,6 +6,7 @@ use crate::kinfo;
 
 pub mod ata;
 pub mod ahci;
+pub mod nvme;
 
 pub trait BlockDevice: Send + Sync {
     fn name(&self) -> &str;
@@ -53,4 +54,7 @@ pub fn init() {
 
     // 2. Scan AHCI SATA controllers via PCI
     ahci::init();
+
+    // 3. Scan PCIe NVMe controllers via PCI
+    nvme::init();
 }

@@ -38,6 +38,9 @@ pub extern "C" fn syscall_dispatcher(
         SYS_FORK => crate::task::process::sys_fork() as i64,
         SYS_EXECVE => crate::task::process::sys_execve(a1 as *const u8, a2 as *const *const u8, a3 as *const *const u8) as i64,
         SYS_WAIT4 => crate::task::process::sys_waitpid(a1 as i64, a2 as *mut i32, a3 as i32) as i64,
+        SYS_KILL => crate::task::process::sys_kill(a1 as i32, a2 as i32) as i64,
+        SYS_RT_SIGACTION => crate::task::process::sys_rt_sigaction(a1 as i32, a2 as *const crate::ipc::signal::SigAction, a3 as *mut crate::ipc::signal::SigAction, _a4 as usize) as i64,
+        SYS_RT_SIGPROCMASK => crate::task::process::sys_rt_sigprocmask(a1 as i32, a2 as *const u64, a3 as *mut u64, _a4 as usize) as i64,
         SYS_EXIT => crate::task::user::handle_user_exit(a1 as i32),
         _ => -38, // -ENOSYS
     }

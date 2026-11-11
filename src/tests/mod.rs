@@ -33,6 +33,9 @@ pub fn run_all_tests() {
     test_userland_binaries();
     test_process_fork_cow();
     test_dynamic_linker_and_shared_libraries();
+    test_posix_signals();
+    test_smp_and_apic_subsystem();
+    test_storage_ahci_and_nvme();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -1066,6 +1069,124 @@ fn test_dynamic_linker_and_shared_libraries() {
     let exit_code = crate::task::user::execute_user_binary(&buf[..n])
         .expect("Failed to execute dynamic binary /bin/dyntest in Ring 3");
     assert_eq!(exit_code, 0);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_posix_signals() {
+    print!("  [TEST] POSIX Signals & Process Control ... ");
+
+    // 1. Test sigaction: query and set signal handler
+    let mut old_act = crate::ipc::signal::SigAction::default();
+    let new_act = crate::ipc::signal::SigAction::new(0x401000); // Custom handler address
+    let ret = crate::task::process::sys_rt_sigaction(2, &new_act, &mut old_act, 8); // SIGINT
+    assert_eq!(ret, 0);
+    assert_eq!(old_act.sa_handler, crate::ipc::signal::SIG_DFL);
+
+    // Verify changed handler
+    let mut curr_act = crate::ipc::signal::SigAction::default();
+    crate::task::process::sys_rt_sigaction(2, core::ptr::null(), &mut curr_act, 8);
+    assert_eq!(curr_act.sa_handler, 0x401000);
+
+    // Restore to default
+    let def_act = crate::ipc::signal::SigAction::default();
+    crate::task::process::sys_rt_sigaction(2, &def_act, core::ptr::null_mut(), 8);
+
+    // 2. Test sigprocmask: block and unblock signals
+    let block_set: u64 = 1 << 2; // Block SIGINT
+    let mut old_set: u64 = 0;
+    let ret_mask = crate::task::process::sys_rt_sigprocmask(crate::ipc::signal::SIG_BLOCK, &block_set, &mut old_set, 8);
+    assert_eq!(ret_mask, 0);
+
+    let mut queried_mask: u64 = 0;
+    crate::task::process::sys_rt_sigprocmask(crate::ipc::signal::SIG_SETMASK, core::ptr::null(), &mut queried_mask, 8);
+    assert_eq!(queried_mask & (1 << 2), 1 << 2);
+
+    // Unblock SIGINT
+    crate::task::process::sys_rt_sigprocmask(crate::ipc::signal::SIG_UNBLOCK, &block_set, core::ptr::null_mut(), 8);
+
+    // 3. Test inter-process signal delivery (sys_kill -> SIGINT default termination)
+    let parent_pid = crate::task::process::get_current_pid();
+    let child_pid = crate::task::process::alloc_process("sig_child");
+
+    // Send SIGINT to child
+    let kill_ret = crate::task::process::sys_kill(child_pid as i32, 2);
+    assert_eq!(kill_ret, 0);
+
+    // Verify child transitioned to Zombie with status 130 (128 + 2)
+    let child_proc = crate::task::process::get_process(child_pid).expect("Child process missing");
+    assert_eq!(child_proc.lock().state, crate::task::process::ProcessState::Zombie(130));
+
+    // Verify parent received SIGCHLD
+    let parent_proc = crate::task::process::get_process(parent_pid).expect("Parent process missing");
+    assert_eq!(parent_proc.lock().signal_state.pending & (1 << 17), 1 << 17);
+
+    // Reap child via sys_waitpid
+    let mut status = 0i32;
+    let waited = crate::task::process::sys_waitpid(child_pid as i64, &mut status, 0);
+    assert_eq!(waited, child_pid as i32);
+    assert_eq!(status >> 8, 130);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_smp_and_apic_subsystem() {
+    print!("  [TEST] SMP Multi-Core, ACPI MADT & APIC ... ");
+
+    // 1. Verify Local APIC is supported and online
+    assert!(crate::arch::x86_64::apic::is_supported(), "Local APIC not supported by CPU");
+    let bsp_id = crate::arch::x86_64::apic::get_apic_id();
+
+    // 2. Verify ACPI MADT parsing
+    let madt = crate::arch::x86_64::madt::MADT.lock();
+    assert!(madt.lapic_address != 0, "MADT LAPIC address is 0");
+    drop(madt);
+
+    // 3. Verify I/O APIC presence and Redirection Table access
+    let ioapic_virt = crate::arch::x86_64::ioapic::get_ioapic_base_virt();
+    assert!(ioapic_virt != 0, "I/O APIC MMIO base not mapped");
+    let redtbl1 = unsafe { crate::arch::x86_64::ioapic::read_redirection_entry(1) };
+    assert_eq!(redtbl1 & 0xFF, 33, "IRQ 1 not routed to vector 33");
+
+    // 4. Verify SMP Manager discovered cores and active BSP
+    let smp = crate::arch::x86_64::smp::SMP.lock();
+    assert!(smp.cpu_count() >= 1, "SMP CPU count is 0");
+    assert!(smp.online_count() >= 1, "No online CPUs in SMP");
+    assert_eq!(smp.bsp_apic_id, bsp_id);
+
+    // 5. Test IPI dispatch interface if AP core exists
+    if let Some(ap) = smp.cores.iter().find(|c| !c.is_bsp) {
+        crate::arch::x86_64::apic::send_init_ipi(ap.apic_id);
+        crate::arch::x86_64::apic::send_sipi(ap.apic_id, 0x08);
+    }
+    drop(smp);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_storage_ahci_and_nvme() {
+    print!("  [TEST] Storage Drivers (AHCI SATA & NVMe SSD) ... ");
+
+    // 1. Verify AHCI data structure alignments and command FIS encoding
+    assert_eq!(core::mem::size_of::<crate::drivers::storage::ahci::AhciCmdHeader>(), 32);
+    assert_eq!(core::mem::size_of::<crate::drivers::storage::ahci::AhciPrdtEntry>(), 16);
+    assert_eq!(core::mem::size_of::<crate::drivers::storage::ahci::AhciCmdTable>(), 144);
+
+    // 2. Verify NVMe data structure sizes and queue layouts
+    assert_eq!(core::mem::size_of::<crate::drivers::storage::nvme::NvmeSqEntry>(), 64);
+    assert_eq!(core::mem::size_of::<crate::drivers::storage::nvme::NvmeCqEntry>(), 16);
+
+    // 3. Test unified Block Device abstraction
+    let test_dev: Arc<dyn BlockDevice> = MemBlockDevice::new("sim_disk0", 4096);
+    crate::drivers::storage::STORAGE_MANAGER.lock().register(test_dev.clone());
+
+    let mut write_buf = [0u8; 512];
+    write_buf[0..16].copy_from_slice(b"COSMIC_AHCI_NVME");
+    test_dev.write_sectors(42, 1, &write_buf).expect("Block write failed");
+
+    let mut read_buf = [0u8; 512];
+    test_dev.read_sectors(42, 1, &mut read_buf).expect("Block read failed");
+    assert_eq!(&read_buf[0..16], b"COSMIC_AHCI_NVME");
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

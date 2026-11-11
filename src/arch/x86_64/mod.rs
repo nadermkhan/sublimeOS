@@ -3,6 +3,8 @@ pub mod apic;
 pub mod gdt;
 pub mod idt;
 pub mod io;
+pub mod ioapic;
+pub mod madt;
 pub mod msr;
 pub mod multiboot;
 pub mod pic;
@@ -10,6 +12,7 @@ pub mod pit;
 pub mod registers;
 pub mod rtc;
 pub mod serial;
+pub mod smp;
 pub mod syscall;
 pub mod vga;
 
@@ -46,7 +49,12 @@ pub fn init() {
     // 8. Initialize AMD64 fast syscall (LSTAR/STAR)
     syscall::init();
     kinfo!("Fast syscall interface initialized");
+}
 
-    // 9. Discover ACPI tables for power management
+/// Initialize ACPI, Local APIC, I/O APIC, and SMP multiprocessing once memory management is active.
+pub fn init_apic_smp() {
     acpi::init();
+    apic::init();
+    ioapic::init();
+    smp::init();
 }

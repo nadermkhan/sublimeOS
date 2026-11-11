@@ -198,6 +198,46 @@ pub fn nanosleep(ms: u64) {
     }
 }
 
+/// POSIX kill() system call wrapper
+pub fn kill(pid: i32, sig: i32) -> i32 {
+    unsafe {
+        syscall2(SYS_KILL, pid as u64, sig as u64) as i32
+    }
+}
+
+/// POSIX sigaction() system call wrapper
+pub fn sigaction(
+    sig: i32,
+    act: Option<&crate::ipc::signal::SigAction>,
+    oact: Option<&mut crate::ipc::signal::SigAction>,
+) -> i32 {
+    let act_ptr = act.map(|a| a as *const crate::ipc::signal::SigAction).unwrap_or(core::ptr::null());
+    let oact_ptr = oact.map(|o| o as *mut crate::ipc::signal::SigAction).unwrap_or(core::ptr::null_mut());
+    unsafe {
+        syscall3(SYS_RT_SIGACTION, sig as u64, act_ptr as u64, oact_ptr as u64) as i32
+    }
+}
+
+/// POSIX sigprocmask() system call wrapper
+pub fn sigprocmask(how: i32, set: Option<&u64>, oldset: Option<&mut u64>) -> i32 {
+    let set_ptr = set.map(|s| s as *const u64).unwrap_or(core::ptr::null());
+    let oldset_ptr = oldset.map(|o| o as *mut u64).unwrap_or(core::ptr::null_mut());
+    unsafe {
+        syscall3(SYS_RT_SIGPROCMASK, how as u64, set_ptr as u64, oldset_ptr as u64) as i32
+    }
+}
+
+/// POSIX signal() convenience function
+pub fn signal(sig: i32, handler: usize) -> usize {
+    let new_act = crate::ipc::signal::SigAction::new(handler);
+    let mut old_act = crate::ipc::signal::SigAction::default();
+    if sigaction(sig, Some(&new_act), Some(&mut old_act)) == 0 {
+        old_act.sa_handler
+    } else {
+        usize::MAX // SIG_ERR
+    }
+}
+
 /// POSIX exit() system call wrapper
 pub fn exit(status: i32) -> ! {
     unsafe {

@@ -38,6 +38,20 @@ impl PciDevice {
             _ => "Unknown Controller",
         }
     }
+
+    pub fn read_bar(&self, index: u8) -> u64 {
+        if index > 5 {
+            return 0;
+        }
+        let offset = 0x10 + index * 4;
+        let bar_low = unsafe { PciBus::read_config_dword(self.bus, self.device, self.function, offset) };
+        if (bar_low & 0x06) == 0x04 && index < 5 {
+            let bar_high = unsafe { PciBus::read_config_dword(self.bus, self.device, self.function, offset + 4) };
+            ((bar_high as u64) << 32) | ((bar_low & 0xFFFF_FFF0) as u64)
+        } else {
+            (bar_low & 0xFFFF_FFF0) as u64
+        }
+    }
 }
 
 pub struct PciBus {

@@ -44,6 +44,9 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     mm::vmm::VMM.lock().init();
     mm::heap::HEAP_ALLOCATOR.init();
 
+    // 2.1. Initialize Local APIC, I/O APIC, and SMP Multiprocessing Subsystem
+    arch::x86_64::init_apic_smp();
+
     // 3. Initialize Preemptive Multitasking Scheduler
     task::scheduler::init();
 

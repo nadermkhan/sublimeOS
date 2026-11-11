@@ -39,6 +39,8 @@ pub struct ProcessControlBlock {
     pub children: Vec<ProcessId>,
     pub fd_table: Vec<Option<Arc<File>>>,
     pub exit_code: i32,
+    pub signal_state: crate::ipc::signal::SignalState,
+    pub sigactions: [crate::ipc::signal::SigAction; 32],
 }
 
 impl ProcessControlBlock {
@@ -57,6 +59,8 @@ impl ProcessControlBlock {
             children: Vec::new(),
             fd_table,
             exit_code: 0,
+            signal_state: crate::ipc::signal::SignalState::new(),
+            sigactions: [crate::ipc::signal::SigAction::default(); 32],
         }
     }
 
@@ -116,10 +120,19 @@ pub fn get_process(pid: ProcessId) -> Option<Arc<IrqSafeSpinlock<ProcessControlB
 
 /// Mark a process as a Zombie with the given exit code.
 pub fn exit_process(pid: ProcessId, code: i32) {
-    if let Some(proc) = get_process(pid) {
+    let ppid = if let Some(proc) = get_process(pid) {
         let mut p = proc.lock();
         p.state = ProcessState::Zombie(code);
         p.exit_code = code;
+        p.ppid
+    } else {
+        0
+    };
+
+    if ppid != 0 {
+        if let Some(parent) = get_process(ppid) {
+            parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
+        }
     }
 }
 
@@ -134,9 +147,12 @@ pub fn sys_fork() -> i32 {
             let mut child_pcb = ProcessControlBlock::new(child_pid, parent_pid, "fork_child");
             child_pcb.address_space = Some(child_space);
 
-            // Record child in parent PCB
+            // Inherit signals and record child in parent PCB
             if let Some(parent_proc) = get_process(parent_pid) {
-                parent_proc.lock().children.push(child_pid);
+                let mut p = parent_proc.lock();
+                p.children.push(child_pid);
+                child_pcb.sigactions = p.sigactions;
+                child_pcb.signal_state.blocked = p.signal_state.blocked;
             }
 
             PROCESS_TABLE.lock().push(Arc::new(IrqSafeSpinlock::new(child_pcb)));
@@ -251,4 +267,165 @@ pub fn sys_execve(path_ptr: *const u8, _argv: *const *const u8, _envp: *const *c
         }
         Err(_) => -8, // -ENOEXEC
     }
+}
+
+/// POSIX sys_kill (Syscall 62): Sends a signal to a process or process group.
+pub fn sys_kill(pid: i32, sig: i32) -> i32 {
+    if sig < 0 || sig >= 32 {
+        return -22; // -EINVAL
+    }
+
+    if sig == 0 {
+        // Just verify process existence
+        if pid > 0 {
+            if get_process(pid as u64).is_some() {
+                return 0;
+            } else {
+                return -3; // -ESRCH
+            }
+        }
+        return 0;
+    }
+
+    let signal = match crate::ipc::signal::Signal::from_u32(sig as u32) {
+        Some(s) => s,
+        None => return -22, // -EINVAL
+    };
+
+    let target_pid = if pid > 0 {
+        pid as u64
+    } else if pid == 0 || pid == -1 {
+        get_current_pid()
+    } else {
+        (-pid) as u64
+    };
+
+    let proc = match get_process(target_pid) {
+        Some(p) => p,
+        None => return -3, // -ESRCH
+    };
+
+    let mut p = proc.lock();
+
+    // SIGKILL cannot be caught or ignored
+    if signal == crate::ipc::signal::Signal::SIGKILL {
+        p.state = ProcessState::Zombie(128 + sig);
+        p.exit_code = 128 + sig;
+        let ppid = p.ppid;
+        drop(p);
+        if ppid != 0 {
+            if let Some(parent) = get_process(ppid) {
+                parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
+            }
+        }
+        return 0;
+    }
+
+    let action = p.sigactions[sig as usize];
+    if action.sa_handler == crate::ipc::signal::SIG_IGN {
+        return 0;
+    }
+
+    p.signal_state.send(signal);
+
+    // If default action for terminating signals
+    if action.sa_handler == crate::ipc::signal::SIG_DFL {
+        match signal {
+            crate::ipc::signal::Signal::SIGINT
+            | crate::ipc::signal::Signal::SIGTERM
+            | crate::ipc::signal::Signal::SIGQUIT
+            | crate::ipc::signal::Signal::SIGABRT
+            | crate::ipc::signal::Signal::SIGSEGV
+            | crate::ipc::signal::Signal::SIGBUS
+            | crate::ipc::signal::Signal::SIGFPE => {
+                p.state = ProcessState::Zombie(128 + sig);
+                p.exit_code = 128 + sig;
+                let ppid = p.ppid;
+                drop(p);
+                if ppid != 0 {
+                    if let Some(parent) = get_process(ppid) {
+                        parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    0
+}
+
+/// POSIX sys_rt_sigaction (Syscall 13): Examines and changes a signal action.
+pub fn sys_rt_sigaction(
+    sig: i32,
+    act_ptr: *const crate::ipc::signal::SigAction,
+    oact_ptr: *mut crate::ipc::signal::SigAction,
+    _sigsetsize: usize,
+) -> i32 {
+    if sig <= 0 || sig >= 32 || sig == 9 || sig == 19 {
+        return -22; // -EINVAL (SIGKILL and SIGSTOP cannot be modified)
+    }
+
+    let current_pid = get_current_pid();
+    let proc = match get_process(current_pid) {
+        Some(p) => p,
+        None => return -3, // -ESRCH
+    };
+
+    let mut p = proc.lock();
+
+    if !oact_ptr.is_null() {
+        unsafe {
+            *oact_ptr = p.sigactions[sig as usize];
+        }
+    }
+
+    if !act_ptr.is_null() {
+        unsafe {
+            p.sigactions[sig as usize] = *act_ptr;
+        }
+    }
+
+    0
+}
+
+/// POSIX sys_rt_sigprocmask (Syscall 14): Examines and changes blocked signals.
+pub fn sys_rt_sigprocmask(
+    how: i32,
+    set_ptr: *const u64,
+    oldset_ptr: *mut u64,
+    _sigsetsize: usize,
+) -> i32 {
+    let current_pid = get_current_pid();
+    let proc = match get_process(current_pid) {
+        Some(p) => p,
+        None => return -3, // -ESRCH
+    };
+
+    let mut p = proc.lock();
+
+    if !oldset_ptr.is_null() {
+        unsafe {
+            *oldset_ptr = p.signal_state.blocked;
+        }
+    }
+
+    if !set_ptr.is_null() {
+        let set = unsafe { *set_ptr };
+        let unblockable = (1 << 9) | (1 << 19);
+        match how {
+            crate::ipc::signal::SIG_BLOCK => {
+                p.signal_state.blocked |= set & !unblockable;
+            }
+            crate::ipc::signal::SIG_UNBLOCK => {
+                p.signal_state.blocked &= !(set & !unblockable);
+            }
+            crate::ipc::signal::SIG_SETMASK => {
+                p.signal_state.blocked = set & !unblockable;
+            }
+            _ => return -22, // -EINVAL
+        }
+    }
+
+    0
 }

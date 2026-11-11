@@ -126,6 +126,8 @@ fn parse_rsdp(rsdp_phys: u64, out: &mut AcpiInfo) {
         if sig == b"FACP" {
             out.fadt_addr = table_phys;
             parse_fadt(table_virt, out);
+        } else if sig == b"APIC" {
+            crate::arch::x86_64::madt::parse_madt(table_phys);
         }
     }
 }

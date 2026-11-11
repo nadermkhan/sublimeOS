@@ -13,8 +13,9 @@
 [![UserSpace](https://img.shields.io/badge/userspace-ELF64%20%7C%20Ring%203%20%7C%20Syscall-blueviolet.svg)]()
 
 CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed in safe, idiomatic `#![no_std]` Rust with zero external runtime dependencies. Powered by the **Sublime Kernel**, CosmicOS boots natively via Multiboot 1/2, transitions to 64-bit Long Mode, maps kernel space to the higher half (`0xFFFFFFFF80000000+`), and initializes an enterprise-grade OS stack:
-- **Multitasking & User Space**: Preemptive round-robin & priority scheduler, 64-bit ELF binary loader, hardware memory isolation, Ring 3 user privilege transition (`iretq`, `syscall`/`sysretq`), copy-on-write process fork (`fork`/`execve`/`waitpid`), dynamic runtime linker (`ld-cosmic.so`), userspace C standard library (`cosmic-libc`), and native user binaries in `/bin` (`/bin/init`, `/bin/calc`, `/bin/sh`, `/bin/snake`, `/bin/dyntest`) and shared libraries in `/lib` (`ld-cosmic.so`, `libc.so`, `libm.so`).
-- **Storage & Filesystems**: Real Read/Write FAT32 cluster allocator, exFAT parser, Linux ext4 superblock/extent-tree mapping, and Windows NTFS resident `$DATA` / `$MFT` parser, alongside USB Mass Storage (SCSI / Bulk-Only Transport over xHCI / EHCI).
+- **Multitasking & User Space**: Preemptive round-robin & priority scheduler, 64-bit ELF binary loader, hardware memory isolation, Ring 3 user privilege transition (`iretq`, `syscall`/`sysretq`), copy-on-write process fork (`fork`/`execve`/`waitpid`), POSIX signal subsystem (`sigaction`, `sigprocmask`, `kill`), dynamic runtime linker (`ld-cosmic.so`), userspace C standard library (`cosmic-libc`), and native user binaries in `/bin` (`/bin/init`, `/bin/calc`, `/bin/sh`, `/bin/snake`, `/bin/dyntest`) and shared libraries in `/lib` (`ld-cosmic.so`, `libc.so`, `libm.so`).
+- **SMP Multi-Core & APIC Architecture**: ACPI MADT table parsing, Local APIC (LAPIC) timer and IPI dispatch, I/O APIC redirection table routing (masking legacy 8259 PIC), and SMP multi-processor core initialization (INIT-SIPI-SIPI).
+- **Storage & Block Devices**: Real Read/Write FAT32 cluster allocator, exFAT parser, Linux ext4 extent tree mapping, Windows NTFS resident `$DATA` / `$MFT` parser, AHCI SATA controller driver (Command Lists, PRDT DMA), PCIe NVMe controller driver (Admin & I/O SQ/CQ circular rings, doorbells), and USB Mass Storage (SCSI / Bulk-Only Transport).
 - **Network Protocol Stack**: Full TCP/IP stack (Ethernet II, ARP, IPv4, ICMP Ping, UDP, RFC 793 TCP state machine, BSD Socket API), IEEE 802.11 Wi-Fi subsystem (beacon frame parsing, 4-way handshake, WPA2-PSK with PBKDF2-SHA1), Intel e1000 Gigabit NIC driver, HTTP/1.1 client (`curl`), and embedded HTTP server (`httpd`).
 - **Intel HDA Audio Subsystem**: Intel High Definition Audio (HDA) controller driver, pure integer quarter-wave sine synthesis, RIFF/WAVE PCM parser, hardware PC speaker fallback, and the iconic CosmicOS startup chime.
 - **POSIX Shell, Pipelines & In-Terminal Editor**: Shell with pipelines (`|`), I/O redirection (`>`, `>>`, `<`), Unix filters (`grep`, `wc`, `head`, `tail`, `sort`, `uniq`), and full-screen terminal editor (`nano` / `edit`).
@@ -95,7 +96,9 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
 - **Global Descriptor Table (GDT) & TSS (`gdt.rs`)**: Configures 64-bit Kernel Code (`0x08`), Kernel Data (`0x10`), User Data (`0x1B`, DPL 3), User Code (`0x23`, DPL 3), and Task State Segment (`0x28`). Installs dedicated Interrupt Stack Tables (`IST1` for Double Fault, `IST2` for Page Fault).
 - **Interrupt Descriptor Table (IDT) (`idt.rs`)**: 256 vector gates handling all x86_64 CPU exceptions with registers/CR2 dump, hardware IRQs 32..47, and `int 0x80` syscall vector. Isolates user-mode traps (`#PF`, `#GP`, `#UD`, `#DE`) to prevent kernel panics.
 - **Fast AMD64 System Calls (`syscall.rs`)**: Configures MSRs `IA32_EFER.SCE`, `IA32_STAR`, `IA32_LSTAR` (`syscall_entry`), and `IA32_FMASK` for hardware-accelerated user/kernel transitions.
-- **ACPI Power Management (`acpi.rs`)**: Parses RSDP, RSDT, XSDT, and FADT tables; enables clean hardware poweroff (`_S5`) and reset across real Intel and AMD motherboards.
+- **ACPI & MADT Table Parser (`acpi.rs`, `madt.rs`)**: Parses RSDP, RSDT, XSDT, FADT, and MADT (Multiple APIC Description Table), enumerating physical CPU cores, Local APIC base (`0xFEE00000`), I/O APIC address (`0xFEC00000`), and Interrupt Source Overrides.
+- **Local APIC & I/O APIC Drivers (`apic.rs`, `ioapic.rs`)**: Maps LAPIC and I/O APIC MMIO registers, programs Spurious Vector Register (SVR), calibrates APIC timer, sends Inter-Processor Interrupts (IPIs) via ICR, configures 64-bit Redirection Table entries, and masks legacy 8259 PIC.
+- **SMP Multiprocessing Architecture (`smp.rs`)**: Bootstrap Processor (BSP) detection and Application Processor (AP) core wakeup sequence using INIT-SIPI-SIPI inter-processor interrupts.
 - **Serial & VGA Text Display (`serial.rs`, `vga.rs`)**: 16550A UART driver with IRQ-driven ring buffers for COM1 and COM2; 80x25 color VGA text driver with scrolling, ANSI escape color rendering, and thread-safe stdout capture hooks.
 
 ### 2. Memory Management (`src/mm`)
@@ -116,13 +119,14 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
   - Page Fault CoW Engine (Exception 14): When child or parent attempts to write to a CoW page, the page fault handler transparently allocates a new 4096-byte frame, copies memory, remaps with `PAGE_WRITABLE`, or promotes permissions in-place if refcount is 1, immediately resuming user code via `iretq`.
   - `sys_waitpid()` (Syscall 61): Blocks until target child or any child terminates, returning status code and reaping process structures.
   - `sys_execve()` (Syscall 59): Replaces current process image with a new ELF executable.
+  - **POSIX Signals Subsystem (`signal.rs`, `sys_rt_sigaction`, `sys_rt_sigprocmask`, `sys_kill`)**: Per-process signal action tables (`SigAction`), blocked signal bitmasks, pending signals delivery, asynchronous inter-process signaling (`sys_kill`), child termination signals (`SIGCHLD` to parent), and unblockable signals (`SIGKILL`, `SIGSTOP`).
 
 ### 4. Userspace C Standard Library (`cosmic-libc`), Dynamic Linker & Binaries (`src/user`)
 - **Dynamic Linker & Shared Libraries (`linker.rs`)**: Dynamic runtime linker resolving shared library dependencies from `/lib`, parsing export symbols, and performing AMD64 relocations (`R_X86_64_JUMP_SLOT`, `R_X86_64_GLOB_DAT`, `R_X86_64_64`, `R_X86_64_RELATIVE`) by patching Global Offset Table (GOT) slots in user memory.
 - **Userspace C Standard Library (`libc.rs`)**: Standard userspace runtime implementing POSIX syscall wrappers (`syscall0`..`syscall3`):
   - File I/O: `write()`, `read()`, `open()`, `close()`.
   - Memory Management: `brk()` and `malloc()` / `free()` heap allocator.
-  - Process Credentials & Control: `fork()`, `waitpid()`, `execve()`, `getpid()`, `uname()`, `nanosleep()`, and `exit()`.
+  - Process Credentials & Control: `fork()`, `waitpid()`, `execve()`, `kill()`, `sigaction()`, `sigprocmask()`, `signal()`, `getpid()`, `uname()`, `nanosleep()`, and `exit()`.
   - Console Printing: `puts()`, `putchar()`, ANSI formatting.
 - **ELF64 Binary Synthesizer (`builder.rs`)**: Lightweight assembler generating self-contained 64-bit ELF executables and shared libraries (`ET_EXEC`, `ET_DYN`) with dynamic tables, strings, symbols, and PLT/GOT relocation headers.
 - **Shared Libraries (`/lib`)**:
@@ -136,7 +140,10 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
   - `/bin/snake`: Full-screen ASCII arcade game running in Ring 3 utilizing ANSI escape codes and PIT sleep timers.
   - `/bin/dyntest`: Dynamically linked executable requesting `/lib/ld-cosmic.so` interpreter, dynamically importing and linking `cosmic_puts`, `cosmic_pow`, and `cosmic_exit` across shared libraries.
 
-### 5. Advanced Filesystems & USB Storage (`src/fs`)
+### 5. Advanced Filesystems & Real Block Storage (`src/fs`, `src/drivers/storage`)
+- **AHCI SATA Controller Driver (`src/drivers/storage/ahci.rs`)**: PCI discovery (Class 0x01, Subclass 0x06), ABAR (BAR5) MMIO mapping, Generic Host Control (GHC.AE AHCI enable), Command List headers (32 slots), Received FIS structure, Command Tables with Physical Region Descriptor Tables (PRDT), and ATA DMA commands (`IDENTIFY DEVICE`, `READ DMA EXT`, `WRITE DMA EXT`).
+- **PCIe NVMe Controller Driver (`src/drivers/storage/nvme.rs`)**: PCI discovery (Class 0x01, Subclass 0x08), 64-bit BAR0 MMIO mapping, Controller Configuration (`CC.EN`), Admin Submission & Completion Queue rings (ASQ/ACQ), Doorbell Stride dispatching, Admin Identify commands (`Identify Controller`, `Identify Namespace 1`), and I/O Submission/Completion Queue creation for direct NVMe block Read/Write commands.
+- **Unified Block Device Interface (`BlockDevice`)**: Pluggable storage abstraction supporting sector reads/writes across ATA IDE, AHCI SATA, NVMe SSDs, USB mass storage drives, and memory-backed block devices.
 - **FAT32 R/W (`fat32.rs`)**: Real Read/Write implementation with partition discovery, BPB decoding, cluster allocation bitmap scanning, cluster chain traversal, LFN directory parsing, and file creation/overwriting.
 - **exFAT (`exfat.rs`)**: Sector-accurate exFAT parser supporting Main Boot Region, Volume Flags, Cluster Heap allocation, Stream Extension entries, and file traversal.
 - **ext4 (`ext4.rs`)**: Linux ext4 superblock parser, Block Group Descriptor Table lookup, inode table traversal, and B-tree extent tree (`ext4_extent_header`, `ext4_extent`) physical block resolution.
@@ -245,7 +252,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (22 Self-Tests)
+## Automated Verification Suite (25 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, thoroughly testing each subsystem:
 
@@ -275,6 +282,9 @@ On startup, CosmicOS executes its automated self-test verification suite, thorou
   [TEST] Userspace Libc & Native Binaries (/bin) ... [INFO] Executing in Ring 3 ... [PASS]
   [TEST] Process Fork & Copy-on-Write (CoW) ... [PASS]
   [TEST] Dynamic Linker & Shared Libs (ld-cosmic.so) ... [INFO] Dynamic Linking Verified ... [PASS]
+  [TEST] POSIX Signals & Process Control ... [PASS]
+  [TEST] SMP Multi-Core, ACPI MADT & APIC ... [PASS]
+  [TEST] Storage Drivers (AHCI SATA & NVMe SSD) ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

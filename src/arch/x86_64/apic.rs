@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::arch::x86_64::msr::{rdmsr, wrmsr, IA32_APIC_BASE};
 
 pub const APIC_DEFAULT_BASE: u64 = 0xFEE00000;
@@ -15,6 +16,18 @@ pub const REG_TIMER: u32 = 0x320;
 pub const REG_TIMER_INIT_CNT: u32 = 0x380;
 pub const REG_TIMER_CURR_CNT: u32 = 0x390;
 pub const REG_TIMER_DIV_CFG: u32 = 0x3E0;
+
+static LAPIC_BASE_VIRT: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+pub fn get_lapic_base_virt() -> u64 {
+    let addr = LAPIC_BASE_VIRT.load(Ordering::Relaxed);
+    if addr != 0 {
+        addr
+    } else {
+        APIC_VIRTUAL_BASE
+    }
+}
 
 /// Check if APIC is supported via CPUID.
 pub fn is_supported() -> bool {
@@ -36,20 +49,37 @@ pub fn is_supported() -> bool {
 
 /// Read an APIC 32-bit register.
 pub unsafe fn read_reg(reg: u32) -> u32 {
-    let ptr = (APIC_VIRTUAL_BASE + reg as u64) as *const u32;
+    let base = get_lapic_base_virt();
+    let ptr = (base + reg as u64) as *const u32;
     core::ptr::read_volatile(ptr)
 }
 
 /// Write an APIC 32-bit register.
 pub unsafe fn write_reg(reg: u32, val: u32) {
-    let ptr = (APIC_VIRTUAL_BASE + reg as u64) as *mut u32;
+    let base = get_lapic_base_virt();
+    let ptr = (base + reg as u64) as *mut u32;
     core::ptr::write_volatile(ptr, val);
+}
+
+/// Get current processor's APIC ID.
+pub fn get_apic_id() -> u8 {
+    if !is_supported() {
+        return 0;
+    }
+    unsafe { (read_reg(REG_ID) >> 24) as u8 }
 }
 
 /// Enable Local APIC and configure spurious interrupt vector.
 pub fn init() {
     if !is_supported() {
         return;
+    }
+
+    let madt_base = crate::arch::x86_64::madt::MADT.lock().lapic_address as u64;
+    let phys_base = if madt_base != 0 { madt_base } else { APIC_DEFAULT_BASE };
+
+    if let Ok(virt) = crate::mm::vmm::map_mmio_range(phys_base, 4096) {
+        LAPIC_BASE_VIRT.store(virt, Ordering::SeqCst);
     }
 
     unsafe {
@@ -70,4 +100,23 @@ pub fn eoi() {
     unsafe {
         write_reg(REG_EOI, 0);
     }
+}
+
+/// Send Inter-Processor Interrupt (IPI) via ICR.
+pub fn send_ipi(dest_apic_id: u8, vector: u8, delivery_mode: u32) {
+    unsafe {
+        write_reg(REG_ICR_HIGH, (dest_apic_id as u32) << 24);
+        // Delivery mode at bits 8..10, level assert at bit 14
+        write_reg(REG_ICR_LOW, (delivery_mode << 8) | (vector as u32) | (1 << 14));
+    }
+}
+
+/// Send INIT IPI to reset target AP core.
+pub fn send_init_ipi(dest_apic_id: u8) {
+    send_ipi(dest_apic_id, 0, 5); // Mode 5: INIT
+}
+
+/// Send Startup IPI (SIPI) to start AP core executing at (page_num * 4096).
+pub fn send_sipi(dest_apic_id: u8, page_num: u8) {
+    send_ipi(dest_apic_id, page_num, 6); // Mode 6: Startup
 }
