@@ -16,6 +16,7 @@ pub mod http;
 pub mod icmp;
 pub mod ip;
 pub mod mdns;
+pub mod ntp;
 pub mod socket;
 pub mod tcp;
 pub mod tls;
@@ -86,6 +87,8 @@ pub fn poll() {
                                         if let Some(reply_frame) = mdns::handle_mdns_packet(udp_payload, src_ip, src_port, cfg.ipv4, dev.mac_address()) {
                                             let _ = dev.send_packet(&reply_frame);
                                         }
+                                    } else if dst_port == udp::PORT_NTP || src_port == udp::PORT_NTP {
+                                        ntp::handle_ntp_packet(src_ip, udp_payload);
                                     }
                                 }
                             }

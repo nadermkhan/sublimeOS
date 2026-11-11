@@ -50,6 +50,8 @@ pub fn run_all_tests() {
     test_posix_semaphores_and_message_queues();
     test_dhcp_client_daemon();
     test_ntfs_non_resident_runlist_decoder();
+    test_ext4_htree_directory_indexing();
+    test_ntp_time_synchronization();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -2517,6 +2519,227 @@ fn test_ntfs_non_resident_runlist_decoder() {
     assert_eq!(n_span, 100);
     assert!(boundary_buf[0..36].iter().all(|&b| b == b'C'));
     assert!(boundary_buf[36..100].iter().all(|&b| b == b'D'));
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_ext4_htree_directory_indexing() {
+    print!("  [TEST] ext4 Directory HTree (B-Tree) Indexing ... ");
+
+    // 1. Verify directory hash functions
+    let seed = [0x12345678, 0x87654321, 0xABCDEF01, 0x10FEDCBA];
+    let h_legacy = crate::fs::ext4::ext4_dirhash("test_file.txt", 0, &seed);
+    assert_eq!(h_legacy & 1, 0, "ext4 legacy hash bit 0 must be 0");
+
+    let h_md4_1 = crate::fs::ext4::ext4_dirhash("alpha.doc", 1, &seed);
+    let h_md4_2 = crate::fs::ext4::ext4_dirhash("beta.doc", 1, &seed);
+    assert_eq!(h_md4_1 & 1, 0, "ext4 half-MD4 hash bit 0 must be 0");
+    assert_ne!(h_md4_1, h_md4_2, "different names should hash to different values");
+
+    let h_tea = crate::fs::ext4::ext4_dirhash("gamma.doc", 2, &seed);
+    assert_eq!(h_tea & 1, 0, "ext4 TEA hash bit 0 must be 0");
+
+    // 2. Set up simulated ext4 filesystem with indexed directory (block_size = 1024)
+    let dev = MemBlockDevice::new("mem_ext4_htree", 2048);
+    {
+        let mut d = dev.data.lock();
+        // Superblock at LBA 2 (byte 1024)
+        let sb = 1024;
+        d[sb + 0x18] = 0; // 1024 bytes/block
+        d[sb + 0x20] = 0x00; d[sb + 0x21] = 0x04; // 1024 blocks per group
+        d[sb + 0x28] = 64; // 64 inodes per group
+        d[sb + 0x38] = 0x53; d[sb + 0x39] = 0xEF; // magic 0xEF53
+        d[sb + 0x58] = 128; // inode size = 128
+        d[sb + 0x78..sb + 0x82].copy_from_slice(b"HTREE_TEST");
+        // Hash seed at 0xEC..0xFC
+        d[sb + 0xEC..sb + 0xF0].copy_from_slice(&seed[0].to_le_bytes());
+        d[sb + 0xF0..sb + 0xF4].copy_from_slice(&seed[1].to_le_bytes());
+        d[sb + 0xF4..sb + 0xF8].copy_from_slice(&seed[2].to_le_bytes());
+        d[sb + 0xF8..sb + 0xFC].copy_from_slice(&seed[3].to_le_bytes());
+        d[sb + 0xFC] = 1; // default hash version = 1 (half MD4)
+
+        // Block 2: Group Descriptor (byte 2048)
+        let desc = 2048;
+        d[desc + 8] = 3; // inode table block = 3
+
+        // Inode table at Block 3 (byte 3072)
+        let itable = 3072;
+
+        // Inode 2: root directory (index 1, offset 128)
+        let ino2 = itable + 128;
+        d[ino2 + 0] = 0xED; d[ino2 + 1] = 0x41; // directory mode (0x41ED)
+        d[ino2 + 4] = 0x00; d[ino2 + 5] = 0x04; // size = 1024 bytes (1 block)
+        d[ino2 + 40] = 4; // block 4 = root data
+
+        // Inode 10: indexed subdirectory "indexed_dir" (index 9, offset 9 * 128 = 1152)
+        let ino10 = itable + 1152;
+        d[ino10 + 0] = 0xED; d[ino10 + 1] = 0x41; // directory mode
+        // 3 blocks: block 0 (dx_root), block 1 (leaf 1), block 2 (leaf 2) -> 3072 bytes
+        d[ino10 + 4] = 0x00; d[ino10 + 5] = 0x0C;
+        // i_flags: Bit 12 (0x1000) EXT4_INDEX_FL
+        d[ino10 + 32] = 0x00; d[ino10 + 33] = 0x10; d[ino10 + 34] = 0x00; d[ino10 + 35] = 0x00;
+        // Direct block pointers (blocks 6, 7, 8):
+        d[ino10 + 40] = 6; // logical block 0 = physical block 6
+        d[ino10 + 44] = 7; // logical block 1 = physical block 7
+        d[ino10 + 48] = 8; // logical block 2 = physical block 8
+
+        // Inode 20: file_a (index 19, offset 19 * 128 = 2432)
+        let ino20 = itable + 2432;
+        d[ino20 + 0] = 0xA4; d[ino20 + 1] = 0x81;
+        d[ino20 + 4] = 12; // 12 bytes
+        d[ino20 + 40] = 9; // physical block 9
+
+        // Inode 21: file_b (index 20, offset 20 * 128 = 2560)
+        let ino21 = itable + 2560;
+        d[ino21 + 0] = 0xA4; d[ino21 + 1] = 0x81;
+        d[ino21 + 4] = 12; // 12 bytes
+        d[ino21 + 40] = 10; // physical block 10
+
+        // File contents:
+        d[9 * 1024..9 * 1024 + 12].copy_from_slice(b"ContentAlpha");
+        d[10 * 1024..10 * 1024 + 12].copy_from_slice(b"ContentBeta!");
+
+        // Block 4: root dir containing "indexed_dir"
+        let rdir = 4 * 1024;
+        d[rdir + 0] = 2; d[rdir + 4] = 12; d[rdir + 6] = 1; d[rdir + 7] = 2; d[rdir + 8] = b'.';
+        d[rdir + 12] = 2; d[rdir + 16] = 12; d[rdir + 18] = 2; d[rdir + 19] = 2; d[rdir + 20] = b'.'; d[rdir + 21] = b'.';
+        let re3 = rdir + 24;
+        d[re3 + 0] = 10; d[re3 + 4] = 0xE8; d[re3 + 5] = 0x03; // ino=10, rec_len=1000
+        d[re3 + 6] = 11; d[re3 + 7] = 2; // name_len=11, dir
+        d[re3 + 8..re3 + 19].copy_from_slice(b"indexed_dir");
+
+        // Now setup Block 6: dx_root for indexed_dir!
+        let dx_root = 6 * 1024;
+        // '.' entry (12 bytes)
+        d[dx_root + 0] = 10; d[dx_root + 4] = 12; d[dx_root + 6] = 1; d[dx_root + 7] = 2; d[dx_root + 8] = b'.';
+        // '..' entry (12 bytes)
+        d[dx_root + 12] = 2; d[dx_root + 16] = 12; d[dx_root + 18] = 2; d[dx_root + 19] = 2; d[dx_root + 20] = b'.'; d[dx_root + 21] = b'.';
+
+        // dx_root_info at offset 24:
+        d[dx_root + 24] = 0; // reserved_zero = 0
+        d[dx_root + 25] = 1; // hash_version = 1 (half MD4)
+        d[dx_root + 26] = 8; // info_length = 8
+        d[dx_root + 27] = 0; // indirect_levels = 0 (direct to leaf blocks)
+
+        // dx_countlimit at offset 32:
+        // limit = 100, count = 2, first_block = 1 (logical block 1 = physical block 7)
+        d[dx_root + 32] = 100; d[dx_root + 33] = 0;
+        d[dx_root + 34] = 2; d[dx_root + 35] = 0;
+        d[dx_root + 36] = 1; d[dx_root + 37] = 0; d[dx_root + 38] = 0; d[dx_root + 39] = 0;
+
+        // Calculate split hash between "file_alpha.txt" and "file_beta.txt"
+        let hash_a = crate::fs::ext4::ext4_dirhash("file_alpha.txt", 1, &seed);
+        let hash_b = crate::fs::ext4::ext4_dirhash("file_beta.txt", 1, &seed);
+        let (first_file, first_ino, second_file, second_ino, split_hash) = if hash_a < hash_b {
+            ("file_alpha.txt", 20, "file_beta.txt", 21, hash_b)
+        } else {
+            ("file_beta.txt", 21, "file_alpha.txt", 20, hash_a)
+        };
+
+        // Entry 1 at offset 40: hash = split_hash, block = 2 (logical block 2 = physical block 8)
+        d[dx_root + 40..dx_root + 44].copy_from_slice(&split_hash.to_le_bytes());
+        d[dx_root + 44..dx_root + 48].copy_from_slice(&2u32.to_le_bytes());
+
+        // Leaf block 1 (physical block 7): holds first_file
+        let leaf1 = 7 * 1024;
+        d[leaf1 + 0] = first_ino; d[leaf1 + 4] = 0x00; d[leaf1 + 5] = 0x04; // rec_len = 1024
+        d[leaf1 + 6] = first_file.len() as u8; d[leaf1 + 7] = 1; // regular file
+        d[leaf1 + 8..leaf1 + 8 + first_file.len()].copy_from_slice(first_file.as_bytes());
+
+        // Leaf block 2 (physical block 8): holds second_file
+        let leaf2 = 8 * 1024;
+        d[leaf2 + 0] = second_ino; d[leaf2 + 4] = 0x00; d[leaf2 + 5] = 0x04; // rec_len = 1024
+        d[leaf2 + 6] = second_file.len() as u8; d[leaf2 + 7] = 1; // regular file
+        d[leaf2 + 8..leaf2 + 8 + second_file.len()].copy_from_slice(second_file.as_bytes());
+    }
+
+    let fs = Ext4FileSystem::mount(dev).expect("Mount HTree ext4 failed");
+    let root = Ext4Inode::new_root(fs).expect("Get root failed");
+    let dir_node = root.lock().lookup("indexed_dir").expect("Lookup indexed_dir failed");
+
+    // Lookup both files through HTree B-Tree indexing!
+    let file1 = dir_node.lock().lookup("file_alpha.txt").expect("Lookup file_alpha.txt failed");
+    let mut b1 = [0u8; 12];
+    file1.lock().read(0, &mut b1).expect("Read file1 failed");
+
+    let file2 = dir_node.lock().lookup("file_beta.txt").expect("Lookup file_beta.txt failed");
+    let mut b2 = [0u8; 12];
+    file2.lock().read(0, &mut b2).expect("Read file2 failed");
+
+    assert_eq!(&b1, b"ContentAlpha");
+    assert_eq!(&b2, b"ContentBeta!");
+
+    // Verify readdir() returns both entries without including HTree header garbage
+    let entries = dir_node.lock().readdir().expect("Readdir indexed_dir failed");
+    assert_eq!(entries.len(), 2, "Expected exactly 2 entries in indexed directory");
+    let names: alloc::vec::Vec<String> = entries.into_iter().map(|e| e.name).collect();
+    assert!(names.contains(&String::from("file_alpha.txt")));
+    assert!(names.contains(&String::from("file_beta.txt")));
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_ntp_time_synchronization() {
+    print!("  [TEST] NTP Network Time Synchronization Daemon ... ");
+
+    // 1. Verify build_ntp_request packet structure (RFC 5905)
+    let cur_unix = 1773000000u64;
+    let req = crate::net::ntp::build_ntp_request(cur_unix);
+    assert_eq!(req.len(), 48, "NTP request must be 48 bytes");
+    // Byte 0: LI = 0, VN = 4, Mode = 3 (Client) -> 0x23
+    assert_eq!(req[0], 0x23, "NTP client request byte 0 must be 0x23");
+    assert_eq!(req[1], 0, "NTP request stratum must be 0");
+    assert_eq!(req[2], 4, "NTP poll interval must be 4");
+
+    // Transmit timestamp at bytes 40..44 must match (cur_unix + NTP_UNIX_OFFSET)
+    let exp_ntp_secs = ((cur_unix + crate::net::ntp::NTP_UNIX_OFFSET) as u32).to_be_bytes();
+    assert_eq!(&req[40..44], &exp_ntp_secs, "Transmit timestamp mismatch");
+
+    // 2. Test NTP server response parsing
+    let mut resp = [0u8; 48];
+    // Byte 0: LI = 0, VN = 4, Mode = 4 (Server) -> 0x24
+    resp[0] = 0x24;
+    resp[1] = 2; // Stratum 2 secondary server
+    resp[2] = 4; // Poll 4
+    resp[3] = 0xEC; // Precision -20
+    // Root delay: 10 ms (10 * 65536 / 1000 = 655 -> 0x0000028F)
+    resp[4..8].copy_from_slice(&0x0000028Fu32.to_be_bytes());
+    // Root dispersion: 5 ms
+    resp[8..12].copy_from_slice(&0x00000147u32.to_be_bytes());
+    // Ref ID: 10.0.2.2
+    resp[12..16].copy_from_slice(&[10, 0, 2, 2]);
+
+    // Transmit timestamp: 2026-03-08 18:40:00 UTC -> Unix 1773000000
+    let tx_unix = 1773000000u64;
+    let tx_ntp = (tx_unix + crate::net::ntp::NTP_UNIX_OFFSET) as u32;
+    resp[40..44].copy_from_slice(&tx_ntp.to_be_bytes());
+    // Fraction: 0x80000000 = 500 ms
+    resp[44..48].copy_from_slice(&0x80000000u32.to_be_bytes());
+
+    let parsed = crate::net::ntp::parse_ntp_response(&resp).expect("Parse NTP response failed");
+    assert_eq!(parsed.unix_seconds, 1773000000);
+    assert_eq!(parsed.stratum, 2);
+    assert_eq!(parsed.milliseconds, 500);
+    assert_eq!(parsed.ref_id, [10, 0, 2, 2]);
+
+    // 3. Test handle_ntp_packet and system clock synchronization
+    let handled = crate::net::ntp::handle_ntp_packet([10, 0, 2, 2], &resp);
+    assert!(handled, "handle_ntp_packet failed");
+
+    // Verify kernel time synchronization
+    assert!(crate::arch::x86_64::rtc::is_time_synchronized(), "System time should be synchronized");
+    let now_unix = crate::arch::x86_64::rtc::get_system_time_unix();
+    assert!(now_unix >= 1773000000, "System time should be at or after synced timestamp");
+
+    let dt = crate::arch::x86_64::rtc::get_system_datetime();
+    assert_eq!(dt.year, 2026, "Year should be 2026");
+    assert_eq!(dt.month, 3, "Month should be March (3)");
+
+    // 4. Test NTP status string formatting
+    let status_str = crate::net::ntp::format_ntp_status();
+    assert!(status_str.contains("Active NTP Anchor"), "Status missing active anchor");
+    assert!(status_str.contains("Stratum:           2"), "Status missing stratum");
+    assert!(status_str.contains("10.0.2.2"), "Status missing server IP");
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

@@ -56,6 +56,7 @@ pub fn execute_command(line: &str) {
         "mount" => cmd_mount(),
         "wifi" => cmd_wifi(args),
         "dhcp" => cmd_dhcp(args),
+        "ntp" => cmd_ntp(args),
         "ifconfig" => cmd_ifconfig(),
         "ping" => cmd_ping(args),
         "nslookup" => cmd_nslookup(args),
@@ -350,6 +351,7 @@ fn cmd_help() {
     println!("  mount           List mounted filesystems (FAT32, exFAT, ext4, NTFS)");
     println!("  wifi [subcmd]   802.11 Wi-Fi manager (scan, connect, status, disconnect)");
     println!("  dhcp [subcmd]   DHCP client manager (status, discover, release)");
+    println!("  ntp [subcmd]    Network Time Protocol synchronization (status, sync, set)");
     println!("  ifconfig        Display network interface configuration (lo0, en0, wlan0)");
     println!("  ping <target>   Send ICMP ECHO_REQUEST packets to network hosts");
     println!("  nslookup <host> Query DNS nameservers for IPv4 host address");
@@ -479,8 +481,10 @@ fn cmd_uptime() {
 }
 
 fn cmd_date() {
-    let dt = crate::arch::x86_64::rtc::read_datetime();
-    println!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+    let dt = crate::arch::x86_64::rtc::get_system_datetime();
+    let unix = crate::arch::x86_64::rtc::get_system_time_unix();
+    let synced = if crate::arch::x86_64::rtc::is_time_synchronized() { " (NTP synced)" } else { "" };
+    println!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC (Unix: {}){}", dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, unix, synced);
 }
 
 fn cmd_mem() {
@@ -745,6 +749,45 @@ fn cmd_dhcp(args: &[&str]) {
         }
         _ => {
             println!("Usage: dhcp [status | discover [interface] | release]");
+        }
+    }
+}
+
+fn cmd_ntp(args: &[&str]) {
+    let subcmd = args.get(0).copied().unwrap_or("status");
+    match subcmd {
+        "status" => {
+            let status = crate::net::ntp::format_ntp_status();
+            print!("{}", status);
+        }
+        "sync" => {
+            let server_str = args.get(1).copied().unwrap_or("10.0.2.2");
+            match crate::net::parse_or_resolve_ip(server_str) {
+                Ok(server_ip) => {
+                    println!("Sending NTP request to {}.{}.{}.{}:123...", server_ip[0], server_ip[1], server_ip[2], server_ip[3]);
+                    match crate::net::ntp::send_ntp_request(server_ip) {
+                        Ok(()) => println!("NTP request sent. Awaiting time datagram response..."),
+                        Err(e) => println!("NTP sync error: {}", e),
+                    }
+                }
+                Err(e) => println!("Invalid NTP server address: {}", e),
+            }
+        }
+        "set" => {
+            if let Some(arg) = args.get(1) {
+                if let Ok(unix) = arg.parse::<u64>() {
+                    crate::arch::x86_64::rtc::set_system_time(unix);
+                    let dt = crate::arch::x86_64::rtc::unix_to_datetime(unix);
+                    println!("System time set to {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC (Unix: {})", dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, unix);
+                } else {
+                    println!("Usage: ntp set <unix_timestamp_seconds>");
+                }
+            } else {
+                println!("Usage: ntp set <unix_timestamp_seconds>");
+            }
+        }
+        _ => {
+            println!("Usage: ntp [status | sync [server_ip] | set <unix_timestamp>]");
         }
     }
 }

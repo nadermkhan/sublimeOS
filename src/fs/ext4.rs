@@ -10,6 +10,7 @@ use crate::kinfo;
 const EXT4_MAGIC: u16 = 0xEF53;
 const EXT4_EXTENTS_MAGIC: u16 = 0xF30A;
 const EXT4_EXTENTS_FLAG: u32 = 0x80000;
+pub const EXT4_INDEX_FL: u32 = 0x00001000;
 
 pub struct Ext4FileSystem {
     pub device: Arc<dyn BlockDevice>,
@@ -20,6 +21,8 @@ pub struct Ext4FileSystem {
     pub inode_size: u16,
     pub desc_size: u16,
     pub volume_name: String,
+    pub hash_seed: [u32; 4],
+    pub def_hash_version: u8,
 }
 
 impl Ext4FileSystem {
@@ -55,6 +58,17 @@ impl Ext4FileSystem {
         let desc_size_raw = (sb_buf[0xFE] as u16) | ((sb_buf[0xFF] as u16) << 8);
         let desc_size = if desc_size_raw > 0 { desc_size_raw } else { 32 };
 
+        let s0 = (sb_buf[0xEC] as u32) | ((sb_buf[0xED] as u32) << 8) | ((sb_buf[0xEE] as u32) << 16) | ((sb_buf[0xEF] as u32) << 24);
+        let s1 = (sb_buf[0xF0] as u32) | ((sb_buf[0xF1] as u32) << 8) | ((sb_buf[0xF2] as u32) << 16) | ((sb_buf[0xF3] as u32) << 24);
+        let s2 = (sb_buf[0xF4] as u32) | ((sb_buf[0xF5] as u32) << 8) | ((sb_buf[0xF6] as u32) << 16) | ((sb_buf[0xF7] as u32) << 24);
+        let s3 = (sb_buf[0xF8] as u32) | ((sb_buf[0xF9] as u32) << 8) | ((sb_buf[0xFA] as u32) << 16) | ((sb_buf[0xFB] as u32) << 24);
+        let hash_seed = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 {
+            [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476]
+        } else {
+            [s0, s1, s2, s3]
+        };
+        let def_hash_version = sb_buf[0xFC];
+
         let mut vol_name = String::from("Linux ext4");
         if let Ok(name) = core::str::from_utf8(&sb_buf[0x78..0x88]) {
             let trimmed = name.trim_matches('\0').trim();
@@ -81,6 +95,8 @@ impl Ext4FileSystem {
             inode_size,
             desc_size,
             volume_name: vol_name,
+            hash_seed,
+            def_hash_version,
         }))
     }
 
@@ -248,15 +264,44 @@ impl Ext4FileSystem {
 }
 
 pub struct Ext4Inode {
-    fs: Arc<Ext4FileSystem>,
-    ino: u32,
-    size: usize,
-    file_type: FileType,
+    pub fs: Arc<Ext4FileSystem>,
+    pub ino: u32,
+    pub size: usize,
+    pub file_type: FileType,
     pub name: String,
-    raw_inode: [u8; 256],
+    pub raw_inode: [u8; 256],
 }
 
 impl Ext4Inode {
+    pub fn new(
+        fs: Arc<Ext4FileSystem>,
+        ino: u32,
+        size: usize,
+        file_type: FileType,
+        name: String,
+        raw_inode: [u8; 256],
+    ) -> Self {
+        Self {
+            fs,
+            ino,
+            size,
+            file_type,
+            name,
+            raw_inode,
+        }
+    }
+
+    pub fn get_flags(&self) -> u32 {
+        (self.raw_inode[32] as u32)
+            | ((self.raw_inode[33] as u32) << 8)
+            | ((self.raw_inode[34] as u32) << 16)
+            | ((self.raw_inode[35] as u32) << 24)
+    }
+
+    pub fn is_indexed(&self) -> bool {
+        (self.get_flags() & EXT4_INDEX_FL) != 0
+    }
+
     pub fn new_root(fs: Arc<Ext4FileSystem>) -> Result<Arc<IrqSafeSpinlock<dyn InodeOperations>>, &'static str> {
         let mut raw = [0u8; 256];
         fs.read_inode(2, &mut raw)?; // Inode 2 is always root '/'
@@ -569,6 +614,14 @@ impl InodeOperations for Ext4Inode {
             return Err("Not a directory");
         }
 
+        // 1. Fast HTree Indexed B-Tree Lookup if directory has EXT4_INDEX_FL
+        if self.is_indexed() {
+            if let Ok(Some(child)) = self.htree_lookup(name) {
+                return Ok(Arc::new(IrqSafeSpinlock::new(child)));
+            }
+        }
+
+        // 2. Fallback to sequential leaf traversal
         let entries = self.readdir_internal()?;
         for (item_name, item_ino, is_dir) in entries {
             if item_name.eq_ignore_ascii_case(name) {
@@ -624,18 +677,241 @@ impl InodeOperations for Ext4Inode {
 }
 
 impl Ext4Inode {
+    pub fn load_child_inode(&self, ino: u32, name: &str) -> Result<Option<Ext4Inode>, &'static str> {
+        if ino == 0 {
+            return Ok(None);
+        }
+        let mut raw = [0u8; 256];
+        self.fs.read_inode(ino, &mut raw)?;
+        let mode = (raw[0] as u16) | ((raw[1] as u16) << 8);
+        let size_lo = (raw[4] as u32)
+            | ((raw[5] as u32) << 8)
+            | ((raw[6] as u32) << 16)
+            | ((raw[7] as u32) << 24);
+        let is_dir = (mode & 0x4000) != 0;
+        Ok(Some(Ext4Inode {
+            fs: self.fs.clone(),
+            ino,
+            size: size_lo as usize,
+            file_type: if is_dir { FileType::Directory } else { FileType::Regular },
+            name: String::from(name),
+            raw_inode: raw,
+        }))
+    }
+
+    /// Perform fast O(log N) HTree B-Tree lookup for a directory entry by name.
+    pub fn htree_lookup(&self, name: &str) -> Result<Option<Ext4Inode>, &'static str> {
+        if !self.is_indexed() || self.file_type != FileType::Directory {
+            return Ok(None);
+        }
+
+        let bs = self.fs.block_size as usize;
+        let mut root_buf = [0u8; 4096];
+        let root_phys = match self.map_logical_block(0)? {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        self.fs.read_block(root_phys, &mut root_buf[..bs])?;
+
+        // Fast resolution for '.' and '..'
+        if name == "." {
+            let ino = (root_buf[0] as u32)
+                | ((root_buf[1] as u32) << 8)
+                | ((root_buf[2] as u32) << 16)
+                | ((root_buf[3] as u32) << 24);
+            return self.load_child_inode(ino, ".");
+        }
+        if name == ".." {
+            let ino = (root_buf[12] as u32)
+                | ((root_buf[13] as u32) << 8)
+                | ((root_buf[14] as u32) << 16)
+                | ((root_buf[15] as u32) << 24);
+            return self.load_child_inode(ino, "..");
+        }
+
+        // dx_root_info starts at byte offset 24 in block 0
+        if root_buf[24] != 0 {
+            return Ok(None); // reserved_zero must be 0
+        }
+        let hash_version = root_buf[25];
+        let info_len = root_buf[26] as usize;
+        let indirect_levels = root_buf[27];
+
+        let target_hash = ext4_dirhash(name, hash_version, &self.fs.hash_seed);
+
+        let countlimit_off = 24 + info_len;
+        if countlimit_off + 8 > bs {
+            return Ok(None);
+        }
+
+        let limit = (root_buf[countlimit_off] as u16) | ((root_buf[countlimit_off + 1] as u16) << 8);
+        let count = (root_buf[countlimit_off + 2] as u16) | ((root_buf[countlimit_off + 3] as u16) << 8);
+        let first_block = (root_buf[countlimit_off + 4] as u32)
+            | ((root_buf[countlimit_off + 5] as u32) << 8)
+            | ((root_buf[countlimit_off + 6] as u32) << 16)
+            | ((root_buf[countlimit_off + 7] as u32) << 24);
+
+        if count == 0 || count > limit {
+            return Ok(None);
+        }
+
+        let entries_off = countlimit_off + 8;
+        let num_entries = count.saturating_sub(1);
+        let target_child_block = self.binary_search_dx_node(&root_buf[entries_off..bs], num_entries, first_block, target_hash)?;
+
+        let leaf_block = if indirect_levels == 0 {
+            target_child_block
+        } else {
+            // Level 1: target_child_block is an intermediate dx_node block
+            let mut node_buf = [0u8; 4096];
+            let node_phys = match self.map_logical_block(target_child_block)? {
+                Some(p) => p,
+                None => return Ok(None),
+            };
+            self.fs.read_block(node_phys, &mut node_buf[..bs])?;
+
+            let n_limit = (node_buf[8] as u16) | ((node_buf[9] as u16) << 8);
+            let n_count = (node_buf[10] as u16) | ((node_buf[11] as u16) << 8);
+            let n_first_block = (node_buf[12] as u32)
+                | ((node_buf[13] as u32) << 8)
+                | ((node_buf[14] as u32) << 16)
+                | ((node_buf[15] as u32) << 24);
+
+            if n_count == 0 || n_count > n_limit {
+                return Ok(None);
+            }
+
+            let n_entries = n_count.saturating_sub(1);
+            self.binary_search_dx_node(&node_buf[16..bs], n_entries, n_first_block, target_hash)?
+        };
+
+        // Search directory entries in target leaf block
+        if let Some(inode) = self.search_leaf_block(leaf_block, name)? {
+            return Ok(Some(inode));
+        }
+
+        // Check subsequent leaf block in case of hash collisions or directory block split
+        if let Some(inode) = self.search_leaf_block(leaf_block + 1, name)? {
+            return Ok(Some(inode));
+        }
+
+        Ok(None)
+    }
+
+    /// Binary search in a dx_node or dx_root entry array for the target hash bucket.
+    pub fn binary_search_dx_node(
+        &self,
+        slice: &[u8],
+        num_entries: u16,
+        first_block: u32,
+        target_hash: u32,
+    ) -> Result<u32, &'static str> {
+        if num_entries == 0 || slice.len() < 8 {
+            return Ok(first_block);
+        }
+
+        let mut left = 0;
+        let mut right = num_entries as usize;
+        let mut found_block = first_block;
+
+        while left < right {
+            let mid = (left + right) / 2;
+            let off = mid * 8;
+            if off + 8 > slice.len() {
+                break;
+            }
+            let hash = (slice[off] as u32)
+                | ((slice[off + 1] as u32) << 8)
+                | ((slice[off + 2] as u32) << 16)
+                | ((slice[off + 3] as u32) << 24);
+            let block = (slice[off + 4] as u32)
+                | ((slice[off + 5] as u32) << 8)
+                | ((slice[off + 6] as u32) << 16)
+                | ((slice[off + 7] as u32) << 24);
+
+            if hash <= target_hash {
+                found_block = block;
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+
+        Ok(found_block)
+    }
+
+    /// Search a single leaf directory block for an entry matching the specified name.
+    pub fn search_leaf_block(&self, logical_block: u32, name: &str) -> Result<Option<Ext4Inode>, &'static str> {
+        let bs = self.fs.block_size as usize;
+        let phys_block = match self.map_logical_block(logical_block)? {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let mut buf = [0u8; 4096];
+        self.fs.read_block(phys_block, &mut buf[..bs])?;
+
+        let mut off = 0;
+        while off + 8 <= bs {
+            let ino = (buf[off] as u32)
+                | ((buf[off + 1] as u32) << 8)
+                | ((buf[off + 2] as u32) << 16)
+                | ((buf[off + 3] as u32) << 24);
+            let rec_len = (buf[off + 4] as u16) | ((buf[off + 5] as u16) << 8);
+            let name_len = buf[off + 6] as usize;
+            let file_type_byte = buf[off + 7];
+
+            if rec_len == 0 {
+                break;
+            }
+
+            if ino > 0 && name_len > 0 && off + 8 + name_len <= bs {
+                if let Ok(entry_name) = core::str::from_utf8(&buf[off + 8..off + 8 + name_len]) {
+                    if entry_name.eq_ignore_ascii_case(name) {
+                        let mut raw = [0u8; 256];
+                        self.fs.read_inode(ino, &mut raw)?;
+                        let size_lo = (raw[4] as u32)
+                            | ((raw[5] as u32) << 8)
+                            | ((raw[6] as u32) << 16)
+                            | ((raw[7] as u32) << 24);
+                        let is_dir = file_type_byte == 2;
+                        return Ok(Some(Ext4Inode {
+                            fs: self.fs.clone(),
+                            ino,
+                            size: size_lo as usize,
+                            file_type: if is_dir { FileType::Directory } else { FileType::Regular },
+                            name: String::from(entry_name),
+                            raw_inode: raw,
+                        }));
+                    }
+                }
+            }
+
+            off += rec_len as usize;
+        }
+
+        Ok(None)
+    }
+
     fn readdir_internal(&self) -> Result<Vec<(String, u32, bool)>, &'static str> {
         let mut list = Vec::new();
         let bs = self.fs.block_size as usize;
         let mut block_buf = [0u8; 4096];
 
+        let is_indexed = self.is_indexed();
         let total_blocks = ((self.size + bs - 1) / bs).max(1);
         for b in 0..total_blocks as u32 {
             if let Some(phys_block) = self.map_logical_block(b)? {
                 self.fs.read_block(phys_block, &mut block_buf[..bs])?;
 
+                // For block 0 of an HTree indexed directory, only offset 0..24 contain '.' and '..'
+                // The remainder of block 0 contains the dx_root header and HTree entries.
+                let max_off = if is_indexed && b == 0 { 24 } else { bs };
                 let mut off = 0;
-                while off < bs {
+                while off < max_off {
+                    if off + 8 > bs {
+                        break;
+                    }
                     let ino = (block_buf[off] as u32)
                         | ((block_buf[off + 1] as u32) << 8)
                         | ((block_buf[off + 2] as u32) << 16)
@@ -663,5 +939,146 @@ impl Ext4Inode {
         }
 
         Ok(list)
+    }
+}
+
+pub fn half_md4_transform(buf: &mut [u32; 4], in_words: &[u32; 8]) {
+    let mut a = buf[0];
+    let mut b = buf[1];
+    let mut c = buf[2];
+    let mut d = buf[3];
+
+    /* Round 1 */
+    a = a.wrapping_add((d ^ (b & (c ^ d))).wrapping_add(in_words[0])).rotate_left(3);
+    d = d.wrapping_add((c ^ (a & (b ^ c))).wrapping_add(in_words[1])).rotate_left(7);
+    c = c.wrapping_add((b ^ (d & (a ^ b))).wrapping_add(in_words[2])).rotate_left(11);
+    b = b.wrapping_add((a ^ (c & (d ^ a))).wrapping_add(in_words[3])).rotate_left(19);
+    a = a.wrapping_add((d ^ (b & (c ^ d))).wrapping_add(in_words[4])).rotate_left(3);
+    d = d.wrapping_add((c ^ (a & (b ^ c))).wrapping_add(in_words[5])).rotate_left(7);
+    c = c.wrapping_add((b ^ (d & (a ^ b))).wrapping_add(in_words[6])).rotate_left(11);
+    b = b.wrapping_add((a ^ (c & (d ^ a))).wrapping_add(in_words[7])).rotate_left(19);
+
+    /* Round 2 */
+    let k1 = 0x5a827999;
+    a = a.wrapping_add(((b & c) | (b & d) | (c & d)).wrapping_add(in_words[1]).wrapping_add(k1)).rotate_left(3);
+    d = d.wrapping_add(((a & b) | (a & c) | (b & c)).wrapping_add(in_words[3]).wrapping_add(k1)).rotate_left(5);
+    c = c.wrapping_add(((d & a) | (d & b) | (a & b)).wrapping_add(in_words[5]).wrapping_add(k1)).rotate_left(9);
+    b = b.wrapping_add(((c & d) | (c & a) | (d & a)).wrapping_add(in_words[7]).wrapping_add(k1)).rotate_left(13);
+    a = a.wrapping_add(((b & c) | (b & d) | (c & d)).wrapping_add(in_words[0]).wrapping_add(k1)).rotate_left(3);
+    d = d.wrapping_add(((a & b) | (a & c) | (b & c)).wrapping_add(in_words[2]).wrapping_add(k1)).rotate_left(5);
+    c = c.wrapping_add(((d & a) | (d & b) | (a & b)).wrapping_add(in_words[4]).wrapping_add(k1)).rotate_left(9);
+    b = b.wrapping_add(((c & d) | (c & a) | (d & a)).wrapping_add(in_words[6]).wrapping_add(k1)).rotate_left(13);
+
+    /* Round 3 */
+    let k2 = 0x6ed9eba1;
+    a = a.wrapping_add((b ^ c ^ d).wrapping_add(in_words[3]).wrapping_add(k2)).rotate_left(3);
+    d = d.wrapping_add((a ^ b ^ c).wrapping_add(in_words[7]).wrapping_add(k2)).rotate_left(9);
+    c = c.wrapping_add((d ^ a ^ b).wrapping_add(in_words[2]).wrapping_add(k2)).rotate_left(11);
+    b = b.wrapping_add((c ^ d ^ a).wrapping_add(in_words[6]).wrapping_add(k2)).rotate_left(15);
+    a = a.wrapping_add((b ^ c ^ d).wrapping_add(in_words[1]).wrapping_add(k2)).rotate_left(3);
+    d = d.wrapping_add((a ^ b ^ c).wrapping_add(in_words[5]).wrapping_add(k2)).rotate_left(9);
+    c = c.wrapping_add((d ^ a ^ b).wrapping_add(in_words[0]).wrapping_add(k2)).rotate_left(11);
+    b = b.wrapping_add((c ^ d ^ a).wrapping_add(in_words[4]).wrapping_add(k2)).rotate_left(15);
+
+    buf[0] = buf[0].wrapping_add(a);
+    buf[1] = buf[1].wrapping_add(b);
+    buf[2] = buf[2].wrapping_add(c);
+    buf[3] = buf[3].wrapping_add(d);
+}
+
+pub fn tea_transform(buf: &mut [u32; 4], in_words: &[u32; 4]) {
+    let mut sum = 0u32;
+    let mut b0 = buf[0];
+    let mut b1 = buf[1];
+    let a = in_words[0];
+    let b = in_words[1];
+    let c = in_words[2];
+    let d = in_words[3];
+
+    for _ in 0..16 {
+        sum = sum.wrapping_add(0x9E3779B9);
+        b0 = b0.wrapping_add(((b1 << 4).wrapping_add(a)) ^ (b1.wrapping_add(sum)) ^ ((b1 >> 5).wrapping_add(b)));
+        b1 = b1.wrapping_add(((b0 << 4).wrapping_add(c)) ^ (b0.wrapping_add(sum)) ^ ((b0 >> 5).wrapping_add(d)));
+    }
+
+    buf[0] = buf[0].wrapping_add(b0);
+    buf[1] = buf[1].wrapping_add(b1);
+}
+
+pub fn ext4_dirhash(name: &str, hash_version: u8, seed: &[u32; 4]) -> u32 {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() {
+        return 0;
+    }
+
+    match hash_version {
+        0 => {
+            // Legacy hash
+            let mut hash = 0x12a3fe2du32;
+            let mut pad = 0x37abe8f9u32;
+            for &b in bytes {
+                let hash_m = hash ^ (hash << 5) ^ (b as u32);
+                let pad_m = pad ^ (pad << 7);
+                hash = hash.wrapping_add(hash_m);
+                pad = pad.wrapping_add(pad_m);
+            }
+            hash & !1
+        }
+        2 | 4 => {
+            // TEA hash (2 = signed, 4 = unsigned)
+            let mut buf = *seed;
+            let mut in_words = [0u32; 4];
+            let mut chunk = 0;
+            while chunk < bytes.len() {
+                for i in 0..4 {
+                    let mut word = 0u32;
+                    for j in 0..4 {
+                        let idx = chunk + i * 4 + j;
+                        let byte = if idx < bytes.len() {
+                            if hash_version == 2 {
+                                (bytes[idx] as i8 as i32) as u32
+                            } else {
+                                bytes[idx] as u32
+                            }
+                        } else {
+                            0
+                        };
+                        word |= (byte & 0xFF) << (j * 8);
+                    }
+                    in_words[i] = word;
+                }
+                tea_transform(&mut buf, &in_words);
+                chunk += 16;
+            }
+            buf[0] & !1
+        }
+        _ => {
+            // Half MD4 (1 = signed, 3 = unsigned, default fallback)
+            let mut buf = *seed;
+            let mut in_words = [0u32; 8];
+            let mut chunk = 0;
+            while chunk < bytes.len() {
+                for i in 0..8 {
+                    let mut word = 0u32;
+                    for j in 0..4 {
+                        let idx = chunk + i * 4 + j;
+                        let byte = if idx < bytes.len() {
+                            if hash_version == 1 {
+                                (bytes[idx] as i8 as i32) as u32
+                            } else {
+                                bytes[idx] as u32
+                            }
+                        } else {
+                            0
+                        };
+                        word |= (byte & 0xFF) << (j * 8);
+                    }
+                    in_words[i] = word;
+                }
+                half_md4_transform(&mut buf, &in_words);
+                chunk += 32;
+            }
+            buf[1] & !1
+        }
     }
 }

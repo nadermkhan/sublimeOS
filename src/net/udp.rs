@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 pub const PORT_DNS: u16 = 53;
 pub const PORT_DHCP_SERVER: u16 = 67;
 pub const PORT_DHCP_CLIENT: u16 = 68;
+pub const PORT_NTP: u16 = 123;
 
 /// Build a UDP packet wrapping payload data.
 pub fn build_udp_packet(src_port: u16, dst_port: u16, payload: &[u8]) -> Vec<u8> {
