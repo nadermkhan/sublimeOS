@@ -6,6 +6,8 @@ use crate::kinfo;
 pub const MAX_FRAMES: usize = 262_144;
 pub const BITMAP_WORDS: usize = MAX_FRAMES / 64;
 
+static mut FRAME_REF_COUNTS: [u16; MAX_FRAMES] = [0; MAX_FRAMES];
+
 pub struct PhysicalMemoryManager {
     bitmap: [u64; BITMAP_WORDS],
     total_frames: usize,
@@ -66,6 +68,9 @@ impl PhysicalMemoryManager {
                 if frame < self.total_frames {
                     self.bitmap[idx] |= 1 << bit;
                     self.used_frames += 1;
+                    unsafe {
+                        FRAME_REF_COUNTS[frame] = 1;
+                    }
                     return Some((frame * PAGE_SIZE) as u64);
                 }
             }
@@ -87,6 +92,9 @@ impl PhysicalMemoryManager {
                 if consecutive == count {
                     for f in start_frame..(start_frame + count) {
                         self.set_frame_allocated(f);
+                        unsafe {
+                            FRAME_REF_COUNTS[f] = 1;
+                        }
                     }
                     return Some((start_frame * PAGE_SIZE) as u64);
                 }
@@ -100,7 +108,47 @@ impl PhysicalMemoryManager {
     /// Free an allocated physical frame.
     pub fn free_frame(&mut self, phys_addr: u64) {
         let frame = (phys_addr as usize) / PAGE_SIZE;
+        if frame < MAX_FRAMES {
+            unsafe {
+                FRAME_REF_COUNTS[frame] = 0;
+            }
+        }
         self.set_frame_free(frame);
+    }
+
+    /// Increment reference count for a physical frame (e.g. during fork / CoW).
+    pub fn inc_frame_ref(&mut self, phys_addr: u64) {
+        let frame = (phys_addr as usize) / PAGE_SIZE;
+        if frame < MAX_FRAMES {
+            unsafe {
+                FRAME_REF_COUNTS[frame] = FRAME_REF_COUNTS[frame].saturating_add(1);
+            }
+        }
+    }
+
+    /// Decrement reference count for a physical frame. Returns the remaining count.
+    pub fn dec_frame_ref(&mut self, phys_addr: u64) -> u16 {
+        let frame = (phys_addr as usize) / PAGE_SIZE;
+        if frame < MAX_FRAMES {
+            unsafe {
+                if FRAME_REF_COUNTS[frame] > 0 {
+                    FRAME_REF_COUNTS[frame] -= 1;
+                }
+                FRAME_REF_COUNTS[frame]
+            }
+        } else {
+            0
+        }
+    }
+
+    /// Get current reference count for a physical frame.
+    pub fn get_frame_ref(&self, phys_addr: u64) -> u16 {
+        let frame = (phys_addr as usize) / PAGE_SIZE;
+        if frame < MAX_FRAMES {
+            unsafe { FRAME_REF_COUNTS[frame] }
+        } else {
+            0
+        }
     }
 
     pub fn stats(&self) -> (usize, usize, usize) {

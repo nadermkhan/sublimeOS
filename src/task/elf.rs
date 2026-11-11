@@ -26,6 +26,63 @@ pub const PF_X: u32 = 1; // Executable
 pub const PF_W: u32 = 2; // Writable
 pub const PF_R: u32 = 4; // Readable
 
+// Dynamic Section Tags (ELF-64)
+pub const DT_NULL: i64 = 0;
+pub const DT_NEEDED: i64 = 1;
+pub const DT_PLTRELSZ: i64 = 2;
+pub const DT_PLTGOT: i64 = 3;
+pub const DT_STRTAB: i64 = 5;
+pub const DT_SYMTAB: i64 = 6;
+pub const DT_RELA: i64 = 7;
+pub const DT_RELASZ: i64 = 8;
+pub const DT_RELAENT: i64 = 9;
+pub const DT_STRSZ: i64 = 10;
+pub const DT_SYMENT: i64 = 11;
+pub const DT_JMPREL: i64 = 23;
+
+// Relocation Types (x86_64 ABI)
+pub const R_X86_64_NONE: u32 = 0;
+pub const R_X86_64_64: u32 = 1;
+pub const R_X86_64_COPY: u32 = 5;
+pub const R_X86_64_GLOB_DAT: u32 = 6;
+pub const R_X86_64_JUMP_SLOT: u32 = 7;
+pub const R_X86_64_RELATIVE: u32 = 8;
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Elf64Dyn {
+    pub d_tag: i64,
+    pub d_val: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Elf64Rela {
+    pub r_offset: u64,
+    pub r_info: u64,
+    pub r_addend: i64,
+}
+
+impl Elf64Rela {
+    pub fn r_sym(&self) -> u32 {
+        (self.r_info >> 32) as u32
+    }
+    pub fn r_type(&self) -> u32 {
+        (self.r_info & 0xFFFF_FFFF) as u32
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct Elf64Sym {
+    pub st_name: u32,
+    pub st_info: u8,
+    pub st_other: u8,
+    pub st_shndx: u16,
+    pub st_value: u64,
+    pub st_size: u64,
+}
+
 pub const USER_STACK_TOP: u64 = 0x0000_7FFF_FFFF_0000;
 pub const USER_STACK_PAGES: u64 = 16; // 64 KiB user stack
 

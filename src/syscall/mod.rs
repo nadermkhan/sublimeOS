@@ -34,7 +34,10 @@ pub extern "C" fn syscall_dispatcher(
             }
             0
         }
-        SYS_GETPID => 1,
+        SYS_GETPID => crate::task::process::get_current_pid() as i64,
+        SYS_FORK => crate::task::process::sys_fork() as i64,
+        SYS_EXECVE => crate::task::process::sys_execve(a1 as *const u8, a2 as *const *const u8, a3 as *const *const u8) as i64,
+        SYS_WAIT4 => crate::task::process::sys_waitpid(a1 as i64, a2 as *mut i32, a3 as i32) as i64,
         SYS_EXIT => crate::task::user::handle_user_exit(a1 as i32),
         _ => -38, // -ENOSYS
     }

@@ -38,6 +38,8 @@ pub fn get_user_kernel_stack_top() -> u64 {
 
 /// Called by sys_exit (syscall 60) to terminate Ring 3 execution and return to kernel caller.
 pub fn handle_user_exit(code: i32) -> ! {
+    let pid = crate::task::process::get_current_pid();
+    crate::task::process::exit_process(pid, code);
     unsafe {
         exit_user_mode_asm(code);
     }
@@ -61,6 +63,12 @@ pub fn execute_user_binary(data: &[u8]) -> Result<i32, &'static str> {
     // 3. Load PT_LOAD segments and allocate user stack
     let (user_rip, user_rsp) = elf.load_into_address_space(&mut address_space)?;
 
+    // 3.5. If dynamically linked, resolve shared libraries and perform runtime relocations
+    if crate::user::linker::DynamicLinker::is_dynamic(&elf) {
+        let mut linker = crate::user::linker::DynamicLinker::new();
+        linker.link_binary(&elf, &mut address_space)?;
+    }
+
     kinfo!(
         "Executing ELF64 binary in Ring 3 (Entry: 0x{:016X}, Stack: 0x{:016X}, PML4: 0x{:016X})",
         user_rip,
@@ -75,11 +83,16 @@ pub fn execute_user_binary(data: &[u8]) -> Result<i32, &'static str> {
     let pml4_phys = address_space.pml4_phys;
     *CURRENT_USER_ADDRESS_SPACE.lock() = Some(address_space);
 
+    let old_pid = crate::task::process::get_current_pid();
+    let pid = crate::task::process::alloc_process("user_bin");
+    crate::task::process::set_current_pid(pid);
+
     // 5. Transition to Ring 3 via iretq
     let exit_code = unsafe {
         enter_user_mode_asm(user_rip, user_rsp, pml4_phys, kstack_top)
     };
 
+    crate::task::process::set_current_pid(old_pid);
     CURRENT_USER_ADDRESS_SPACE.lock().take();
 
     Ok(exit_code)

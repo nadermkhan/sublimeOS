@@ -196,6 +196,13 @@ fn handle_exception(ctx: &InterruptContext) {
     if is_user_mode {
         if ctx.vector == 14 {
             let fault_addr = unsafe { read_cr2() };
+            let is_write = (ctx.error_code & 2) != 0;
+            if is_write {
+                let current_cr3 = unsafe { crate::arch::x86_64::registers::read_cr3() };
+                if crate::mm::vmm::VMM.lock().handle_cow_fault(current_cr3, fault_addr).is_ok() {
+                    return; // CoW successfully handled: frame duplicated, permissions restored!
+                }
+            }
             crate::kerror!("User Segmentation Fault (SIGSEGV) at 0x{:016X}! RIP: 0x{:016X}", fault_addr, ctx.rip);
             crate::task::user::handle_user_fault(139);
         } else if ctx.vector == 13 {

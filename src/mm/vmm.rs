@@ -12,6 +12,7 @@ pub const PAGE_ACCESSED: u64 = 1 << 5;
 pub const PAGE_DIRTY: u64 = 1 << 6;
 pub const PAGE_HUGE: u64 = 1 << 7;
 pub const PAGE_GLOBAL: u64 = 1 << 8;
+pub const PAGE_COW: u64 = 1 << 9; // Copy-on-Write bit (AVL software flags)
 pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
 
 pub const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -35,6 +36,22 @@ impl PageTableEntry {
 
     pub fn address(&self) -> u64 {
         self.0 & ADDRESS_MASK
+    }
+
+    pub fn is_cow(&self) -> bool {
+        (self.0 & PAGE_COW) != 0
+    }
+
+    pub fn is_writable(&self) -> bool {
+        (self.0 & PAGE_WRITABLE) != 0
+    }
+
+    pub fn is_user(&self) -> bool {
+        (self.0 & PAGE_USER) != 0
+    }
+
+    pub fn flags(&self) -> u64 {
+        self.0 & !ADDRESS_MASK
     }
 
     pub fn set(&mut self, phys_addr: u64, flags: u64) {
@@ -243,6 +260,65 @@ impl VirtualMemoryManager {
         }
 
         Some(frame)
+    }
+
+    /// Handle a Copy-on-Write page fault.
+    /// Returns Ok(()) if the CoW page was successfully duplicated and remapped, or Err if not a CoW fault.
+    pub fn handle_cow_fault(&self, pml4_phys: u64, fault_vaddr: u64) -> Result<(), &'static str> {
+        let pml4 = unsafe { &mut *(phys_to_virt(pml4_phys) as *mut PageTable) };
+        let pml4_idx = pml4_index(fault_vaddr);
+        if !pml4.entries[pml4_idx].is_present() {
+            return Err("PML4 entry not present");
+        }
+
+        let pdpt = unsafe { &mut *(phys_to_virt(pml4.entries[pml4_idx].address()) as *mut PageTable) };
+        let pdpt_idx = pdpt_index(fault_vaddr);
+        if !pdpt.entries[pdpt_idx].is_present() {
+            return Err("PDPT entry not present");
+        }
+
+        let pd = unsafe { &mut *(phys_to_virt(pdpt.entries[pdpt_idx].address()) as *mut PageTable) };
+        let pd_idx = pd_index(fault_vaddr);
+        if !pd.entries[pd_idx].is_present() {
+            return Err("PD entry not present");
+        }
+
+        let pt = unsafe { &mut *(phys_to_virt(pd.entries[pd_idx].address()) as *mut PageTable) };
+        let pt_idx = pt_index(fault_vaddr);
+        let entry = &mut pt.entries[pt_idx];
+
+        if !entry.is_present() || !entry.is_cow() {
+            return Err("Not a Copy-on-Write page");
+        }
+
+        let old_phys = entry.address();
+        let mut pmm = PMM.lock();
+        let ref_count = pmm.get_frame_ref(old_phys);
+
+        if ref_count > 1 {
+            let new_frame = pmm.alloc_frame().ok_or("Out of memory for CoW duplication")?;
+            pmm.dec_frame_ref(old_phys);
+            drop(pmm);
+
+            let src = phys_to_virt(old_phys) as *const u8;
+            let dst = phys_to_virt(new_frame) as *mut u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(src, dst, 4096);
+            }
+
+            let new_flags = (entry.flags() & !PAGE_COW) | PAGE_WRITABLE | PAGE_PRESENT | PAGE_USER;
+            entry.set(new_frame, new_flags);
+        } else {
+            drop(pmm);
+            let new_flags = (entry.flags() & !PAGE_COW) | PAGE_WRITABLE | PAGE_PRESENT | PAGE_USER;
+            entry.set(old_phys, new_flags);
+        }
+
+        unsafe {
+            invlpg(fault_vaddr);
+        }
+
+        Ok(())
     }
 
     /// Switch active address space (CR3).

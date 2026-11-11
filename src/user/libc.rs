@@ -163,6 +163,27 @@ pub fn getpid() -> u64 {
     }
 }
 
+/// POSIX fork() system call wrapper (Syscall 57)
+pub fn fork() -> i32 {
+    unsafe {
+        syscall0(SYS_FORK) as i32
+    }
+}
+
+/// POSIX waitpid() system call wrapper (Syscall 61)
+pub fn waitpid(pid: i64, status: *mut i32, options: i32) -> i32 {
+    unsafe {
+        syscall3(SYS_WAIT4, pid as u64, status as u64, options as u64) as i32
+    }
+}
+
+/// POSIX execve() system call wrapper (Syscall 59)
+pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32 {
+    unsafe {
+        syscall3(SYS_EXECVE, path as u64, argv as u64, envp as u64) as i32
+    }
+}
+
 /// POSIX uname() system call wrapper
 pub fn uname(uts: &mut UtsName) -> isize {
     unsafe {

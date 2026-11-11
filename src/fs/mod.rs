@@ -36,6 +36,7 @@ pub fn init() {
     let volumes = RamInode::new_dir();
     let private = RamInode::new_dir();
     let bin = RamInode::new_dir();
+    let lib = RamInode::new_dir();
     let etc = RamInode::new_dir();
     let tmp = RamInode::new_dir();
     let var = RamInode::new_dir();
@@ -90,6 +91,7 @@ pub fn init() {
     root.lock().add_child("Volumes", volumes);
     root.lock().add_child("private", private);
     root.lock().add_child("bin", bin);
+    root.lock().add_child("lib", lib);
     root.lock().add_child("etc", etc);
     root.lock().add_child("tmp", tmp);
     root.lock().add_child("var", var);

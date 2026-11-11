@@ -13,7 +13,7 @@
 [![UserSpace](https://img.shields.io/badge/userspace-ELF64%20%7C%20Ring%203%20%7C%20Syscall-blueviolet.svg)]()
 
 CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed in safe, idiomatic `#![no_std]` Rust with zero external runtime dependencies. Powered by the **Sublime Kernel**, CosmicOS boots natively via Multiboot 1/2, transitions to 64-bit Long Mode, maps kernel space to the higher half (`0xFFFFFFFF80000000+`), and initializes an enterprise-grade OS stack:
-- **Multitasking & User Space**: Preemptive round-robin & priority scheduler, 64-bit ELF binary loader, hardware memory isolation, Ring 3 user privilege transition (`iretq`, `syscall`/`sysretq`), userspace C standard library (`cosmic-libc`), and native user binaries in `/bin` (`/bin/init`, `/bin/calc`, `/bin/sh`, `/bin/snake`).
+- **Multitasking & User Space**: Preemptive round-robin & priority scheduler, 64-bit ELF binary loader, hardware memory isolation, Ring 3 user privilege transition (`iretq`, `syscall`/`sysretq`), copy-on-write process fork (`fork`/`execve`/`waitpid`), dynamic runtime linker (`ld-cosmic.so`), userspace C standard library (`cosmic-libc`), and native user binaries in `/bin` (`/bin/init`, `/bin/calc`, `/bin/sh`, `/bin/snake`, `/bin/dyntest`) and shared libraries in `/lib` (`ld-cosmic.so`, `libc.so`, `libm.so`).
 - **Storage & Filesystems**: Real Read/Write FAT32 cluster allocator, exFAT parser, Linux ext4 superblock/extent-tree mapping, and Windows NTFS resident `$DATA` / `$MFT` parser, alongside USB Mass Storage (SCSI / Bulk-Only Transport over xHCI / EHCI).
 - **Network Protocol Stack**: Full TCP/IP stack (Ethernet II, ARP, IPv4, ICMP Ping, UDP, RFC 793 TCP state machine, BSD Socket API), IEEE 802.11 Wi-Fi subsystem (beacon frame parsing, 4-way handshake, WPA2-PSK with PBKDF2-SHA1), Intel e1000 Gigabit NIC driver, HTTP/1.1 client (`curl`), and embedded HTTP server (`httpd`).
 - **Intel HDA Audio Subsystem**: Intel High Definition Audio (HDA) controller driver, pure integer quarter-wave sine synthesis, RIFF/WAVE PCM parser, hardware PC speaker fallback, and the iconic CosmicOS startup chime.
@@ -99,31 +99,42 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
 - **Serial & VGA Text Display (`serial.rs`, `vga.rs`)**: 16550A UART driver with IRQ-driven ring buffers for COM1 and COM2; 80x25 color VGA text driver with scrolling, ANSI escape color rendering, and thread-safe stdout capture hooks.
 
 ### 2. Memory Management (`src/mm`)
-- **Physical Memory Manager (PMM) (`pmm.rs`)**: Fast bitmap allocator managing 4 KiB physical frames up to 1 GiB. Supports single-frame and contiguous multi-frame allocation.
-- **Virtual Memory Manager (VMM) (`vmm.rs`)**: 4-level paging manager. Supports dynamic page mapping/unmapping, address translation, TLB invalidation (`invlpg`), and non-cacheable MMIO mapping (`map_mmio_range`) for hardware BARs.
+- **Physical Memory Manager (PMM) (`pmm.rs`)**: Fast bitmap allocator managing 4 KiB physical frames up to 1 GiB. Tracks per-frame reference counts (`FRAME_REF_COUNTS`) for Copy-on-Write sharing across forked processes.
+- **Virtual Memory Manager (VMM) (`vmm.rs`)**: 4-level paging manager. Supports dynamic page mapping/unmapping, address translation, TLB invalidation (`invlpg`), non-cacheable MMIO mapping (`map_mmio_range`), and page fault handler for Copy-on-Write (`handle_cow_fault`) with seamless permission promotion.
 - **Kernel Heap (`heap.rs`)**: Expandable `GlobalAlloc` implementation backed by PMM frames. Unlocks Rust `alloc` data structures (`Vec`, `Box`, `String`, `Arc`, `format!`).
-- **User Address Space (`address_space.rs`)**: Per-process PML4 address spaces with kernel higher-half clone, Virtual Memory Areas (VMAs), and POSIX `brk()` heap expansion.
+- **User Address Space (`address_space.rs`)**: Per-process PML4 address spaces with kernel higher-half clone, Virtual Memory Areas (VMAs), POSIX `brk()` heap expansion, direct user memory patching (`write_user_u64`), and Copy-on-Write address space cloning (`clone_cow`).
 
 ### 3. Task Management & 64-bit Ring 3 User Space (`src/task`)
 - **Preemptive Multitasking (`scheduler.rs`, `switch.s`)**: Timer-preempted scheduler with sleeping queues, priority queues, and atomic assembly context switching saving callee-saved registers (`rbx, rbp, r12-r15, rflags`).
-- **ELF64 Binary Loader (`elf.rs`)**: Validates 64-bit ELF headers (`\x7FELF`, EM_X86_64), parses program headers, allocates user frames, maps `PT_LOAD` segments with hardware permissions (`PAGE_USER`, `PAGE_WRITABLE`), zero-initializes BSS sections, and allocates a 64 KiB user stack at `0x00007FFFFFFF0000`.
+- **ELF64 Binary Loader (`elf.rs`)**: Validates 64-bit ELF headers (`\x7FELF`, EM_X86_64), parses program headers (`PT_LOAD`, `PT_DYNAMIC`, `PT_INTERP`), dynamic sections (`DT_NEEDED`, `DT_SYMTAB`, `DT_STRTAB`, `DT_JMPREL`), allocates user frames, maps segments with hardware permissions (`PAGE_USER`, `PAGE_WRITABLE`), zero-initializes BSS sections, and allocates a 64 KiB user stack at `0x00007FFFFFFF0000`.
 - **Ring 3 Transition Engine (`user_switch.s`, `user.rs`)**:
   - `enter_user_mode_asm`: sets user segments (`0x1B`), configures `TSS.rsp[0]`, constructs 64-bit `iretq` frame `[SS, RSP, RFLAGS, CS, RIP]`, and drops CPU privilege level to Ring 3 (CPL 3).
   - `exit_user_mode_asm`: on `SYS_EXIT` or user fault, safely restores kernel CR3, kernel segment registers, and kernel stack, cleanly returning the process exit code to the kernel caller.
   - Shell command `exec <path>` to launch any 64-bit ELF binary.
+- **POSIX Process Fork & Lifecycle (`process.rs`, `idt.rs`, `syscall/`)**:
+  - `sys_fork()` (Syscall 57): Clones parent address space via `clone_cow()`, marking all writable user pages as read-only with `PAGE_COW` (bit 9) and incrementing physical frame reference counts.
+  - Page Fault CoW Engine (Exception 14): When child or parent attempts to write to a CoW page, the page fault handler transparently allocates a new 4096-byte frame, copies memory, remaps with `PAGE_WRITABLE`, or promotes permissions in-place if refcount is 1, immediately resuming user code via `iretq`.
+  - `sys_waitpid()` (Syscall 61): Blocks until target child or any child terminates, returning status code and reaping process structures.
+  - `sys_execve()` (Syscall 59): Replaces current process image with a new ELF executable.
 
-### 4. Userspace C Standard Library (`cosmic-libc`) & Native User Binaries (`src/user`)
+### 4. Userspace C Standard Library (`cosmic-libc`), Dynamic Linker & Binaries (`src/user`)
+- **Dynamic Linker & Shared Libraries (`linker.rs`)**: Dynamic runtime linker resolving shared library dependencies from `/lib`, parsing export symbols, and performing AMD64 relocations (`R_X86_64_JUMP_SLOT`, `R_X86_64_GLOB_DAT`, `R_X86_64_64`, `R_X86_64_RELATIVE`) by patching Global Offset Table (GOT) slots in user memory.
 - **Userspace C Standard Library (`libc.rs`)**: Standard userspace runtime implementing POSIX syscall wrappers (`syscall0`..`syscall3`):
   - File I/O: `write()`, `read()`, `open()`, `close()`.
   - Memory Management: `brk()` and `malloc()` / `free()` heap allocator.
-  - Process Credentials & Control: `getpid()`, `uname()`, `nanosleep()`, and `exit()`.
+  - Process Credentials & Control: `fork()`, `waitpid()`, `execve()`, `getpid()`, `uname()`, `nanosleep()`, and `exit()`.
   - Console Printing: `puts()`, `putchar()`, ANSI formatting.
-- **ELF64 Binary Synthesizer (`builder.rs`)**: Lightweight assembler generating self-contained 64-bit ELF executables with valid headers, load segments, string tables, and machine code.
+- **ELF64 Binary Synthesizer (`builder.rs`)**: Lightweight assembler generating self-contained 64-bit ELF executables and shared libraries (`ET_EXEC`, `ET_DYN`) with dynamic tables, strings, symbols, and PLT/GOT relocation headers.
+- **Shared Libraries (`/lib`)**:
+  - `/lib/ld-cosmic.so`: Dynamic linker runtime image.
+  - `/lib/libc.so`: Shared C standard library exporting `cosmic_puts` and `cosmic_exit`.
+  - `/lib/libm.so`: Shared math library exporting `cosmic_pow` (integer exponentiation).
 - **Native Userland Binaries (`/bin`)**:
   - `/bin/init`: System init executable validating Ring 3 user privileges, `getpid()`, `uname()`, dynamic `brk()` heap expansion (+8192 bytes), and clean process termination.
   - `/bin/calc`: 64-bit user arithmetic engine computing multiplication, division, and Gauss summation loop (`Sum(1..100) = 5050`) entirely in Ring 3.
   - `/bin/sh`: Isolated interactive user shell executing in Ring 3 with terminal prompts and standard I/O bridging.
   - `/bin/snake`: Full-screen ASCII arcade game running in Ring 3 utilizing ANSI escape codes and PIT sleep timers.
+  - `/bin/dyntest`: Dynamically linked executable requesting `/lib/ld-cosmic.so` interpreter, dynamically importing and linking `cosmic_puts`, `cosmic_pow`, and `cosmic_exit` across shared libraries.
 
 ### 5. Advanced Filesystems & USB Storage (`src/fs`)
 - **FAT32 R/W (`fat32.rs`)**: Real Read/Write implementation with partition discovery, BPB decoding, cluster allocation bitmap scanning, cluster chain traversal, LFN directory parsing, and file creation/overwriting.
@@ -234,7 +245,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (20 Self-Tests)
+## Automated Verification Suite (22 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, thoroughly testing each subsystem:
 
@@ -262,6 +273,8 @@ On startup, CosmicOS executes its automated self-test verification suite, thorou
   [TEST] ELF64 Loader & Ring 3 User Mode ... [INFO] Executing in Ring 3 ... [PASS]
   [TEST] POSIX Pipelines, Redirection & Editor ... [PASS]
   [TEST] Userspace Libc & Native Binaries (/bin) ... [INFO] Executing in Ring 3 ... [PASS]
+  [TEST] Process Fork & Copy-on-Write (CoW) ... [PASS]
+  [TEST] Dynamic Linker & Shared Libs (ld-cosmic.so) ... [INFO] Dynamic Linking Verified ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

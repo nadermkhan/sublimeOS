@@ -31,6 +31,8 @@ pub fn run_all_tests() {
     test_elf_loader();
     test_pipelines_and_editor();
     test_userland_binaries();
+    test_process_fork_cow();
+    test_dynamic_linker_and_shared_libraries();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -959,6 +961,111 @@ fn test_userland_binaries() {
     let exit_snake = crate::task::user::execute_user_binary(&buf[..n])
         .expect("Failed to execute /bin/snake in Ring 3");
     assert_eq!(exit_snake, 0);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_process_fork_cow() {
+    print!("  [TEST] Process Fork & Copy-on-Write (CoW) ... ");
+
+    // 1. Setup parent address space with a mapped writable user page
+    let mut parent_space = crate::mm::address_space::AddressSpace::new()
+        .expect("Failed to create parent address space");
+    parent_space
+        .map_region(0x4000_0000, 4096, crate::mm::vmm::PAGE_WRITABLE, crate::mm::address_space::VmaType::Data)
+        .expect("Failed to map user data region");
+
+    // Write initial test value to parent memory
+    parent_space
+        .write_user_u64(0x4000_0000, 0xCAFEBABE_DEADBEEF)
+        .expect("Failed to write to parent memory");
+
+    let vmm = crate::mm::vmm::VMM.lock();
+    let parent_pml4 = unsafe { &*(crate::mm::phys_to_virt(parent_space.pml4_phys) as *const crate::mm::vmm::PageTable) };
+    let orig_phys = vmm.translate(parent_pml4, 0x4000_0000).expect("Failed to translate parent page");
+    drop(vmm);
+
+    assert_eq!(crate::mm::pmm::PMM.lock().get_frame_ref(orig_phys), 1);
+
+    // 2. Clone parent address space with Copy-on-Write
+    let child_space = parent_space.clone_cow().expect("Failed to clone address space via CoW");
+
+    // Verify parent and child share the exact same physical frame
+    let vmm = crate::mm::vmm::VMM.lock();
+    let child_pml4 = unsafe { &*(crate::mm::phys_to_virt(child_space.pml4_phys) as *const crate::mm::vmm::PageTable) };
+    let shared_child_phys = vmm.translate(child_pml4, 0x4000_0000).expect("Failed to translate child page");
+    drop(vmm);
+
+    assert_eq!(shared_child_phys, orig_phys);
+    assert_eq!(crate::mm::pmm::PMM.lock().get_frame_ref(orig_phys), 2);
+
+    // 3. Resolve CoW write fault on child address space
+    crate::mm::vmm::VMM
+        .lock()
+        .handle_cow_fault(child_space.pml4_phys, 0x4000_0000)
+        .expect("Failed to handle child CoW page fault");
+
+    // Verify child now owns a private, newly duplicated physical frame
+    let vmm = crate::mm::vmm::VMM.lock();
+    let child_pml4 = unsafe { &*(crate::mm::phys_to_virt(child_space.pml4_phys) as *const crate::mm::vmm::PageTable) };
+    let new_child_phys = vmm.translate(child_pml4, 0x4000_0000).expect("Failed to translate child page");
+    drop(vmm);
+
+    assert_ne!(new_child_phys, orig_phys);
+    assert_eq!(crate::mm::pmm::PMM.lock().get_frame_ref(orig_phys), 1);
+    assert_eq!(crate::mm::pmm::PMM.lock().get_frame_ref(new_child_phys), 1);
+
+    // Verify data integrity: child inherited original content
+    let child_data = unsafe { *(crate::mm::phys_to_virt(new_child_phys) as *const u64) };
+    assert_eq!(child_data, 0xCAFEBABE_DEADBEEF);
+
+    // Write modified value to child private page
+    child_space
+        .write_user_u64(0x4000_0000, 0x12345678_9ABCDEF0)
+        .expect("Failed to write to child private page");
+
+    // Verify parent data remains completely untouched
+    let parent_data = unsafe { *(crate::mm::phys_to_virt(orig_phys) as *const u64) };
+    assert_eq!(parent_data, 0xCAFEBABE_DEADBEEF);
+
+    // 4. Verify waitpid lifecycle and exit status retrieval
+    let _parent_pid = crate::task::process::get_current_pid();
+    let child_pid = crate::task::process::alloc_process("test_zombie");
+    crate::task::process::exit_process(child_pid, 42);
+
+    let mut status = 0i32;
+    let waited_pid = crate::task::process::sys_waitpid(child_pid as i64, &mut status, 0);
+    assert_eq!(waited_pid, child_pid as i32);
+    assert_eq!(status >> 8, 42);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_dynamic_linker_and_shared_libraries() {
+    print!("  [TEST] Dynamic Linker & Shared Libs (ld-cosmic.so) ... ");
+
+    // 1. Verify shared libraries exist in /lib
+    let vfs = crate::fs::vfs::VFS.lock();
+    let lib_dir = vfs.resolve_path("/lib").expect("Missing /lib directory in VFS");
+    let entries = lib_dir.lock().readdir().expect("Failed to read /lib");
+    drop(vfs);
+
+    let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+    assert!(names.contains(&String::from("ld-cosmic.so")));
+    assert!(names.contains(&String::from("libc.so")));
+    assert!(names.contains(&String::from("libm.so")));
+
+    // 2. Open and execute /bin/dyntest in Ring 3
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/dyntest", 0).expect("Failed to open /bin/dyntest");
+    drop(vfs);
+
+    let mut buf = alloc::vec![0u8; 16384];
+    let n = file.read(&mut buf).expect("Failed to read /bin/dyntest");
+
+    let exit_code = crate::task::user::execute_user_binary(&buf[..n])
+        .expect("Failed to execute dynamic binary /bin/dyntest in Ring 3");
+    assert_eq!(exit_code, 0);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
