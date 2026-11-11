@@ -443,12 +443,17 @@ pub fn sys_open(path_ptr: *const u8, flags: i32, _mode: i32) -> i64 {
         Err(_) => return -22, // -EINVAL
     };
 
-    let vfs = crate::fs::vfs::VFS.lock();
-    let inode = match vfs.resolve_path(path_str) {
-        Ok(n) => n,
-        Err(_) => return -2, // -ENOENT
+    let inode = if path_str == "/dev/ptmx" {
+        crate::tty::pty::allocate_pty_master()
+    } else {
+        let vfs = crate::fs::vfs::VFS.lock();
+        let n = match vfs.resolve_path(path_str) {
+            Ok(n) => n,
+            Err(_) => return -2, // -ENOENT
+        };
+        drop(vfs);
+        n
     };
-    drop(vfs);
 
     let file = Arc::new(crate::fs::vfs::File::new(inode, flags as u32));
     let current_pid = get_current_pid();
@@ -458,6 +463,72 @@ pub fn sys_open(path_ptr: *const u8, flags: i32, _mode: i32) -> i64 {
         }
     }
     -24 // -EMFILE
+}
+
+pub fn sys_posix_openpt(flags: i32) -> i64 {
+    let inode = crate::tty::pty::allocate_pty_master();
+    let file = Arc::new(crate::fs::vfs::File::new(inode, flags as u32));
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        if let Some(fd) = proc.lock().alloc_fd(file) {
+            return fd as i64;
+        }
+    }
+    -24 // -EMFILE
+}
+
+pub fn sys_ptsname(fd: usize, buf: *mut u8, buflen: usize) -> i64 {
+    if buf.is_null() || buflen == 0 {
+        return -14; // -EFAULT
+    }
+    let current_pid = get_current_pid();
+    let file = if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if fd < p.fd_table.len() {
+            p.fd_table[fd].clone()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(f) = file {
+        let mut pty_num: u32 = 0;
+        if f.ioctl(crate::tty::pty::TIOCGPTN, &mut pty_num as *mut u32 as usize).is_ok() {
+            let pts_path = alloc::format!("/dev/pts/{}\0", pty_num);
+            let bytes = pts_path.as_bytes();
+            if bytes.len() > buflen {
+                return -34; // -ERANGE
+            }
+            let slice = unsafe { core::slice::from_raw_parts_mut(buf, bytes.len()) };
+            slice.copy_from_slice(bytes);
+            return 0;
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_unlockpt(fd: usize) -> i64 {
+    let current_pid = get_current_pid();
+    let file = if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if fd < p.fd_table.len() {
+            p.fd_table[fd].clone()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(f) = file {
+        let unlock: i32 = 0;
+        if f.ioctl(crate::tty::pty::TIOCSPTLCK, &unlock as *const i32 as usize).is_ok() {
+            return 0;
+        }
+    }
+    -9 // -EBADF
 }
 
 pub fn sys_close(fd: usize) -> i64 {

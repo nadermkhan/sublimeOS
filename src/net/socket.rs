@@ -25,6 +25,9 @@ pub fn socket_open() -> Result<usize, &'static str> {
 /// Initiate TCP 3-way handshake to remote host (SYN -> SYN-ACK -> ACK).
 pub fn socket_connect(sock_id: usize, remote_ip: [u8; 4], remote_port: u16) -> Result<(), &'static str> {
     let mut table = TCP_TABLE.lock();
+    let is_loopback = remote_ip == [127, 0, 0, 1];
+    let has_listener = table.connections.iter().any(|c| c.local_port == remote_port && c.state == TcpState::Listen);
+
     let conn = table.find(sock_id).ok_or("Invalid socket ID")?;
 
     // Determine correct local IP for this destination route
@@ -37,6 +40,11 @@ pub fn socket_connect(sock_id: usize, remote_ip: [u8; 4], remote_port: u16) -> R
     conn.remote_ip = remote_ip;
     conn.remote_port = remote_port;
     conn.state = TcpState::SynSent;
+
+    if is_loopback && !has_listener {
+        conn.state = TcpState::Closed;
+        return Err("Connection refused: no listener on loopback port");
+    }
 
     let src_ip = conn.local_ip;
     let local_port = conn.local_port;

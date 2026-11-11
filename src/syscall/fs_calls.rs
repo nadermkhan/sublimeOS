@@ -15,19 +15,7 @@ pub fn sys_write(fd: usize, buf: *const u8, count: usize) -> isize {
 
     let slice = unsafe { core::slice::from_raw_parts(buf, count) };
 
-    // Standard output / Standard error
-    if fd == 1 || fd == 2 {
-        if let Ok(s) = core::str::from_utf8(slice) {
-            crate::print!("{}", s);
-        } else {
-            for &b in slice {
-                crate::print!("{}", b as char);
-            }
-        }
-        return count as isize;
-    }
-
-    // Write to VFS file descriptor if available
+    // 1. Write to VFS file descriptor if mapped in process fd_table
     let current_pid = crate::task::process::get_current_pid();
     if let Some(proc) = crate::task::process::get_process(current_pid) {
         let p = proc.lock();
@@ -42,6 +30,18 @@ pub fn sys_write(fd: usize, buf: *const u8, count: usize) -> isize {
         }
     }
 
+    // 2. Default console fallback for standard output / standard error
+    if fd == 1 || fd == 2 {
+        if let Ok(s) = core::str::from_utf8(slice) {
+            crate::print!("{}", s);
+        } else {
+            for &b in slice {
+                crate::print!("{}", b as char);
+            }
+        }
+        return count as isize;
+    }
+
     count as isize
 }
 
@@ -50,16 +50,7 @@ pub fn sys_read(fd: usize, buf: *mut u8, count: usize) -> isize {
         return 0;
     }
 
-    // Standard input (stdin)
-    if fd == 0 {
-        let slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
-        if let Some(ch) = crate::shell::get_next_input_char() {
-            slice[0] = ch;
-            return 1;
-        }
-        return 0;
-    }
-
+    // 1. Read from VFS file descriptor if mapped in process fd_table
     let current_pid = crate::task::process::get_current_pid();
     if let Some(proc) = crate::task::process::get_process(current_pid) {
         let p = proc.lock();
@@ -73,6 +64,16 @@ pub fn sys_read(fd: usize, buf: *mut u8, count: usize) -> isize {
                 }
             }
         }
+    }
+
+    // 2. Default console fallback for standard input (stdin)
+    if fd == 0 {
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
+        if let Some(ch) = crate::shell::get_next_input_char() {
+            slice[0] = ch;
+            return 1;
+        }
+        return 0;
     }
 
     0

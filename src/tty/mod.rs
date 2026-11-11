@@ -1,5 +1,6 @@
 pub mod ansi;
 pub mod console;
+pub mod pty;
 
 use core::fmt;
 use crate::arch::x86_64::io::outb;

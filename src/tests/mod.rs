@@ -40,6 +40,8 @@ pub fn run_all_tests() {
     test_multicore_scheduler_and_affinity();
     test_partition_table_automounter();
     test_network_socket_server_and_daemons();
+    test_pseudo_terminal_subsystem();
+    test_tls_and_https_engine();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -361,6 +363,25 @@ fn test_ext4() {
     let n = file.lock().read(0, &mut buf).expect("Failed to read TEST.TXT");
     assert_eq!(n, 18);
     assert_eq!(&buf, b"Hello ext4 Driver!");
+
+    // Test ext4 block write
+    let write_data = b"Updated ext4 Driver Data!";
+    let written = file.lock().write(0, write_data).expect("Failed to write to ext4 file");
+    assert_eq!(written, write_data.len());
+    let mut read_back = [0u8; 25];
+    let n2 = file.lock().read(0, &mut read_back).expect("Failed to re-read ext4 file");
+    assert_eq!(n2, write_data.len());
+    assert_eq!(&read_back, write_data);
+
+    // Test ext4 file creation & directory block allocation
+    let new_node = root.lock().create("NEW.TXT", FileType::Regular).expect("Failed to create NEW.TXT in ext4");
+    let test_msg = b"Native ext4 block write!";
+    let wn = new_node.lock().write(0, test_msg).expect("Failed to write to NEW.TXT");
+    assert_eq!(wn, test_msg.len());
+    let mut new_buf = [0u8; 24];
+    let n3 = new_node.lock().read(0, &mut new_buf).expect("Failed to read NEW.TXT");
+    assert_eq!(n3, test_msg.len());
+    assert_eq!(&new_buf, test_msg);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
@@ -1504,6 +1525,126 @@ fn test_network_socket_server_and_daemons() {
     let bytes_sshd = sshd_file.read(&mut elf_data).expect("Read /bin/sshd failed");
     let exit_sshd = crate::task::user::execute_user_binary(&elf_data[..bytes_sshd]);
     assert_eq!(exit_sshd, Ok(0), "Userspace sshd failed");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_pseudo_terminal_subsystem() {
+    print!("  [TEST] Pseudo-Terminal (PTY) Subsystem & Line Discipline ... ");
+
+    // 1. Open master pseudo-terminal
+    let master_fd = crate::task::process::sys_posix_openpt(2); // O_RDWR
+    assert!(master_fd >= 0, "posix_openpt failed");
+
+    // 2. Query slave path (ptsname)
+    let mut pts_name = [0u8; 32];
+    let pts_res = crate::task::process::sys_ptsname(master_fd as usize, pts_name.as_mut_ptr(), pts_name.len());
+    assert_eq!(pts_res, 0, "sys_ptsname failed");
+    let name_str = core::str::from_utf8(&pts_name).unwrap();
+    let trimmed = name_str.trim_matches('\0');
+    assert!(trimmed.starts_with("/dev/pts/"), "Invalid ptsname path");
+
+    // 3. Unlock slave (unlockpt)
+    let unlock_res = crate::task::process::sys_unlockpt(master_fd as usize);
+    assert_eq!(unlock_res, 0, "sys_unlockpt failed");
+
+    // 4. Open slave pseudo-terminal
+    let slave_fd = crate::task::process::sys_open(pts_name.as_ptr(), 2, 0);
+    assert!(slave_fd >= 0, "open slave pts failed");
+
+    // 5. Test master -> slave with ICRNL line translation
+    let input = b"uptime\r";
+    let sent = crate::syscall::fs_calls::sys_write(master_fd as usize, input.as_ptr(), input.len());
+    assert_eq!(sent, input.len() as isize);
+
+    let mut slave_buf = [0u8; 32];
+    let read_slv = crate::syscall::fs_calls::sys_read(slave_fd as usize, slave_buf.as_mut_ptr(), slave_buf.len());
+    assert_eq!(read_slv, 7); // "uptime\n"
+    assert_eq!(&slave_buf[..7], b"uptime\n");
+
+    // 6. Test slave -> master transfer
+    let output = b"14:02:11 up 42 secs\n";
+    let w_slv = crate::syscall::fs_calls::sys_write(slave_fd as usize, output.as_ptr(), output.len());
+    assert_eq!(w_slv, output.len() as isize);
+
+    let mut master_buf = [0u8; 32];
+    let read_mst = crate::syscall::fs_calls::sys_read(master_fd as usize, master_buf.as_mut_ptr(), master_buf.len());
+    assert!(read_mst > 0);
+
+    // 7. Test terminal window size ioctl (TIOCGWINSZ / TIOCSWINSZ)
+    let new_win = crate::tty::pty::Winsize {
+        ws_row: 40,
+        ws_col: 120,
+        ws_xpixel: 1024,
+        ws_ypixel: 768,
+    };
+    let set_win = crate::task::process::sys_ioctl(master_fd as usize, crate::tty::pty::TIOCSWINSZ, &new_win as *const crate::tty::pty::Winsize as usize);
+    assert_eq!(set_win, 0);
+
+    let mut query_win = crate::tty::pty::Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+    let get_win = crate::task::process::sys_ioctl(slave_fd as usize, crate::tty::pty::TIOCGWINSZ, &mut query_win as *mut crate::tty::pty::Winsize as usize);
+    assert_eq!(get_win, 0);
+    assert_eq!(query_win.ws_row, 40);
+    assert_eq!(query_win.ws_col, 120);
+
+    // Close fds
+    let _ = crate::task::process::sys_close(slave_fd as usize);
+    let _ = crate::task::process::sys_close(master_fd as usize);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_tls_and_https_engine() {
+    print!("  [TEST] TLS 1.3 Cryptography & Secure HTTPS Engine ... ");
+
+    // 1. Test SHA-256
+    let hash = crate::net::crypto::sha256(b"CosmicOS-TLS13");
+    assert_eq!(hash.len(), 32);
+
+    // 2. Test HMAC-SHA256
+    let hmac = crate::net::crypto::hmac_sha256(b"secret_key", b"payload_data");
+    assert_eq!(hmac.len(), 32);
+
+    // 3. Test HKDF-Extract and HKDF-Expand
+    let prk = crate::net::crypto::hkdf_extract(b"salt123", b"input_key_material");
+    let okm = crate::net::crypto::hkdf_expand(&prk, b"info_label", 48);
+    assert_eq!(okm.len(), 48);
+
+    // 4. Test X25519 ECDH Key Exchange
+    let mut alice_priv = [0x55u8; 32];
+    alice_priv[0] &= 248; alice_priv[31] &= 127; alice_priv[31] |= 64;
+    let alice_pub = crate::net::crypto::x25519_base(&alice_priv);
+
+    let mut bob_priv = [0xAAu8; 32];
+    bob_priv[0] &= 248; bob_priv[31] &= 127; bob_priv[31] |= 64;
+    let bob_pub = crate::net::crypto::x25519_base(&bob_priv);
+
+    let shared_alice = crate::net::crypto::x25519(&alice_priv, &bob_pub);
+    let shared_bob = crate::net::crypto::x25519(&bob_priv, &alice_pub);
+    assert_eq!(shared_alice, shared_bob, "X25519 shared secret mismatch");
+
+    // 5. Test ChaCha20-Poly1305 AEAD seal & open
+    let aead_key = [0x42u8; 32];
+    let nonce = [0x11u8; 12];
+    let aad = b"TLS13-Record-AAD";
+    let plaintext = b"GET /api/status HTTP/1.1\r\nHost: cosmicos.org\r\n\r\n";
+
+    let (ciphertext, tag) = crate::net::crypto::chacha20_poly1305_seal(&aead_key, &nonce, aad, plaintext);
+    assert_eq!(ciphertext.len(), plaintext.len());
+
+    let decrypted = crate::net::crypto::chacha20_poly1305_open(&aead_key, &nonce, aad, &ciphertext, &tag)
+        .expect("ChaCha20-Poly1305 decryption failed");
+    assert_eq!(&decrypted, plaintext);
+
+    // Corrupted tag must fail
+    let mut bad_tag = tag;
+    bad_tag[0] ^= 0xFF;
+    assert!(crate::net::crypto::chacha20_poly1305_open(&aead_key, &nonce, aad, &ciphertext, &bad_tag).is_err());
+
+    // 6. Test HTTPS GET Request Engine
+    let resp = crate::net::http::https_get("https://127.0.0.1/api/status").expect("https_get failed");
+    assert_eq!(resp.status_code, 200);
+    assert!(resp.body_as_str().contains("CosmicOS"));
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

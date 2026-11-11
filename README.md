@@ -29,7 +29,7 @@
    - [8. CosmicSH POSIX Shell & Terminal Text Editor](#8-cosmicsh-posix-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
 4. [Interactive Shell Command Reference (48 Commands)](#interactive-shell-command-reference-48-commands)
-5. [Automated Verification Suite (29 Self-Tests)](#automated-verification-suite-29-self-tests)
+5. [Automated Verification Suite (31 Self-Tests)](#automated-verification-suite-31-self-tests)
 6. [Building and Running](#building-and-running)
    - [Prerequisites](#prerequisites)
    - [Compiling Kernel](#compiling-kernel)
@@ -186,7 +186,7 @@
 - **Unified Block Device Interface ([`BlockDevice`](src/drivers/storage/mod.rs))**: Pluggable storage abstraction supporting sector reads/writes across ATA IDE, AHCI SATA, NVMe SSDs, USB mass storage drives, and memory-backed block devices.
 - **FAT32 R/W ([`fat32.rs`](src/fs/fat32.rs))**: Real Read/Write implementation with partition discovery, BPB decoding, cluster allocation bitmap scanning, cluster chain traversal, LFN directory parsing, and file creation/overwriting.
 - **exFAT ([`exfat.rs`](src/fs/exfat.rs))**: Sector-accurate exFAT parser supporting Main Boot Region, Volume Flags, Cluster Heap allocation, Stream Extension entries, and file traversal.
-- **ext4 ([`ext4.rs`](src/fs/ext4.rs))**: Linux ext4 superblock parser, Block Group Descriptor Table lookup, inode table traversal, and B-tree extent tree (`ext4_extent_header`, `ext4_extent`) physical block resolution.
+- **ext4 R/W ([`ext4.rs`](src/fs/ext4.rs))**: Linux ext4 superblock parser, Block Group Descriptor Table lookup, block and inode bitmap allocation, extent tree mapping, direct write block updates, directory entry insertion, and file creation.
 - **NTFS ([`ntfs.rs`](src/fs/ntfs.rs))**: Windows NTFS VBR parsing, `$MFT` record decoding, and resident `$DATA` attribute extraction.
 - **USB Mass Storage ([`usb/msc.rs`](src/drivers/usb/msc.rs))**: Bulk-Only Transport (BOT) driver sending SCSI Command Descriptor Blocks (`INQUIRY`, `READ CAPACITY 10`, `READ 10`, `WRITE 10`) over xHCI and EHCI controllers.
 
@@ -208,9 +208,14 @@
   - `/bin/telnetd`: Background server daemon listening on TCP port 23, spawning interactive sessions for incoming telnet clients.
   - `/bin/sshd`: Background server daemon listening on TCP port 22 with SSH-2.0 protocol identification and authentication handling.
   - Shell `telnet` client command enabling remote terminal connections from CosmicSH.
-- **HTTP/1.1 Engine ([`http.rs`](src/net/http.rs))**:
-  - Client: `curl [-i] <url>` fetching web pages and REST APIs over TCP.
+- **HTTP/1.1 & TLS 1.3 HTTPS Engine ([`http.rs`](src/net/http.rs), [`tls.rs`](src/net/tls.rs))**:
+  - Pure `#![no_std]` TLS 1.3 client stack implementing RFC 8446 handshake with X25519 ECDH key agreement and ChaCha20-Poly1305 AEAD record encryption/decryption.
+  - SHA-256, HMAC-SHA256, and HKDF-Extract/Expand key schedule derivation.
+  - Client: `curl [-i] <url>` fetching web pages and REST APIs over plain HTTP or secure HTTPS (`curl https://...`).
   - Server: Embedded `httpd` web server serving interactive status dashboards and JSON APIs (`/api/status`).
+- **POSIX Pseudo-Terminal Subsystem ([`pty.rs`](src/tty/pty.rs))**:
+  - Master/slave pseudo-terminals (`/dev/ptmx`, `/dev/pts/*`), `sys_posix_openpt` (51), `sys_ptsname` (52), and `sys_unlockpt` (53).
+  - Terminal line discipline with ICRNL newline translation, character echo toggling, window sizing ioctls (`TIOCGWINSZ`/`TIOCSWINSZ`), and foreground `SIGINT` signal forwarding on `Ctrl+C`.
 
 ### 7. Intel High Definition Audio & Sound Subsystem
 *Location: [`src/drivers/audio/`](src/drivers/audio/)*
@@ -311,7 +316,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (29 Self-Tests)
+## Automated Verification Suite (31 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, verifying all core subsystems before launching the interactive shell:
 
@@ -348,6 +353,8 @@ On startup, CosmicOS executes its automated self-test verification suite, verify
   [TEST] Multi-Core Scheduler, Work-Stealing & Core Affinity ... [PASS]
   [TEST] Partition Table Auto-Mounter (GPT / MBR into /Volumes) ... [INFO] Auto-Mounted ... [PASS]
   [TEST] Network Socket Server Daemons (telnetd & sshd) ... [PASS]
+  [TEST] Pseudo-Terminal (PTY) Subsystem & Line Discipline ... [PASS]
+  [TEST] TLS 1.3 Cryptography & Secure HTTPS Engine ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

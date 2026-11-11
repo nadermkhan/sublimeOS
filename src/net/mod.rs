@@ -17,6 +17,7 @@ pub mod icmp;
 pub mod ip;
 pub mod socket;
 pub mod tcp;
+pub mod tls;
 pub mod udp;
 pub mod wifi;
 

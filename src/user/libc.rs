@@ -367,6 +367,32 @@ pub fn recv(fd: usize, buf: &mut [u8], flags: i32) -> isize {
     }
 }
 
+/// POSIX posix_openpt() system call wrapper
+pub fn posix_openpt(flags: i32) -> i32 {
+    unsafe {
+        syscall1(SYS_POSIX_OPENPT, flags as u64) as i32
+    }
+}
+
+/// POSIX ptsname() system call wrapper
+pub fn ptsname(fd: usize, buf: &mut [u8]) -> i32 {
+    unsafe {
+        syscall3(SYS_PTSNAME, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) as i32
+    }
+}
+
+/// POSIX unlockpt() system call wrapper
+pub fn unlockpt(fd: usize) -> i32 {
+    unsafe {
+        syscall1(SYS_UNLOCKPT, fd as u64) as i32
+    }
+}
+
+/// POSIX grantpt() wrapper (no-op on CosmicOS, permissions granted automatically)
+pub fn grantpt(_fd: usize) -> i32 {
+    0
+}
+
 /// POSIX exit() system call wrapper
 pub fn exit(status: i32) -> ! {
     unsafe {

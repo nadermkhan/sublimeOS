@@ -38,6 +38,8 @@ impl DevFsDirectory {
         entries.insert(String::from("disk0s1"), Arc::new(IrqSafeSpinlock::new(NullDev)));
         entries.insert(String::from("rtc"), Arc::new(IrqSafeSpinlock::new(RtcDev)));
         entries.insert(String::from("fb0"), Arc::new(IrqSafeSpinlock::new(FbDev)));
+        entries.insert(String::from("ptmx"), Arc::new(IrqSafeSpinlock::new(crate::tty::pty::PtmxDev)));
+        entries.insert(String::from("pts"), Arc::new(IrqSafeSpinlock::new(crate::tty::pty::PtsDirectory)));
         entries.insert(String::from("ttyS0"), Arc::new(IrqSafeSpinlock::new(crate::arch::x86_64::serial::UartDev(0))));
         entries.insert(String::from("ttyS1"), Arc::new(IrqSafeSpinlock::new(crate::arch::x86_64::serial::UartDev(1))));
 

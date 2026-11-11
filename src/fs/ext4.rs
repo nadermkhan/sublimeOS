@@ -93,6 +93,111 @@ impl Ext4FileSystem {
         self.device.read_sectors(lba, self.sectors_per_block, buf)
     }
 
+    pub fn write_block(&self, block: u64, buf: &[u8]) -> Result<(), &'static str> {
+        let lba = self.block_to_lba(block);
+        self.device.write_sectors(lba, self.sectors_per_block, buf)
+    }
+
+    pub fn get_block_bitmap_block(&self, group: u32) -> Result<u64, &'static str> {
+        let desc_block = if self.block_size == 1024 { 2 } else { 1 };
+        let offset = (group as usize) * (self.desc_size as usize);
+        let block_offset = desc_block + (offset as u64 / self.block_size as u64);
+        let byte_in_block = offset % (self.block_size as usize);
+
+        let mut buf = [0u8; 4096];
+        self.read_block(block_offset, &mut buf[..self.block_size as usize])?;
+
+        let block_bitmap_lo = (buf[byte_in_block] as u32)
+            | ((buf[byte_in_block + 1] as u32) << 8)
+            | ((buf[byte_in_block + 2] as u32) << 16)
+            | ((buf[byte_in_block + 3] as u32) << 24);
+        Ok(block_bitmap_lo as u64)
+    }
+
+    pub fn get_inode_bitmap_block(&self, group: u32) -> Result<u64, &'static str> {
+        let desc_block = if self.block_size == 1024 { 2 } else { 1 };
+        let offset = (group as usize) * (self.desc_size as usize);
+        let block_offset = desc_block + (offset as u64 / self.block_size as u64);
+        let byte_in_block = offset % (self.block_size as usize);
+
+        let mut buf = [0u8; 4096];
+        self.read_block(block_offset, &mut buf[..self.block_size as usize])?;
+
+        let inode_bitmap_lo = (buf[byte_in_block + 4] as u32)
+            | ((buf[byte_in_block + 5] as u32) << 8)
+            | ((buf[byte_in_block + 6] as u32) << 16)
+            | ((buf[byte_in_block + 7] as u32) << 24);
+        Ok(inode_bitmap_lo as u64)
+    }
+
+    pub fn allocate_block(&self, group: u32) -> Result<u64, &'static str> {
+        let bitmap_block = self.get_block_bitmap_block(group)?;
+        let bs = self.block_size as usize;
+        let mut buf = [0u8; 4096];
+        if bitmap_block > 0 {
+            self.read_block(bitmap_block, &mut buf[..bs])?;
+            for (byte_idx, byte) in buf[..bs].iter_mut().enumerate() {
+                if *byte != 0xFF {
+                    for bit in 0..8 {
+                        if (*byte & (1 << bit)) == 0 {
+                            *byte |= 1 << bit;
+                            self.write_block(bitmap_block, &buf[..bs])?;
+                            let blk_idx = (byte_idx * 8 + bit) as u64;
+                            let first_data_block = if self.block_size == 1024 { 1 } else { 0 };
+                            return Ok(first_data_block + (group as u64 * self.blocks_per_group as u64) + blk_idx);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(6)
+    }
+
+    pub fn allocate_inode(&self, group: u32) -> Result<u32, &'static str> {
+        let bitmap_block = self.get_inode_bitmap_block(group)?;
+        let bs = self.block_size as usize;
+        let mut buf = [0u8; 4096];
+        if bitmap_block > 0 {
+            self.read_block(bitmap_block, &mut buf[..bs])?;
+            for (byte_idx, byte) in buf[..bs].iter_mut().enumerate() {
+                if *byte != 0xFF {
+                    for bit in 0..8 {
+                        if (*byte & (1 << bit)) == 0 {
+                            *byte |= 1 << bit;
+                            self.write_block(bitmap_block, &buf[..bs])?;
+                            let ino_idx = (byte_idx * 8 + bit) as u32;
+                            return Ok(group * self.inodes_per_group + ino_idx + 1);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(14)
+    }
+
+    pub fn write_inode(&self, ino: u32, data: &[u8]) -> Result<(), &'static str> {
+        if ino == 0 {
+            return Err("Invalid ext4 inode 0");
+        }
+
+        let group = (ino - 1) / self.inodes_per_group;
+        let index = (ino - 1) % self.inodes_per_group;
+
+        let table_start_block = self.get_inode_table_block(group)?;
+        let byte_offset = (index as u64) * (self.inode_size as u64);
+        let block = table_start_block + (byte_offset / self.block_size as u64);
+        let offset_in_block = (byte_offset % self.block_size as u64) as usize;
+
+        let mut buf = [0u8; 4096];
+        let bs = self.block_size as usize;
+        self.read_block(block, &mut buf[..bs])?;
+
+        let sz = (self.inode_size as usize).min(data.len());
+        buf[offset_in_block..offset_in_block + sz].copy_from_slice(&data[..sz]);
+        self.write_block(block, &buf[..bs])?;
+        Ok(())
+    }
+
     pub fn get_inode_table_block(&self, group: u32) -> Result<u64, &'static str> {
         // Block group descriptor table starts immediately after superblock
         let desc_block = if self.block_size == 1024 { 2 } else { 1 };
@@ -318,6 +423,145 @@ impl InodeOperations for Ext4Inode {
         }
 
         Ok(bytes_read)
+    }
+
+    fn write(&mut self, offset: usize, buf: &[u8]) -> Result<usize, &'static str> {
+        if self.file_type == FileType::Directory {
+            return Err("Cannot directly write to directory via write()");
+        }
+
+        let bs = self.fs.block_size as usize;
+        let mut bytes_written = 0;
+        let mut block_buf = [0u8; 4096];
+
+        while bytes_written < buf.len() {
+            let cur_off = offset + bytes_written;
+            let logical_block = (cur_off / bs) as u32;
+            let off_in_block = cur_off % bs;
+            let chunk = (buf.len() - bytes_written).min(bs - off_in_block);
+
+            let phys_block = match self.map_logical_block(logical_block)? {
+                Some(p) => p,
+                None => {
+                    let new_phys = self.fs.allocate_block(0)?;
+                    let flags = (self.raw_inode[32] as u32)
+                        | ((self.raw_inode[33] as u32) << 8)
+                        | ((self.raw_inode[34] as u32) << 16)
+                        | ((self.raw_inode[35] as u32) << 24);
+
+                    if (flags & EXT4_EXTENTS_FLAG) != 0 {
+                        self.raw_inode[40] = (EXT4_EXTENTS_MAGIC & 0xFF) as u8;
+                        self.raw_inode[41] = (EXT4_EXTENTS_MAGIC >> 8) as u8;
+                        self.raw_inode[42] = 1; self.raw_inode[43] = 0;
+                        self.raw_inode[44] = 4; self.raw_inode[45] = 0;
+                        self.raw_inode[46] = 0; self.raw_inode[47] = 0;
+                        self.raw_inode[52] = 0; self.raw_inode[53] = 0; self.raw_inode[54] = 0; self.raw_inode[55] = 0;
+                        self.raw_inode[56] = 1; self.raw_inode[57] = 0;
+                        self.raw_inode[58] = 0; self.raw_inode[59] = 0;
+                        self.raw_inode[60] = (new_phys & 0xFF) as u8;
+                        self.raw_inode[61] = ((new_phys >> 8) & 0xFF) as u8;
+                        self.raw_inode[62] = ((new_phys >> 16) & 0xFF) as u8;
+                        self.raw_inode[63] = ((new_phys >> 24) & 0xFF) as u8;
+                    } else if logical_block < 12 {
+                        let off = 40 + (logical_block as usize) * 4;
+                        self.raw_inode[off] = (new_phys & 0xFF) as u8;
+                        self.raw_inode[off + 1] = ((new_phys >> 8) & 0xFF) as u8;
+                        self.raw_inode[off + 2] = ((new_phys >> 16) & 0xFF) as u8;
+                        self.raw_inode[off + 3] = ((new_phys >> 24) & 0xFF) as u8;
+                    }
+                    new_phys
+                }
+            };
+
+            if off_in_block > 0 || chunk < bs {
+                let _ = self.fs.read_block(phys_block, &mut block_buf[..bs]);
+            }
+            block_buf[off_in_block..off_in_block + chunk].copy_from_slice(&buf[bytes_written..bytes_written + chunk]);
+            self.fs.write_block(phys_block, &block_buf[..bs])?;
+
+            bytes_written += chunk;
+        }
+
+        let new_size = self.size.max(offset + bytes_written);
+        self.size = new_size;
+        self.raw_inode[4] = (new_size & 0xFF) as u8;
+        self.raw_inode[5] = ((new_size >> 8) & 0xFF) as u8;
+        self.raw_inode[6] = ((new_size >> 16) & 0xFF) as u8;
+        self.raw_inode[7] = ((new_size >> 24) & 0xFF) as u8;
+
+        self.fs.write_inode(self.ino, &self.raw_inode)?;
+        Ok(bytes_written)
+    }
+
+    fn create(&mut self, name: &str, file_type: FileType) -> Result<Arc<IrqSafeSpinlock<dyn InodeOperations>>, &'static str> {
+        if self.file_type != FileType::Directory {
+            return Err("Not a directory");
+        }
+
+        let new_ino = self.fs.allocate_inode(0)?;
+        let mut new_raw = [0u8; 256];
+        let mode: u16 = match file_type {
+            FileType::Directory => 0x41ED,
+            _ => 0x81A4,
+        };
+        new_raw[0] = (mode & 0xFF) as u8;
+        new_raw[1] = ((mode >> 8) & 0xFF) as u8;
+        new_raw[32] = 0; new_raw[33] = 0; new_raw[34] = 0x08; new_raw[35] = 0;
+        new_raw[40] = (EXT4_EXTENTS_MAGIC & 0xFF) as u8;
+        new_raw[41] = ((EXT4_EXTENTS_MAGIC >> 8) & 0xFF) as u8;
+        new_raw[42] = 0; new_raw[43] = 0;
+        new_raw[44] = 4; new_raw[45] = 0;
+        new_raw[46] = 0; new_raw[47] = 0;
+
+        self.fs.write_inode(new_ino, &new_raw)?;
+
+        let bs = self.fs.block_size as usize;
+        if let Some(dir_phys_block) = self.map_logical_block(0)? {
+            let mut dir_buf = [0u8; 4096];
+            self.fs.read_block(dir_phys_block, &mut dir_buf[..bs])?;
+
+            let mut off = 0;
+            while off < bs {
+                let rec_len = (dir_buf[off + 4] as u16) | ((dir_buf[off + 5] as u16) << 8);
+                if rec_len == 0 {
+                    break;
+                }
+                let name_len = dir_buf[off + 6] as usize;
+                let actual_len = (8 + name_len + 3) & !3;
+                let needed = (8 + name.len() + 3) & !3;
+
+                if (rec_len as usize) >= actual_len + needed {
+                    let new_rec_len = (rec_len as usize) - actual_len;
+                    dir_buf[off + 4] = (actual_len & 0xFF) as u8;
+                    dir_buf[off + 5] = ((actual_len >> 8) & 0xFF) as u8;
+
+                    let new_off = off + actual_len;
+                    dir_buf[new_off] = (new_ino & 0xFF) as u8;
+                    dir_buf[new_off + 1] = ((new_ino >> 8) & 0xFF) as u8;
+                    dir_buf[new_off + 2] = ((new_ino >> 16) & 0xFF) as u8;
+                    dir_buf[new_off + 3] = ((new_ino >> 24) & 0xFF) as u8;
+                    dir_buf[new_off + 4] = (new_rec_len & 0xFF) as u8;
+                    dir_buf[new_off + 5] = ((new_rec_len >> 8) & 0xFF) as u8;
+                    dir_buf[new_off + 6] = name.len() as u8;
+                    dir_buf[new_off + 7] = if file_type == FileType::Directory { 2 } else { 1 };
+                    dir_buf[new_off + 8..new_off + 8 + name.len()].copy_from_slice(name.as_bytes());
+
+                    self.fs.write_block(dir_phys_block, &dir_buf[..bs])?;
+                    break;
+                }
+
+                off += rec_len as usize;
+            }
+        }
+
+        Ok(Arc::new(IrqSafeSpinlock::new(Ext4Inode {
+            fs: self.fs.clone(),
+            ino: new_ino,
+            size: 0,
+            file_type,
+            name: String::from(name),
+            raw_inode: new_raw,
+        })))
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<IrqSafeSpinlock<dyn InodeOperations>>, &'static str> {
