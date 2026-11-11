@@ -12,6 +12,8 @@ pub struct KeyboardDriver {
     shift_pressed: bool,
     caps_lock: bool,
     ctrl_pressed: bool,
+    alt_pressed: bool,
+    extended: bool,
     buffer: VecDeque<u8>,
 }
 
@@ -21,24 +23,61 @@ impl KeyboardDriver {
             shift_pressed: false,
             caps_lock: false,
             ctrl_pressed: false,
+            alt_pressed: false,
+            extended: false,
             buffer: VecDeque::new(),
         }
     }
 
     pub fn handle_scancode(&mut self, scancode: u8) {
+        if scancode == 0xE0 {
+            self.extended = true;
+            return;
+        }
+
+        if self.extended {
+            self.extended = false;
+            // Extended keys (release has bit 7 set)
+            if (scancode & 0x80) != 0 {
+                return;
+            }
+
+            match scancode {
+                0x48 => self.push_escape_seq(b"[A"),  // Up Arrow
+                0x50 => self.push_escape_seq(b"[B"),  // Down Arrow
+                0x4D => self.push_escape_seq(b"[C"),  // Right Arrow
+                0x4B => self.push_escape_seq(b"[D"),  // Left Arrow
+                0x47 => self.push_escape_seq(b"[H"),  // Home
+                0x4F => self.push_escape_seq(b"[F"),  // End
+                0x53 => self.push_escape_seq(b"[3~"), // Delete
+                _ => {}
+            }
+            return;
+        }
+
         match scancode {
             // Shift pressed
             0x2A | 0x36 => self.shift_pressed = true,
             // Shift released
             0xAA | 0xB6 => self.shift_pressed = false,
-            // Ctrl pressed
+            // Ctrl pressed / released
             0x1D => self.ctrl_pressed = true,
-            // Ctrl released
             0x9D => self.ctrl_pressed = false,
+            // Alt pressed / released
+            0x38 => self.alt_pressed = true,
+            0xB8 => self.alt_pressed = false,
             // CapsLock toggled
             0x3A => self.caps_lock = !self.caps_lock,
+
+            // Alt + F1..F4 Virtual Console Switching
+            0x3B if self.alt_pressed => crate::tty::switch_tty(1),
+            0x3C if self.alt_pressed => crate::tty::switch_tty(2),
+            0x3D if self.alt_pressed => crate::tty::switch_tty(3),
+            0x3E if self.alt_pressed => crate::tty::switch_tty(4),
+
             // Key releases (break codes have bit 7 set)
-            code if code >= 0x80 => {}
+            code if (code & 0x80) != 0 => {}
+
             // Key presses (make codes)
             code => {
                 if let Some(ch) = self.scancode_to_char(code) {
@@ -50,10 +89,19 @@ impl KeyboardDriver {
         }
     }
 
+    fn push_escape_seq(&mut self, seq: &[u8]) {
+        if self.buffer.len() + seq.len() + 1 < 256 {
+            self.buffer.push_back(0x1B);
+            for &b in seq {
+                self.buffer.push_back(b);
+            }
+        }
+    }
+
     fn scancode_to_char(&self, code: u8) -> Option<u8> {
         let uppercase = self.shift_pressed ^ self.caps_lock;
         let ch = match code {
-            0x01 => return None, // ESC
+            0x01 => 0x1B, // ESC
             0x02 => if self.shift_pressed { b'!' } else { b'1' },
             0x03 => if self.shift_pressed { b'@' } else { b'2' },
             0x04 => if self.shift_pressed { b'#' } else { b'3' },

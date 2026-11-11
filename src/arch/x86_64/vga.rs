@@ -2,6 +2,7 @@ use core::fmt;
 use core::ptr::write_volatile;
 use crate::arch::x86_64::io::outb;
 use crate::sync::IrqSafeSpinlock;
+use crate::tty::ansi::{AnsiCommand, AnsiParser};
 
 pub const VGA_BUFFER_ADDR: usize = 0xFFFFFFFF800B8000;
 pub const BUFFER_HEIGHT: usize = 25;
@@ -41,9 +42,9 @@ impl ColorCode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
-struct ScreenChar {
-    ascii_character: u8,
-    color_code: ColorCode,
+pub struct ScreenChar {
+    pub ascii_character: u8,
+    pub color_code: ColorCode,
 }
 
 pub struct VgaWriter {
@@ -51,6 +52,7 @@ pub struct VgaWriter {
     column_position: usize,
     color_code: ColorCode,
     buffer: *mut ScreenChar,
+    ansi: AnsiParser,
 }
 
 unsafe impl Send for VgaWriter {}
@@ -63,6 +65,7 @@ impl VgaWriter {
             column_position: 0,
             color_code: ColorCode::new(Color::LightGray, Color::Black),
             buffer: VGA_BUFFER_ADDR as *mut ScreenChar,
+            ansi: AnsiParser::new(),
         }
     }
 
@@ -71,10 +74,20 @@ impl VgaWriter {
     }
 
     pub fn write_byte(&mut self, byte: u8) {
+        let (consumed, command) = self.ansi.process_byte(byte);
+        if let Some(cmd) = command {
+            self.execute_ansi_command(cmd);
+            self.update_hardware_cursor();
+            return;
+        }
+        if consumed {
+            return;
+        }
+
         match byte {
             b'\n' => self.new_line(),
             b'\r' => self.column_position = 0,
-            0x08 => self.backspace(), // Backspace
+            0x08 | 0x7F => self.backspace(), // Backspace
             byte => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
@@ -102,10 +115,46 @@ impl VgaWriter {
 
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
-            match byte {
-                0x20..=0x7e | b'\n' | b'\r' | 0x08 => self.write_byte(byte),
-                _ => self.write_byte(0xfe), // printable block for non-ascii
+            self.write_byte(byte);
+        }
+    }
+
+    fn execute_ansi_command(&mut self, cmd: AnsiCommand) {
+        match cmd {
+            AnsiCommand::SetColor { fg, bg } => {
+                self.color_code = ColorCode::new(fg, bg);
             }
+            AnsiCommand::ClearScreen => {
+                self.clear_screen();
+            }
+            AnsiCommand::ClearLine => {
+                let blank = ScreenChar {
+                    ascii_character: b' ',
+                    color_code: self.color_code,
+                };
+                for col in self.column_position..BUFFER_WIDTH {
+                    unsafe {
+                        write_volatile(self.buffer.add(self.row_position * BUFFER_WIDTH + col), blank);
+                    }
+                }
+            }
+            AnsiCommand::CursorPosition { row, col } => {
+                self.row_position = row.min(BUFFER_HEIGHT - 1);
+                self.column_position = col.min(BUFFER_WIDTH - 1);
+            }
+            AnsiCommand::CursorUp(count) => {
+                self.row_position = self.row_position.saturating_sub(count);
+            }
+            AnsiCommand::CursorDown(count) => {
+                self.row_position = (self.row_position + count).min(BUFFER_HEIGHT - 1);
+            }
+            AnsiCommand::CursorForward(count) => {
+                self.column_position = (self.column_position + count).min(BUFFER_WIDTH - 1);
+            }
+            AnsiCommand::CursorBack(count) => {
+                self.column_position = self.column_position.saturating_sub(count);
+            }
+            _ => {}
         }
     }
 

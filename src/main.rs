@@ -22,6 +22,7 @@ pub mod sync;
 pub mod syscall;
 pub mod task;
 pub mod tests;
+pub mod tty;
 
 #[no_mangle]
 pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
@@ -48,22 +49,18 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     // 5. Initialize Device Drivers (Keyboard, PCI Bus Scanner)
     drivers::init();
 
-    // 6. Enable CPU interrupts now that all subsystems and scheduler are active
+    // 6. Initialize Master TTY Subsystem & Virtual Consoles
+    tty::init();
+
+    // 7. Enable CPU interrupts now that all subsystems and scheduler are active
     arch::x86_64::registers::enable_interrupts();
     kinfo!("CPU interrupts enabled");
 
-    // 7. Run Kernel Self-Test Suite to verify all subsystems
+    // 8. Run Kernel Self-Test Suite to verify all subsystems
     tests::run_all_tests();
 
-    // 8. Launch GUI Desktop if VBE graphics adapter is present
-    if drivers::vbe::is_available() {
-        kinfo!("Bochs VBE display adapter detected. Launching Cosmos Desktop GUI...");
-        kinfo!("(Press Escape or click 'Exit to Shell' to switch to text shell)");
-        gui::launch_desktop();
-    }
-
-    // 9. Interactive Cosmos Shell fallback / continuation
-    kinfo!("Launching Cosmos Interactive Shell (CosmosSH)...");
+    // 9. Launch the Cosmos Interactive TTY Shell
+    kinfo!("Launching Cosmos Interactive TTY Shell (CosmosSH)...");
     shell::run_shell();
 }
 
