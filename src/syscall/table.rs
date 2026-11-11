@@ -35,6 +35,7 @@ pub const SYS_EXIT: u64 = 60;
 pub const SYS_WAIT4: u64 = 61;
 pub const SYS_KILL: u64 = 62;
 pub const SYS_UNAME: u64 = 63;
+pub const SYS_FTRUNCATE: u64 = 77;
 pub const SYS_GETCWD: u64 = 79;
 pub const SYS_CHDIR: u64 = 80;
 pub const SYS_MKDIR: u64 = 83;

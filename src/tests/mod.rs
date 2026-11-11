@@ -45,6 +45,8 @@ pub fn run_all_tests() {
     test_realtek_and_qualcomm_drivers();
     test_posix_job_control_and_sessions();
     test_usb_hid_subsystem();
+    test_mdns_bonjour_responder();
+    test_posix_shared_memory_and_mmap();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -1935,6 +1937,211 @@ fn test_usb_hid_subsystem() {
 
     assert!(USB_HID.lock().get_device("test_usb_kb").is_some());
     assert!(USB_HID.lock().get_device("test_usb_mouse").is_some());
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_mdns_bonjour_responder() {
+    print!("  [TEST] mDNS / Bonjour ZeroConf Responder (cosmicos.local & DNS-SD) ... ");
+
+    use crate::net::mdns::*;
+
+    // 1. Build a mock mDNS query for "cosmicos.local" (Type A)
+    // DNS Header: ID=0x1234, Flags=0x0000, QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
+    let mut query_bytes = alloc::vec![
+        0x12, 0x34, // ID
+        0x00, 0x00, // Flags (standard query)
+        0x00, 0x01, // QDCOUNT = 1
+        0x00, 0x00, // ANCOUNT = 0
+        0x00, 0x00, // NSCOUNT = 0
+        0x00, 0x00, // ARCOUNT = 0
+    ];
+    // Label: "cosmicos" (8) "local" (5) 0
+    query_bytes.extend_from_slice(&[8, b'c', b'o', b's', b'm', b'i', b'c', b'o', b's']);
+    query_bytes.extend_from_slice(&[5, b'l', b'o', b'c', b'a', b'l', 0]);
+    // QTYPE = A (1), QCLASS = IN (1)
+    query_bytes.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
+    query_bytes.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+
+    let parsed = parse_mdns_query(&query_bytes).expect("Failed to parse mDNS A query");
+    assert_eq!(parsed.id, 0x1234);
+    assert_eq!(parsed.questions.len(), 1);
+    assert_eq!(parsed.questions[0].name, "cosmicos.local");
+    assert_eq!(parsed.questions[0].qtype, DNS_TYPE_A);
+
+    // 2. Build response for "cosmicos.local"
+    let local_ip = [192, 168, 1, 100];
+    let resp = build_mdns_response(&parsed, local_ip).expect("Failed to build mDNS A response");
+    assert!(resp.len() >= 12);
+    assert_eq!(&resp[0..2], &0x1234u16.to_be_bytes()); // ID matches
+    assert_eq!(&resp[2..4], &0x8400u16.to_be_bytes()); // Flags: Response + Authoritative
+    let ancount = u16::from_be_bytes([resp[6], resp[7]]);
+    assert_eq!(ancount, 1);
+    // Verify local_ip is in the answer payload
+    assert!(resp.windows(4).any(|w| w == local_ip), "A record does not contain local IP");
+
+    // 3. Test DNS-SD service discovery query for "_http._tcp.local"
+    let mut http_query = alloc::vec![
+        0x56, 0x78,
+        0x00, 0x00,
+        0x00, 0x01,
+        0x00, 0x00,
+        0x00, 0x00,
+        0x00, 0x00,
+    ];
+    http_query.extend_from_slice(&[5, b'_', b'h', b't', b't', b'p']);
+    http_query.extend_from_slice(&[4, b'_', b't', b'c', b'p']);
+    http_query.extend_from_slice(&[5, b'l', b'o', b'c', b'a', b'l', 0]);
+    http_query.extend_from_slice(&DNS_TYPE_PTR.to_be_bytes());
+    http_query.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+
+    let parsed_http = parse_mdns_query(&http_query).expect("Failed to parse mDNS HTTP query");
+    assert_eq!(parsed_http.questions[0].name, "_http._tcp.local");
+
+    let http_resp = build_mdns_response(&parsed_http, local_ip).expect("Failed to build HTTP response");
+    let http_ancount = u16::from_be_bytes([http_resp[6], http_resp[7]]);
+    assert!(http_ancount >= 3); // PTR + SRV + TXT
+    // Verify port 80 is present in SRV record
+    assert!(http_resp.windows(2).any(|w| w == &80u16.to_be_bytes()));
+
+    // 4. Test DNS-SD service enumeration query "_services._dns-sd._udp.local"
+    let mut enum_query = alloc::vec![
+        0xAB, 0xCD,
+        0x00, 0x00,
+        0x00, 0x01,
+        0x00, 0x00,
+        0x00, 0x00,
+        0x00, 0x00,
+    ];
+    enum_query.extend_from_slice(&[9, b'_', b's', b'e', b'r', b'v', b'i', b'c', b'e', b's']);
+    enum_query.extend_from_slice(&[7, b'_', b'd', b'n', b's', b'-', b's', b'd']);
+    enum_query.extend_from_slice(&[4, b'_', b'u', b'd', b'p']);
+    enum_query.extend_from_slice(&[5, b'l', b'o', b'c', b'a', b'l', 0]);
+    enum_query.extend_from_slice(&DNS_TYPE_PTR.to_be_bytes());
+    enum_query.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+
+    let parsed_enum = parse_mdns_query(&enum_query).expect("Failed to parse DNS-SD enum query");
+    let enum_resp = build_mdns_response(&parsed_enum, local_ip).expect("Failed to build enum response");
+    let enum_ancount = u16::from_be_bytes([enum_resp[6], enum_resp[7]]);
+    assert_eq!(enum_ancount, 3); // _http._tcp, _ssh._tcp, _telnet._tcp
+
+    // 5. Test full packet handler generating Ethernet multicast frame
+    let local_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+    let eth_frame = handle_mdns_packet(&query_bytes, [192, 168, 1, 50], 5353, local_ip, local_mac)
+        .expect("Failed to generate mDNS Ethernet frame");
+    // Verify Ethernet header: Destination multicast MAC, Source local MAC, EtherType IPv4
+    assert_eq!(&eth_frame[0..6], &MDNS_MCAST_MAC);
+    assert_eq!(&eth_frame[6..12], &local_mac);
+    assert_eq!(&eth_frame[12..14], &crate::net::ethernet::ETHERTYPE_IPV4.to_be_bytes());
+
+    // 6. Test query for unknown domain returns None
+    let mut unknown_query = alloc::vec![
+        0x99, 0x99,
+        0x00, 0x00,
+        0x00, 0x01,
+        0x00, 0x00,
+        0x00, 0x00,
+        0x00, 0x00,
+    ];
+    unknown_query.extend_from_slice(&[7, b'u', b'n', b'k', b'n', b'o', b'w', b'n']);
+    unknown_query.extend_from_slice(&[5, b'l', b'o', b'c', b'a', b'l', 0]);
+    unknown_query.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
+    unknown_query.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+
+    let parsed_unk = parse_mdns_query(&unknown_query).expect("Failed to parse unknown query");
+    assert!(build_mdns_response(&parsed_unk, local_ip).is_none());
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_posix_shared_memory_and_mmap() {
+    print!("  [TEST] POSIX Shared Memory (shm_open, ftruncate, /dev/shm, mmap MAP_SHARED) ... ");
+
+    use crate::mm::shm::*;
+    use crate::task::process::*;
+
+    // 1. Test sys_shm_open to create a new shared memory segment
+    let shm_name = b"cosmic_ipc_shm\0";
+    let fd = sys_shm_open(shm_name.as_ptr(), 0x40 | 0x02, 0o666);
+    assert!(fd >= 0, "sys_shm_open failed: {}", fd);
+
+    // 2. Test sys_ftruncate to resize the segment to 8192 bytes (2 pages)
+    let trunc_ret = sys_ftruncate(fd as usize, 8192);
+    assert_eq!(trunc_ret, 0, "sys_ftruncate failed: {}", trunc_ret);
+
+    // 3. Verify backing ShmObject in SHM_REGISTRY
+    {
+        let reg = SHM_REGISTRY.lock();
+        let shm_obj = reg.get("cosmic_ipc_shm").expect("ShmObject not found in registry");
+        let obj = shm_obj.lock();
+        assert_eq!(obj.size, 8192);
+        assert_eq!(obj.frames.len(), 2, "Expected 2 physical frames allocated");
+    }
+
+    // 4. Test writing to shared memory via sys_write
+    let test_msg = b"CosmicOS POSIX Shared Memory IPC works across address spaces!";
+    let write_ret = crate::syscall::fs_calls::sys_write(fd as usize, test_msg.as_ptr(), test_msg.len());
+    assert_eq!(write_ret, test_msg.len() as isize);
+
+    // 5. Test reading from another open file descriptor of same shared memory object
+    let fd2 = sys_shm_open(shm_name.as_ptr(), 0x02, 0o666);
+    assert!(fd2 >= 0, "sys_shm_open secondary fd failed");
+    let mut read_buf = [0u8; 64];
+    let read_ret = crate::syscall::fs_calls::sys_read(fd2 as usize, read_buf.as_mut_ptr(), test_msg.len());
+    assert_eq!(read_ret, test_msg.len() as isize);
+    assert_eq!(&read_buf[..test_msg.len()], test_msg);
+    sys_close(fd2 as usize);
+
+    // 6. Test VFS /dev/shm filesystem integration
+    {
+        let vfs = VFS.lock();
+        let shm_file = vfs.open("/dev/shm/cosmic_ipc_shm", 0).expect("Open /dev/shm/cosmic_ipc_shm failed");
+        let mut vfs_buf = [0u8; 64];
+        let bytes = shm_file.read(&mut vfs_buf[..test_msg.len()]).expect("Read from /dev/shm failed");
+        assert_eq!(bytes, test_msg.len());
+        assert_eq!(&vfs_buf[..bytes], test_msg);
+    }
+
+    // 7. Test sys_mmap with MAP_SHARED
+    let target_mmap_addr: u64 = 0x0000_7F20_0000_0000;
+    let mmap_ret = sys_mmap(
+        target_mmap_addr,
+        8192,
+        PROT_READ | PROT_WRITE,
+        MAP_SHARED,
+        fd as i32,
+        0,
+    );
+    assert_eq!(mmap_ret, target_mmap_addr as i64, "sys_mmap failed: {}", mmap_ret);
+
+    // Verify address space VMA list contains this mapped region
+    {
+        let cur_pid = get_current_pid();
+        let proc = get_process(cur_pid).expect("Current process not found");
+        let p = proc.lock();
+        let aspace = p.address_space.as_ref().expect("AddressSpace not found");
+        let vma = aspace.vmas.iter().find(|v| v.start == target_mmap_addr).expect("VMA not recorded");
+        assert_eq!(vma.end, target_mmap_addr + 8192);
+        assert_eq!(vma.vma_type, crate::mm::address_space::VmaType::Mmap);
+    }
+
+    // 8. Test sys_munmap to unmap region
+    let munmap_ret = sys_munmap(target_mmap_addr, 8192);
+    assert_eq!(munmap_ret, 0, "sys_munmap failed");
+
+    {
+        let cur_pid = get_current_pid();
+        let proc = get_process(cur_pid).expect("Current process not found");
+        let p = proc.lock();
+        let aspace = p.address_space.as_ref().expect("AddressSpace not found");
+        assert!(aspace.vmas.iter().all(|v| v.start != target_mmap_addr), "VMA not removed");
+    }
+
+    // 9. Close fd and unlink shared memory
+    sys_close(fd as usize);
+    let unlink_ret = sys_shm_unlink(shm_name.as_ptr());
+    assert_eq!(unlink_ret, 0, "sys_shm_unlink failed: {}", unlink_ret);
+    assert!(SHM_REGISTRY.lock().get("cosmic_ipc_shm").is_none());
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

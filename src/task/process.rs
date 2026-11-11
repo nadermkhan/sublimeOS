@@ -693,6 +693,66 @@ pub fn sys_unlockpt(fd: usize) -> i64 {
     -9 // -EBADF
 }
 
+pub fn sys_shm_open(name_ptr: *const u8, oflag: i32, _mode: u32) -> i64 {
+    if name_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+        Ok(s) => s,
+        Err(_) => return -22, // -EINVAL
+    };
+    let clean_name = raw_name.trim_start_matches('/');
+
+    let shm_obj = crate::mm::shm::SHM_REGISTRY.lock().open_or_create(clean_name);
+    let file = Arc::new(crate::fs::vfs::File::new(shm_obj, oflag as u32));
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        if let Some(fd) = proc.lock().alloc_fd(file) {
+            return fd as i64;
+        }
+    }
+    -24 // -EMFILE
+}
+
+pub fn sys_shm_unlink(name_ptr: *const u8) -> i64 {
+    if name_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+        Ok(s) => s,
+        Err(_) => return -22, // -EINVAL
+    };
+    let clean_name = raw_name.trim_start_matches('/');
+    if crate::mm::shm::SHM_REGISTRY.lock().unlink(clean_name) {
+        0
+    } else {
+        -2 // -ENOENT
+    }
+}
+
+pub fn sys_ftruncate(fd: usize, length: usize) -> i64 {
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if let Some(file) = p.get_fd(fd) {
+            let inode = file.inode.clone();
+            drop(p);
+            let mut node = inode.lock();
+            let _ = node.truncate(length);
+            return 0;
+        }
+    }
+    -9 // -EBADF
+}
+
 pub fn sys_close(fd: usize) -> i64 {
     let current_pid = get_current_pid();
     if let Some(proc) = get_process(current_pid) {
@@ -730,24 +790,39 @@ pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> i64 {
 
 pub fn sys_mmap(
     addr: u64,
-    length: u64,
-    _prot: u64,
-    _flags: u64,
-    fd: i64,
+    length: usize,
+    prot: i32,
+    _flags: i32,
+    fd: i32,
     _offset: u64,
 ) -> i64 {
     if length == 0 {
         return -22; // -EINVAL
     }
 
+    let pages = (length + crate::mm::PAGE_SIZE - 1) / crate::mm::PAGE_SIZE;
     let current_pid = get_current_pid();
+
     let proc = match get_process(current_pid) {
         Some(p) => p,
-        None => return -3, // -ESRCH
+        None => {
+            let pcb = Arc::new(IrqSafeSpinlock::new(ProcessControlBlock::new(current_pid, 0, "proc")));
+            PROCESS_TABLE.lock().push(pcb.clone());
+            pcb
+        }
     };
 
     let mut p = proc.lock();
+    if p.address_space.is_none() {
+        p.address_space = AddressSpace::new();
+    }
+
     let target_addr = if addr != 0 { addr } else { 0x6000_0000 };
+
+    let mut map_flags = crate::mm::vmm::PAGE_PRESENT | crate::mm::vmm::PAGE_USER;
+    if (prot & crate::mm::shm::PROT_WRITE) != 0 || prot == 0 {
+        map_flags |= crate::mm::vmm::PAGE_WRITABLE;
+    }
 
     if fd >= 0 {
         let fd_idx = fd as usize;
@@ -769,13 +844,43 @@ pub fn sys_mmap(
             if let Some(ref mut aspace) = p.address_space {
                 if aspace.map_phys_region(
                     target_addr,
-                    length,
+                    length as u64,
                     phys,
-                    crate::mm::vmm::PAGE_WRITABLE,
+                    map_flags,
                     crate::mm::address_space::VmaType::Mmap,
                 ).is_ok() {
                     return target_addr as i64;
                 }
+            }
+            return -12; // -ENOMEM
+        }
+
+        // Check if file inode provides physical frames (e.g. POSIX shared memory ShmObject)
+        let frames_opt = if fd_idx < p.fd_table.len() {
+            if let Some(ref file) = p.fd_table[fd_idx] {
+                file.inode.lock().get_physical_frames()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(frames) = frames_opt {
+            if let Some(ref mut aspace) = p.address_space {
+                let vmm = crate::mm::vmm::VMM.lock();
+                let pml4 = unsafe { &mut *(crate::mm::phys_to_virt(aspace.pml4_phys) as *mut crate::mm::vmm::PageTable) };
+                for (i, &frame) in frames.iter().take(pages).enumerate() {
+                    let virt = target_addr + (i * crate::mm::PAGE_SIZE) as u64;
+                    let _ = vmm.map_page(pml4, virt, frame, map_flags);
+                }
+                aspace.vmas.push(crate::mm::address_space::VirtualMemoryArea {
+                    start: target_addr,
+                    end: target_addr + (pages * crate::mm::PAGE_SIZE) as u64,
+                    flags: map_flags,
+                    vma_type: crate::mm::address_space::VmaType::Mmap,
+                });
+                return target_addr as i64;
             }
             return -12; // -ENOMEM
         }
@@ -784,8 +889,8 @@ pub fn sys_mmap(
     if let Some(ref mut aspace) = p.address_space {
         if aspace.map_region(
             target_addr,
-            length,
-            crate::mm::vmm::PAGE_WRITABLE,
+            length as u64,
+            map_flags,
             crate::mm::address_space::VmaType::Mmap,
         ).is_ok() {
             return target_addr as i64;
@@ -795,7 +900,17 @@ pub fn sys_mmap(
     -12 // -ENOMEM
 }
 
-pub fn sys_munmap(_addr: u64, _length: u64) -> i64 {
+pub fn sys_munmap(addr: u64, length: usize) -> i64 {
+    if length == 0 || addr == 0 {
+        return -22; // -EINVAL
+    }
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let mut p = proc.lock();
+        if let Some(ref mut aspace) = p.address_space {
+            aspace.vmas.retain(|vma| vma.start != addr);
+        }
+    }
     0
 }
 

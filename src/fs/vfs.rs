@@ -68,6 +68,14 @@ pub trait InodeOperations: Send + Sync {
         Err("Cannot add child node to this Inode")
     }
 
+    fn truncate(&mut self, _size: usize) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn get_physical_frames(&self) -> Option<alloc::vec::Vec<u64>> {
+        None
+    }
+
     fn stat(&self) -> Stat;
 }
 

@@ -15,6 +15,7 @@ pub mod ethernet;
 pub mod http;
 pub mod icmp;
 pub mod ip;
+pub mod mdns;
 pub mod socket;
 pub mod tcp;
 pub mod tls;
@@ -68,7 +69,7 @@ pub fn poll() {
                                 }
                             }
                             ip::IP_PROTO_UDP => {
-                                if let Some((_src_port, dst_port, udp_payload)) = udp::parse_udp_packet(ip_payload) {
+                                if let Some((src_port, dst_port, udp_payload)) = udp::parse_udp_packet(ip_payload) {
                                     if dst_port == udp::PORT_DHCP_CLIENT {
                                         if let Some((msg_type, lease)) = dhcp::parse_dhcp_packet(udp_payload) {
                                             if msg_type == dhcp::DHCP_OFFER {
@@ -81,6 +82,10 @@ pub fn poll() {
                                             } else if msg_type == dhcp::DHCP_ACK {
                                                 dhcp::apply_dhcp_lease(dev.name(), lease);
                                             }
+                                        }
+                                    } else if dst_port == mdns::MDNS_PORT {
+                                        if let Some(reply_frame) = mdns::handle_mdns_packet(udp_payload, src_ip, src_port, cfg.ipv4, dev.mac_address()) {
+                                            let _ = dev.send_packet(&reply_frame);
                                         }
                                     }
                                 }

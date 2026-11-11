@@ -29,7 +29,7 @@
    - [8. CosmicSH POSIX Shell & Terminal Text Editor](#8-cosmicsh-posix-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
 4. [Interactive Shell Command Reference (51 Commands)](#interactive-shell-command-reference-51-commands)
-5. [Automated Verification Suite (34 Self-Tests)](#automated-verification-suite-34-self-tests)
+5. [Automated Verification Suite (36 Self-Tests)](#automated-verification-suite-36-self-tests)
 6. [Building and Running](#building-and-running)
    - [Prerequisites](#prerequisites)
    - [Compiling Kernel](#compiling-kernel)
@@ -135,6 +135,11 @@
 - **Virtual Memory Manager (VMM) ([`vmm.rs`](src/mm/vmm.rs))**: 4-level paging manager (PML4, PDPT, PD, PT). Supports dynamic page mapping/unmapping, address translation, TLB invalidation (`invlpg`), non-cacheable MMIO mapping ([`map_mmio_range`](src/mm/vmm.rs)), and page fault handling for Copy-on-Write ([`handle_cow_fault`](src/mm/vmm.rs)) with in-place permission promotion when reference count is 1.
 - **Kernel Heap ([`heap.rs`](src/mm/heap.rs))**: Expandable `GlobalAlloc` implementation backed by PMM frames. Unlocks Rust `alloc` data structures (`Vec`, `Box`, `String`, `Arc`, `format!`).
 - **User Address Space ([`address_space.rs`](src/mm/address_space.rs))**: Per-process PML4 address spaces with kernel higher-half clone, Virtual Memory Areas (VMAs), POSIX `brk()` heap expansion, direct user memory patching ([`write_user_u64`](src/mm/address_space.rs)), and Copy-on-Write address space cloning ([`clone_cow`](src/mm/address_space.rs)).
+- **POSIX Shared Memory & Memory Mapping ([`shm.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/mm/shm.rs), [`process.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/task/process.rs))**:
+  - `shm_open()` (via `/dev/shm/*` and `sys_shm_open`): Creates or opens named in-memory shared memory objects backed by physical PMM frames.
+  - `ftruncate()` (`sys_ftruncate` Syscall 77): Resizes shared memory objects, dynamically allocating or freeing 4 KiB physical frames.
+  - `mmap()` (`sys_mmap` Syscall 9, `MAP_SHARED` / `MAP_PRIVATE` / `MAP_ANONYMOUS`) and `munmap()` (`sys_munmap` Syscall 11): Maps shared physical frames or anonymous memory directly into the process PML4 address space and records Virtual Memory Areas (`VirtualMemoryArea`). Enables zero-copy Inter-Process Communication (IPC) across independent address spaces.
+  - `shm_unlink()`: Removes named objects from the global registry (`SHM_REGISTRY`) and `/dev/shm`.
 
 ### 3. Task Management, Process Control & POSIX Signals
 *Location: [`src/task/`](src/task/), [`src/ipc/`](src/ipc/)*
@@ -218,6 +223,11 @@
   - SHA-256, HMAC-SHA256, and HKDF-Extract/Expand key schedule derivation.
   - Client: `curl [-i] <url>` fetching web pages and REST APIs over plain HTTP or secure HTTPS (`curl https://...`).
   - Server: Embedded `httpd` web server serving interactive status dashboards and JSON APIs (`/api/status`).
+- **mDNS & Apple Bonjour ZeroConf Responder ([`mdns.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/net/mdns.rs))**:
+  - RFC 6762 / RFC 6763 compliant Multicast DNS responder listening on UDP port 5353 (`224.0.0.251` / MAC `01:00:5E:00:00:FB`).
+  - Resolves `cosmicos.local` to the system's IPv4 address (`A` record).
+  - DNS Service Discovery (DNS-SD) advertising running system daemons: HTTP Web Server (`_http._tcp.local`, port 80), SSH Remote Shell (`_ssh._tcp.local`, port 22), and Telnet Server (`_telnet._tcp.local`, port 23), along with service enumeration (`_services._dns-sd._udp.local`).
+  - Generates authoritative answer frames with PTR, SRV, TXT, and A resource records.
 - **Hardware Network Drivers ([`src/drivers/net/`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/))**:
   - **Intel e1000 Gigabit NIC ([`e1000.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/e1000.rs))**: PCI controller (`en0`) with MMIO register control and hardware packet rings.
   - **Realtek Fast & Gigabit Ethernet ([`realtek.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/realtek.rs))**: Support for RTL8139 (10/100M Fast Ethernet), RTL8168/RTL8169 (PCI/PCIe Gigabit), and RTL8125 (2.5GbE Gaming NIC) with auto-switching MMIO/I/O port dispatch, hardware reset (`CMD_RST`), MAC extraction (`IDR0`..`IDR5`), 18 KiB RX ring buffer with wrap margin, and 4-descriptor TX rings (`en1`).
@@ -328,7 +338,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (34 Self-Tests)
+## Automated Verification Suite (36 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, verifying all core subsystems before launching the interactive shell:
 
@@ -370,6 +380,8 @@ On startup, CosmicOS executes its automated self-test verification suite, verify
   [TEST] Realtek RTL8139/8169 & Qualcomm Atheros Drivers ... [PASS]
   [TEST] POSIX Job Control, Process Groups & Sessions ... [PASS]
   [TEST] USB HID Keyboard & Mouse Input Subsystem ... [PASS]
+  [TEST] mDNS / Bonjour ZeroConf Responder (cosmicos.local & DNS-SD) ... [PASS]
+  [TEST] POSIX Shared Memory (shm_open, ftruncate, /dev/shm, mmap MAP_SHARED) ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

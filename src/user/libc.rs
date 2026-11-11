@@ -428,6 +428,31 @@ pub fn getsid(pid: i32) -> i32 {
     }
 }
 
+/// POSIX ftruncate() system call wrapper
+pub fn ftruncate(fd: usize, length: usize) -> i32 {
+    unsafe {
+        syscall2(SYS_FTRUNCATE, fd as u64, length as u64) as i32
+    }
+}
+
+/// POSIX shm_open() wrapper (opens /dev/shm/<name>)
+pub fn shm_open(name: &str, oflag: i32, mode: u32) -> i32 {
+    let mut path = alloc::string::String::from("/dev/shm/");
+    path.push_str(name.trim_start_matches('/'));
+    path.push('\0');
+    open(path.as_bytes(), oflag as u32, mode)
+}
+
+/// POSIX shm_unlink() wrapper
+pub fn shm_unlink(name: &str) -> i32 {
+    let clean_name = name.trim_start_matches('/');
+    if crate::mm::shm::SHM_REGISTRY.lock().unlink(clean_name) {
+        0
+    } else {
+        -2 // -ENOENT
+    }
+}
+
 /// POSIX exit() system call wrapper
 pub fn exit(status: i32) -> ! {
     unsafe {

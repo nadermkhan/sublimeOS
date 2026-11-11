@@ -20,8 +20,9 @@ pub extern "C" fn syscall_dispatcher(
         SYS_OPEN => crate::task::process::sys_open(a1 as *const u8, a2 as i32, a3 as i32),
         SYS_CLOSE => crate::task::process::sys_close(a1 as usize),
         SYS_IOCTL => crate::task::process::sys_ioctl(a1 as usize, a2 as u32, a3 as usize),
-        SYS_MMAP => crate::task::process::sys_mmap(a1, a2, a3, _a4, _a5 as i64, _a6),
-        SYS_MUNMAP => crate::task::process::sys_munmap(a1, a2),
+        SYS_MMAP => crate::task::process::sys_mmap(a1, a2 as usize, a3 as i32, _a4 as i32, _a5 as i32, _a6),
+        SYS_MUNMAP => crate::task::process::sys_munmap(a1, a2 as usize) as i64,
+        SYS_FTRUNCATE => crate::task::process::sys_ftruncate(a1 as usize, a2 as usize),
         SYS_BRK => crate::task::user::sys_brk(a1) as i64,
         SYS_UNAME => fs_calls::sys_uname(a1 as *mut fs_calls::UtsName) as i64,
         SYS_SCHED_YIELD => {
