@@ -26,17 +26,17 @@ pub struct TaskbarTab {
 }
 
 pub struct Taskbar {
-    pub apple_menu_open: bool,
+    pub cosmic_menu_open: bool,
 }
 
 impl Taskbar {
     pub fn new() -> Self {
         Self {
-            apple_menu_open: false,
+            cosmic_menu_open: false,
         }
     }
 
-    /// Render macOS Top Menu Bar and Bottom Floating Dock.
+    /// Render CosmicOS Top Menu Bar and Bottom Floating Dock.
     pub fn render(
         &self,
         canvas: &mut Canvas,
@@ -48,19 +48,19 @@ impl Taskbar {
         let sh = canvas.height as i32;
 
         // ==========================================
-        // 1. macOS Top Menu Bar (Global Menu Bar)
+        // 1. CosmicOS Top Menu Bar (Global Menu Bar)
         // ==========================================
         canvas.fill_rect(0, 0, sw, TOPBAR_HEIGHT, Color::argb(225, 26, 27, 36));
         canvas.fill_rect(0, TOPBAR_HEIGHT - 1, sw, 1, Color::argb(60, 255, 255, 255));
 
-        // Apple Icon  (ASCII fallback or symbol)
-        let apple_hover = mouse_x >= 8 && mouse_x <= 32 && mouse_y <= TOPBAR_HEIGHT;
-        if self.apple_menu_open || apple_hover {
+        // Cosmic Emblem Icon ✦
+        let emblem_hover = mouse_x >= 8 && mouse_x <= 32 && mouse_y <= TOPBAR_HEIGHT;
+        if self.cosmic_menu_open || emblem_hover {
             canvas.fill_rounded_rect(8, 2, 24, 22, 4, Color::argb(60, 255, 255, 255));
         }
         draw_char(canvas, 16, 5, '✦', Color::WHITE);
 
-        // Active App Title & Standard macOS Menus
+        // Active App Title & Standard Menus
         let mut menu_x = 40;
         let menus = ["Finder", "File", "Edit", "View", "Go", "Window", "Help"];
         for (i, &item) in menus.iter().enumerate() {
@@ -111,7 +111,7 @@ impl Taskbar {
         draw_string(canvas, sw - 86, 5, &clock_str, Color::WHITE);
 
         // ==========================================
-        // 2. macOS Floating Glass Dock (Bottom)
+        // 2. Floating Glass Dock (Bottom)
         // ==========================================
         let dock_w = 340;
         let dock_h = 52;
@@ -174,14 +174,14 @@ impl Taskbar {
         draw_char(canvas, app_x + 14, icon_y + 10, 'x', Color::TEXT_MUTED);
 
         // ==========================================
-        // 3. Apple Menu Dropdown (if open)
+        // 3. Cosmic Menu Dropdown (if open)
         // ==========================================
-        if self.apple_menu_open {
-            self.render_apple_menu(canvas, mouse_x, mouse_y);
+        if self.cosmic_menu_open {
+            self.render_cosmic_menu(canvas, mouse_x, mouse_y);
         }
     }
 
-    fn render_apple_menu(&self, canvas: &mut Canvas, mouse_x: i32, mouse_y: i32) {
+    fn render_cosmic_menu(&self, canvas: &mut Canvas, mouse_x: i32, mouse_y: i32) {
         let menu_x = 8;
         let menu_y = TOPBAR_HEIGHT + 2;
         let menu_w = 210;
@@ -192,11 +192,11 @@ impl Taskbar {
         canvas.draw_rounded_rect(menu_x, menu_y, menu_w, menu_h, 8, Color::argb(80, 255, 255, 255));
 
         let items = [
-            "About This Mac",
+            "About CosmicOS",
             "System Settings...",
             "Activity Monitor",
             "Terminal",
-            "Exit to Darwin Shell",
+            "Exit to Sublime Shell",
             "Restart...",
             "Shut Down...",
         ];
@@ -231,7 +231,7 @@ impl Taskbar {
         }
     }
 
-    /// Process mouse click on Apple Menu Bar or Dock.
+    /// Process mouse click on Menu Bar or Dock.
     pub fn handle_click(
         &mut self,
         x: i32,
@@ -240,8 +240,8 @@ impl Taskbar {
         sw: i32,
         sh: i32,
     ) -> TaskbarAction {
-        // 1. Check Apple Dropdown Menu
-        if self.apple_menu_open {
+        // 1. Check Cosmic Dropdown Menu
+        if self.cosmic_menu_open {
             let menu_x = 8;
             let menu_y = TOPBAR_HEIGHT + 2;
             let menu_w = 210;
@@ -263,7 +263,7 @@ impl Taskbar {
 
                 for (idx, action) in actions.into_iter().enumerate() {
                     if x >= menu_x + 4 && x <= menu_x + menu_w - 4 && y >= iy && y <= iy + item_h {
-                        self.apple_menu_open = false;
+                        self.cosmic_menu_open = false;
                         return action;
                     }
 
@@ -275,13 +275,13 @@ impl Taskbar {
                 }
                 return TaskbarAction::None;
             } else {
-                self.apple_menu_open = false;
+                self.cosmic_menu_open = false;
             }
         }
 
-        // 2. Check Top Apple Icon
+        // 2. Check Top Emblem Icon
         if x >= 8 && x <= 32 && y <= TOPBAR_HEIGHT {
-            self.apple_menu_open = !self.apple_menu_open;
+            self.cosmic_menu_open = !self.cosmic_menu_open;
             return TaskbarAction::ToggleStartMenu;
         }
 

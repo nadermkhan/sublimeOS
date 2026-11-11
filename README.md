@@ -1,14 +1,14 @@
-# CosmosKernel (Darwin 24.1.0 / macOS Sequoia Persona)
+# CosmicOS — Sublime Kernel (x86_64)
 
-> **A Clean, Neat, and Mature 64-bit Monolithic Operating System Kernel Written in Rust with macOS / Darwin Architecture.**
+> **A Clean, Neat, and Mature 64-bit Monolithic Operating System Kernel Written in Rust.**
 
 [![Target](https://img.shields.io/badge/target-x86__64--unknown--none-blue.svg)](https://www.rust-lang.org/)
 [![Toolchain](https://img.shields.io/badge/rustc-nightly-orange.svg)](https://rust-lang.github.io/rustup/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](LICENSE)
 [![Architecture](https://img.shields.io/badge/arch-x86__64%20(AMD64)-red.svg)]()
-[![macOS](https://img.shields.io/badge/macOS-15.1%20Sequoia-purple.svg)]()
+[![OS](https://img.shields.io/badge/OS-CosmicOS%201.0-purple.svg)]()
 
-CosmosKernel is a complete, monolithic, bare-metal 64-bit operating system kernel developed in safe and idiomatic Rust, crafted with an authentic **macOS Sequoia 15.1 / Darwin 24.1.0 (XNU)** persona. It boots directly via Multiboot / Multiboot2, transitions into 64-bit Long Mode, maps kernel space to the higher half, sets up full memory management, preemptive multitasking, a macOS-structured virtual file system (VFS), POSIX/Darwin device nodes, inter-process communication, hardware drivers, system calls, virtual consoles (`ttys000`..`ttys003`), a native zsh-style shell with macOS diagnostic utilities (`sw_vers`, `system_profiler`, `diskutil`, `sysctl`, `say`, `open`, `defaults`), and an authentic Aqua graphical desktop with a top global menu bar, bottom glass dock, Finder, and Activity Monitor.
+CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed in safe and idiomatic Rust, powered by the **Sublime Kernel**. It boots directly via Multiboot / Multiboot2, transitions into 64-bit Long Mode, maps kernel space to the higher half, sets up full memory management, preemptive multitasking, a clean property-list virtual file system (VFS), device nodes, inter-process communication, hardware drivers, system calls, virtual consoles (`ttys000`..`ttys003`), a native zsh-style shell with system diagnostic utilities (`sw_vers`, `system_profiler`, `diskutil`, `sysctl`, `say`, `open`, `defaults`), and an authentic Aqua graphical desktop with a top global menu bar, bottom glass dock, Finder, and Activity Monitor.
 
 ---
 
@@ -109,44 +109,44 @@ CosmosKernel is a complete, monolithic, bare-metal 64-bit operating system kerne
 - **PS/2 Keyboard**: IRQ 1 handler, Set 1/2 scancode decoder, Shift/Ctrl/Alt/CapsLock modifier tracking, and thread-safe input ring buffer.
 - **PCI Bus Scanner**: Scans PCI configuration space (ports 0xCF8/0xCFC), identifying host bridges, ISA bridges, IDE controllers, VGA controllers, and NICs (`lspci`).
 
-### 7. Interactive Darwin Shell (`zsh`) & Virtual TTYs
+### 7. Interactive CosmicOS Shell (`zsh`) & Virtual TTYs
 Built-in interactive CLI available on VGA display, COM1 serial, and virtual consoles:
 - **Virtual Consoles**:
   - `Alt+F1`: `ttys000` (Primary interactive zsh shell)
   - `Alt+F2`: `ttys001` (Secondary login session)
   - `Alt+F3`: `ttys002` (Console.app / dmesg kernel diagnostic stream)
   - `Alt+F4`: `ttys003` (Activity Monitor / top diagnostic view)
-- **macOS Command Suite**:
-  - `sw_vers` - Display macOS ProductVersion (15.1), Build (24B83), and Darwin Kernel Version
-  - `system_profiler` - Hardware overview (MacBook Pro 16", Apple M3 Max, Unified Memory, Bus Speed)
+- **CosmicOS Command Suite**:
+  - `sw_vers` - Display CosmicOS ProductVersion (1.0), Build (1A01), and Sublime Kernel Version
+  - `system_profiler` - Hardware overview (CosmicStation Pro, Sublime Architecture, Unified Memory, Bus Speed)
   - `sysctl` - Query kernel variables (`kern.version`, `hw.ncpu`, `hw.memsize`, `hw.model`)
-  - `diskutil` - Enumerate APFS containers and physical disk nodes (`disk0`, `disk0s1`)
-  - `defaults` - Read and write macOS preference plists (`defaults read`)
-  - `say <text>` - Darwin speech synthesis simulation
-  - `open <app|file>` - macOS LaunchServices application launcher
-  - `top` - Real-time Mach task, thread, and wired memory monitor
-  - `whoami` & `hostname` - Return user (`cosmos`) and host (`Cosmos-Mac.local`)
-  - `gui` - Launch the interactive macOS Aqua desktop interface (1024x768)
+  - `diskutil` - Enumerate CosmicFS containers and physical disk nodes (`disk0`, `disk0s1`)
+  - `defaults` - Read and write Cosmic preference plists (`defaults read`)
+  - `say <text>` - Cosmic speech synthesis simulation
+  - `open <app|file>` - Cosmic LaunchServices application launcher
+  - `top` - Real-time Sublime task, thread, and wired memory monitor
+  - `whoami` & `hostname` - Return user (`cosmos`) and host (`CosmicOS.local`)
+  - `gui` - Launch the interactive CosmicOS Aqua desktop interface (1024x768)
   - `ls`, `cat`, `mkdir`, `touch`, `rm`, `test`, `reboot`, `halt`
 
 ### 8. Graphical User Interface Subsystem (`src/gui`)
-CosmosKernel features an authentic macOS Sequoia / Aqua desktop environment:
+CosmicOS features a modern Aqua desktop environment:
 - **Linear Framebuffer Graphics**: Bochs VBE display controller running at 1024x768 with 32-bit ARGB true color mapped directly to higher-half virtual memory (`0xFFFFFFFFD0000000`).
 - **Compositor & 2D Canvas**: Double-buffered software rendering engine (`Canvas`) with anti-aliasing, rounded glass rectangles, drop shadows, and horizontal gradients.
-- **macOS Window Chrome**: Centered window titles, dark glass titlebar, and top-left traffic light buttons:
+- **Window Chrome**: Centered window titles, dark glass titlebar, and top-left traffic light buttons:
   - 🔴 **Red** (`x+16`): Close window
   - 🟡 **Yellow** (`x+32`): Minimize window
   - 🟢 **Green** (`x+48`): Zoom / Maximize window
-- **Top Global Menu Bar**: Docked at `y=0` with Apple menu ``, active application menus (`Finder`, `File`, `Edit`, `View`, `Go`, `Window`, `Help`), live RAM status badge, and control center.
+- **Top Global Menu Bar**: Docked at `y=0` with Cosmic menu `✦`, active application menus (`Finder`, `File`, `Edit`, `View`, `Go`, `Window`, `Help`), live RAM status badge, and control center.
 - **Bottom Glass Dock**: Centered translucent glass dock with animated hover backgrounds, app launcher tiles, and cyan running indicator dots for active apps.
 - **Desktop Applications**:
-  - **Terminal (`Terminal.app`)**: Authentic macOS zsh terminal (`cosmos@Cosmos-Mac ~ % `) with history and auto-scrolling.
-  - **Activity Monitor (`Activity Monitor.app`)**: Mach task manager tracking CPU load, threads, memory pressure gauge (Normal/High), wired memory, and kernel subsystem health.
-  - **Finder (`Finder.app`)**: macOS two-pane file manager with **Favorites** (`Applications`, `Desktop`, `Documents`, `Downloads`), **Locations** (`Macintosh HD`, `Cosmos USB`), and Quick Look file preview.
-  - **About This Mac**: Apple system dialog with macOS Sequoia 15.1 badge, Apple M3 Max specs, and memory allocation counters.
+  - **Terminal (`Terminal.app`)**: Authentic zsh terminal (`cosmos@CosmicOS ~ % `) with history and auto-scrolling.
+  - **Activity Monitor (`Activity Monitor.app`)**: Task manager tracking CPU load, threads, memory pressure gauge (Normal/High), wired memory, and kernel subsystem health.
+  - **Finder (`Finder.app`)**: Two-pane file manager with **Favorites** (`Applications`, `Desktop`, `Documents`, `Downloads`), **Locations** (`Cosmic HD`, `Cosmic USB`), and Quick Look file preview.
+  - **About CosmicOS**: System dialog with CosmicOS 1.0 badge, Sublime Kernel specs, and memory allocation counters.
 
 ### 9. Booting on Real Hardware (USB & HDD)
-CosmosKernel is designed to run on bare-metal x86_64 PCs (Intel & AMD) as well as emulators:
+CosmicOS is designed to run on bare-metal x86_64 PCs (Intel & AMD) as well as emulators:
 - **Option 1: Ventoy (Recommended - Easiest for any USB drive)**
   1. Install [Ventoy](https://www.ventoy.net) on any USB flash drive.
   2. Copy `cosmoskernel32.elf` into the root of the Ventoy USB.

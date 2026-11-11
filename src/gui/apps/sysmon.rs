@@ -14,14 +14,14 @@ impl SysmonApp {
     }
 
     pub fn render(&self, canvas: &mut Canvas, x: i32, y: i32, w: i32, h: i32) {
-        // macOS Activity Monitor dark canvas background
+        // CosmicOS Activity Monitor dark canvas background
         canvas.fill_rect(x, y, w, h, Color::argb(255, 26, 28, 38));
 
         let mut draw_y = y + 8;
         let left_x = x + 12;
         let content_w = w - 24;
 
-        // 1. macOS Activity Monitor Tabs Header
+        // 1. Activity Monitor Tabs Header
         let tabs = ["CPU", "Unified Memory", "Energy", "Disk", "Network"];
         let mut tab_x = left_x;
         for (i, &tab) in tabs.iter().enumerate() {
@@ -48,7 +48,7 @@ impl SysmonApp {
 
         // Process entries
         let processes = [
-            ("kernel_task", "0.8%", "2", "2.8 MB", "Darwin Mach"),
+            ("kernel_task", "0.8%", "2", "2.8 MB", "Sublime Core"),
             ("launchd", "0.1%", "1", "340 KB", "System"),
             ("WindowServer", "1.6%", "1", "1.6 MB", "Aqua / VBE"),
             ("Terminal", "0.2%", "1", "580 KB", "zsh / ttys000"),
@@ -148,10 +148,10 @@ impl SysmonApp {
         cpu_uptime.push_str("s | 1000 Hz");
         draw_string(canvas, info_x, card_y + 8, &cpu_uptime, Color::ACCENT_CYAN);
 
-        let threads_str = "Mach Threads: 7";
+        let threads_str = "CPU Threads: 7";
         draw_string(canvas, info_x, card_y + 28, threads_str, Color::TEXT_PRIMARY);
 
-        draw_string(canvas, info_x, card_y + 48, "XNU Kernel 24.1.0", Color::ACCENT_PURPLE);
+        draw_string(canvas, info_x, card_y + 48, "Sublime Kernel 1.0", Color::ACCENT_PURPLE);
     }
 }
 

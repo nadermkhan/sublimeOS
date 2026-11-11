@@ -54,7 +54,7 @@ fn test_vfs() {
     print!("  [TEST] Virtual File System & Mounts ... ");
     let vfs = VFS.lock();
 
-    // Test macOS /System/Library/CoreServices/SystemVersion.plist
+    // Test CosmicOS /System/Library/CoreServices/SystemVersion.plist
     let file = vfs.open("/System/Library/CoreServices/SystemVersion.plist", 0).expect("Failed to open SystemVersion.plist");
     let mut buf = [0u8; 128];
     let n = file.read(&mut buf).expect("Failed to read SystemVersion.plist");

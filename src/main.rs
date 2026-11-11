@@ -30,8 +30,8 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     arch::x86_64::init();
 
     kinfo!("=======================================================");
-    kinfo!("  Cosmos Darwin Kernel Version 24.1.0 (x86_64)");
-    kinfo!("  Darwin/XNU Monolithic Core | Boot Magic: 0x{:08X}", magic);
+    kinfo!("  CosmicOS — Sublime Kernel Version 1.0.0 (x86_64)");
+    kinfo!("  Sublime Monolithic Core | Boot Magic: 0x{:08X}", magic);
     kinfo!("=======================================================");
 
     // 2. Initialize Memory Management Subsystem
@@ -59,8 +59,8 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     // 8. Run Kernel Self-Test Suite to verify all subsystems
     tests::run_all_tests();
 
-    // 9. Launch the Cosmos Interactive TTY Shell
-    kinfo!("Launching Cosmos Interactive TTY Shell (CosmosSH)...");
+    // 9. Launch the CosmicOS Interactive TTY Shell
+    kinfo!("Launching CosmicOS Interactive TTY Shell (CosmicSH)...");
     shell::run_shell();
 }
 

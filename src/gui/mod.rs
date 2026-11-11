@@ -92,7 +92,7 @@ impl DesktopManager {
             ),
             DesktopAppId::About => Window::new(
                 id,
-                "About This Mac",
+                "About CosmicOS",
                 260,
                 90,
                 480,

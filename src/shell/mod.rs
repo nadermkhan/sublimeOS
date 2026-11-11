@@ -54,11 +54,11 @@ pub fn run_shell() -> ! {
     ");
     println!("\x1b[0m");
     println!("Last login: Wed Nov 11 09:18:21 on ttys000");
-    println!("Cosmos Darwin Kernel Version 24.1.0: root:xnu-11215.1.31~1/RELEASE_X86_64");
+    println!("CosmicOS (Sublime Kernel Version 1.0.0 x86_64)");
     println!("Consoles: Alt+F1 (ttys000) | Alt+F2 (ttys001) | Alt+F3 (Console) | Alt+F4 (Activity)");
     println!("Type 'sw_vers', 'system_profiler', or 'help'. Use TAB for completion.\n");
 
-    let prompt = "\x1b[32mcosmos@Cosmos-Mac\x1b[0m \x1b[34m/\x1b[0m % ";
+    let prompt = "\x1b[32mcosmos@CosmicOS\x1b[0m \x1b[34m/\x1b[0m % ";
     print!("{}", prompt);
 
     let mut line_buffer: Vec<char> = Vec::with_capacity(256);

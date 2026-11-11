@@ -28,7 +28,7 @@ impl TerminalApp {
             Color::TEXT_MUTED,
         ));
         app.lines.push((
-            String::from("Cosmos Darwin 24.1.0: root:xnu-11215.1.31~1/RELEASE_X86_64"),
+            String::from("CosmicOS (Sublime Kernel 1.0.0 x86_64)"),
             Color::ACCENT_CYAN,
         ));
         app.lines.push((String::new(), Color::TEXT_PRIMARY));
@@ -40,7 +40,7 @@ impl TerminalApp {
         match ch {
             '\n' | '\r' => {
                 let cmd = core::mem::take(&mut self.input_buffer);
-                let mut prompt_line = String::from("cosmos@Cosmos-Mac ~ % ");
+                let mut prompt_line = String::from("cosmos@CosmicOS ~ % ");
                 prompt_line.push_str(&cmd);
                 self.lines.push((prompt_line, Color::TEXT_PRIMARY));
 
@@ -85,29 +85,29 @@ impl TerminalApp {
                 self.lines.clear();
             }
             "sw_vers" => {
-                self.lines.push((String::from("ProductName:        macOS"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("ProductVersion:     15.1"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("BuildVersion:       24B83"), Color::TEXT_PRIMARY));
+                self.lines.push((String::from("ProductName:        CosmicOS"), Color::TEXT_PRIMARY));
+                self.lines.push((String::from("ProductVersion:     1.0"), Color::TEXT_PRIMARY));
+                self.lines.push((String::from("BuildVersion:       1A01"), Color::TEXT_PRIMARY));
             }
             "system_profiler" => {
-                self.lines.push((String::from("Model: MacBook Pro (16-inch, 2024)"), Color::ACCENT_CYAN));
-                self.lines.push((String::from("Chip: Apple M-Series (AMD64 x86_64)"), Color::TEXT_PRIMARY));
+                self.lines.push((String::from("Model: CosmicStation Pro (x86_64)"), Color::ACCENT_CYAN));
+                self.lines.push((String::from("Chip: Sublime Multi-Core (AMD64 x86_64)"), Color::TEXT_PRIMARY));
                 self.lines.push((String::from("Memory: 128 MB Unified RAM"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("Kernel: Darwin 24.1.0"), Color::TEXT_PRIMARY));
+                self.lines.push((String::from("Kernel: Sublime Kernel 1.0.0"), Color::TEXT_PRIMARY));
             }
             "say" => {
                 let rest = cmd_line.strip_prefix("say").unwrap_or("").trim();
-                let mut s = String::from("[SpeechSynthesis (Alex)] \"");
-                s.push_str(if rest.is_empty() { "Hello from macOS" } else { rest });
+                let mut s = String::from("[SpeechSynthesis (Cosmic Voice)] \"");
+                s.push_str(if rest.is_empty() { "Hello from CosmicOS" } else { rest });
                 s.push('"');
                 self.lines.push((s, Color::ACCENT_PURPLE));
             }
             "defaults" => {
-                self.lines.push((String::from("{ AppleInterfaceStyle = Dark; AppleKeyboardLayout = US; }"), Color::TEXT_PRIMARY));
+                self.lines.push((String::from("{ CosmicInterfaceStyle = Dark; CosmicKeyboardLayout = US; }"), Color::TEXT_PRIMARY));
             }
             "uname" => {
                 self.lines.push((
-                    String::from("Darwin Cosmos-Mac.local 24.1.0 Darwin Kernel Version 24.1.0: xnu-monolithic/RELEASE_X86_64 x86_64"),
+                    String::from("CosmicOS CosmicOS.local 1.0.0 Sublime Kernel Version 1.0.0 x86_64"),
                     Color::ACCENT_GREEN,
                 ));
             }
@@ -266,8 +266,8 @@ impl TerminalApp {
 
         // Draw current prompt & input line
         if draw_y + FONT_HEIGHT <= y + h {
-            draw_string(canvas, x + 6, draw_y, "cosmos@Cosmos-Mac ~ % ", Color::ACCENT_GREEN);
-            let prompt_w = 23 * FONT_WIDTH;
+            draw_string(canvas, x + 6, draw_y, "cosmos@CosmicOS ~ % ", Color::ACCENT_GREEN);
+            let prompt_w = 20 * FONT_WIDTH;
             draw_string(canvas, x + 6 + prompt_w, draw_y, &self.input_buffer, Color::TEXT_PRIMARY);
 
             // Blinking cursor

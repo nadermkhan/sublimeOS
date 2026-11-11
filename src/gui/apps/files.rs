@@ -88,7 +88,7 @@ impl FileManagerApp {
                 if let Ok(s) = core::str::from_utf8(&buf[..bytes_read]) {
                     self.preview_text = String::from(s);
                 } else {
-                    self.preview_text = String::from("(Binary object / Mach-O)");
+                    self.preview_text = String::from("(Binary object / Executable)");
                 }
             }
         }
@@ -117,8 +117,8 @@ impl FileManagerApp {
 
             dy += 20; // skip Locations label
             let locations = [
-                "/Volumes/Macintosh HD",
-                "/Volumes/Cosmos USB",
+                "/Volumes/Cosmic HD",
+                "/Volumes/Cosmic USB",
                 "/",
             ];
 
@@ -191,8 +191,8 @@ impl FileManagerApp {
         dy += 16;
 
         let locations = [
-            ("Macintosh HD", "/Volumes/Macintosh HD", 'M'),
-            ("Cosmos USB", "/Volumes/Cosmos USB", 'U'),
+            ("Cosmic HD", "/Volumes/Cosmic HD", 'C'),
+            ("Cosmic USB", "/Volumes/Cosmic USB", 'U'),
             ("Root /", "/", '/'),
         ];
 

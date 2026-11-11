@@ -23,7 +23,7 @@ pub fn execute_command(line: &str) {
         "say" => cmd_say(args),
         "defaults" => cmd_defaults(args),
         "whoami" => println!("cosmos"),
-        "hostname" => println!("Cosmos-Mac.local"),
+        "hostname" => println!("CosmicOS.local"),
         "top" => cmd_top(),
         "help" => cmd_help(),
         "clear" => cmd_clear(),
@@ -44,52 +44,52 @@ pub fn execute_command(line: &str) {
         "reboot" => cmd_reboot(),
         "halt" => cmd_halt(),
         unknown => {
-            println!("zsh: command not found: {}. Type 'help' for available macOS commands.", unknown);
+            println!("zsh: command not found: {}. Type 'help' for available CosmicOS commands.", unknown);
         }
     }
 }
 
 fn cmd_sw_vers() {
-    println!("ProductName:\t\tmacOS");
-    println!("ProductVersion:\t\t15.1");
-    println!("BuildVersion:\t\t24B83");
-    println!("KernelVersion:\t\tDarwin 24.1.0");
+    println!("ProductName:\t\tCosmicOS");
+    println!("ProductVersion:\t\t1.0");
+    println!("BuildVersion:\t\t1A01");
+    println!("KernelVersion:\t\tSublime Kernel 1.0.0");
 }
 
 fn cmd_system_profiler() {
     println!("\x1b[1mHardware:\x1b[0m\n");
     println!("    \x1b[1mHardware Overview:\x1b[0m\n");
-    println!("      Model Name:            Cosmos Mac");
-    println!("      Model Identifier:      Mac15,3");
-    println!("      Model Number:          A2992");
-    println!("      Chip:                  Apple M-Series (AMD64 / x86_64)");
+    println!("      Model Name:            CosmicStation Pro");
+    println!("      Model Identifier:      CosmicStation1,1");
+    println!("      Model Number:          CS-2026");
+    println!("      Chip:                  Sublime Multi-Core Architecture (AMD64 / x86_64)");
     println!("      Total Number of Cores: 1 Performance");
     println!("      Memory:                128 MB Unified RAM");
-    println!("      System Firmware:       11215.1.31");
-    println!("      OS Loader:             Cosmos-XNU Bootloader");
-    println!("      Serial Number (system):C02C1234MD6R");
+    println!("      System Firmware:       1.0.0");
+    println!("      OS Loader:             Sublime Bootloader");
+    println!("      Serial Number (system):CS1000SUBX64");
     println!("      Hardware UUID:         4C4C4544-0051-5010-8043-B5C04F345233\n");
 }
 
 fn cmd_sysctl(args: &[&str]) {
     let key = args.first().copied().unwrap_or("-a");
     match key {
-        "hw.model" => println!("hw.model: Mac15,3"),
+        "hw.model" => println!("hw.model: CosmicStation1,1"),
         "hw.ncpu" => println!("hw.ncpu: 1"),
         "hw.memsize" => {
             let (total_frames, _, _) = crate::mm::pmm::PMM.lock().stats();
             println!("hw.memsize: {}", total_frames * 4096);
         }
         "hw.pagesize" => println!("hw.pagesize: 4096"),
-        "kern.ostype" => println!("kern.ostype: Darwin"),
-        "kern.osrelease" => println!("kern.osrelease: 24.1.0"),
-        "kern.version" => println!("kern.version: Darwin Kernel Version 24.1.0: xnu-11215.1.31~1/RELEASE_X86_64"),
+        "kern.ostype" => println!("kern.ostype: CosmicOS"),
+        "kern.osrelease" => println!("kern.osrelease: 1.0.0"),
+        "kern.version" => println!("kern.version: Sublime Kernel Version 1.0.0: sublime-release/RELEASE_X86_64"),
         "-a" | "all" => {
-            println!("kern.ostype = Darwin");
-            println!("kern.osrelease = 24.1.0");
+            println!("kern.ostype = CosmicOS");
+            println!("kern.osrelease = 1.0.0");
             println!("kern.osrevision = 199506");
-            println!("kern.version = Darwin Kernel Version 24.1.0: xnu-cosmos/RELEASE_X86_64");
-            println!("hw.model = Mac15,3");
+            println!("kern.version = Sublime Kernel Version 1.0.0: root:sublime/RELEASE_X86_64");
+            println!("hw.model = CosmicStation1,1");
             println!("hw.ncpu = 1");
             println!("hw.byteorder = 1234");
             println!("hw.pagesize = 4096");
@@ -107,13 +107,13 @@ fn cmd_diskutil(args: &[&str]) {
         println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
         println!("   0:      GUID_partition_scheme                        *128.0 MB   disk0");
         println!("   1:                        EFI EFI                     100.0 MB   disk0s1");
-        println!("   2:                 Apple_APFS Container disk1         *28.0 MB   disk0s2\n");
+        println!("   2:                  Cosmic_FS Container disk1         *28.0 MB   disk0s2\n");
         println!("/dev/disk1 (synthesized):");
         println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
-        println!("   0:      APFS Container Scheme -                      +28.0 MB    disk1");
+        println!("   0:    CosmicFS Container Scheme -                      +28.0 MB    disk1");
         println!("                                 Physical Store disk0s2");
-        println!("   1:                APFS Volume Macintosh HD            12.4 MB    disk1s1");
-        println!("   2:                APFS Volume Preboot                 1.2 MB     disk1s2");
+        println!("   1:              Cosmic Volume Cosmic HD               12.4 MB    disk1s1");
+        println!("   2:              Cosmic Volume Preboot                 1.2 MB     disk1s2");
     } else {
         println!("Usage: diskutil list");
     }
@@ -126,26 +126,26 @@ fn cmd_open(args: &[&str]) {
     }
     let target = args[0];
     if target.contains("Finder.app") || target == "gui" || target == "." {
-        println!("\x1b[35m[macOS LaunchServices] Launching Finder.app...\x1b[0m");
+        println!("\x1b[35m[Cosmic LaunchServices] Launching Finder.app...\x1b[0m");
         crate::gui::launch_desktop();
     } else {
-        println!("[macOS LaunchServices] Opening '{}'...", target);
+        println!("[Cosmic LaunchServices] Opening '{}'...", target);
         cmd_cat(args);
     }
 }
 
 fn cmd_say(args: &[&str]) {
-    let text = if args.is_empty() { "Hello, I am Cosmos Mac." } else {
+    let text = if args.is_empty() { "Hello, I am CosmicOS." } else {
         // print all args
         &args.join(" ")
     };
-    println!("\x1b[35m[SpeechSynthesis (Alex / Siri)]\x1b[0m \"{}\"", text);
+    println!("\x1b[35m[SpeechSynthesis (Cosmic Voice)]\x1b[0m \"{}\"", text);
 }
 
 fn cmd_defaults(args: &[&str]) {
     let action = args.first().copied().unwrap_or("read");
     if action == "read" {
-        println!("{{\n    AppleInterfaceStyle = Dark;\n    AppleFontSmoothing = 2;\n    AppleKeyboardLayout = US;\n    AppleMetricUnits = 1;\n    AppleTemperatureUnit = Celsius;\n}}");
+        println!("{{\n    CosmicInterfaceStyle = Dark;\n    CosmicFontSmoothing = 2;\n    CosmicKeyboardLayout = US;\n    CosmicMetricUnits = 1;\n    CosmicTemperatureUnit = Celsius;\n}}");
     } else {
         println!("Usage: defaults read");
     }
@@ -168,17 +168,17 @@ fn cmd_top() {
 }
 
 fn cmd_help() {
-    println!("\x1b[36mCosmos macOS Darwin Shell Commands:\x1b[0m");
-    println!("  sw_vers         Display macOS product and build version");
-    println!("  system_profiler Display Apple hardware overview");
+    println!("\x1b[36mCosmicOS (Sublime Kernel) Shell Commands:\x1b[0m");
+    println!("  sw_vers         Display CosmicOS product and build version");
+    println!("  system_profiler Display hardware system overview");
     println!("  sysctl [-a]     Get kernel and hardware state (hw.model, hw.memsize)");
-    println!("  diskutil [list] Manage APFS containers and disk volumes");
+    println!("  diskutil [list] Manage CosmicFS containers and disk volumes");
     println!("  open <app/path> Open application or document (e.g. 'open Finder.app')");
-    println!("  say <text>      Text-to-speech audio banner");
-    println!("  defaults [read] Access macOS user preferences and defaults");
-    println!("  top             Display live Darwin processes & memory stats");
-    println!("  ps              List active Mach tasks and kernel threads");
-    println!("  uname           Print Darwin kernel version info");
+    println!("  say <text>      Speech synthesis simulated audio banner");
+    println!("  defaults [read] Access CosmicOS user preferences and defaults");
+    println!("  top             Display live Sublime tasks & memory stats");
+    println!("  ps              List active Sublime tasks and kernel threads");
+    println!("  uname           Print Sublime kernel version info");
     println!("  uptime          Show system uptime in seconds");
     println!("  date            Current UTC hardware clock timestamp");
     println!("  mem             Memory usage (Physical Unified RAM & Heap)");
@@ -194,7 +194,7 @@ fn cmd_help() {
 }
 
 fn cmd_gui() {
-    println!("\x1b[35m[LaunchServices] Starting macOS Aqua Desktop...\x1b[0m");
+    println!("\x1b[35m[LaunchServices] Starting CosmicOS Aqua Desktop...\x1b[0m");
     crate::gui::launch_desktop();
 }
 
@@ -204,7 +204,7 @@ fn cmd_clear() {
 }
 
 fn cmd_uname() {
-    println!("Darwin Cosmos-Mac.local 24.1.0 Darwin Kernel Version 24.1.0: xnu-11215.1.31~1/RELEASE_X86_64 x86_64");
+    println!("CosmicOS CosmicOS.local 1.0.0 Sublime Kernel Version 1.0.0 x86_64");
 }
 
 fn cmd_uptime() {
@@ -367,14 +367,14 @@ fn cmd_rm(args: &[&str]) {
 }
 
 fn cmd_reboot() {
-    println!("\x1b[31mRestarting macOS...\x1b[0m");
+    println!("\x1b[31mRestarting CosmicOS...\x1b[0m");
     unsafe {
         crate::arch::x86_64::io::outb(0x64, 0xFE);
     }
 }
 
 fn cmd_halt() {
-    println!("\x1b[31mShutting down macOS...\x1b[0m");
+    println!("\x1b[31mShutting down CosmicOS...\x1b[0m");
     crate::arch::x86_64::registers::disable_interrupts();
     loop {
         crate::arch::x86_64::registers::hlt();

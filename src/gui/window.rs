@@ -182,7 +182,7 @@ impl Window {
             Color::WINDOW_BORDER,
         );
 
-        // macOS Window Control Buttons (Traffic Lights on top-LEFT)
+        // Window Control Buttons (Traffic Lights on top-LEFT)
         let cy = self.y + 14;
         // Close (Red)
         canvas.fill_circle(self.x + 16, cy, BTN_RADIUS, Color::BTN_CLOSE);
@@ -191,7 +191,7 @@ impl Window {
         // Zoom/Maximize (Green)
         canvas.fill_circle(self.x + 48, cy, BTN_RADIUS, Color::BTN_MAXIMIZE);
 
-        // Window title text (CENTERED like macOS)
+        // Window title text (CENTERED)
         let title_w = measure_string(&self.title);
         let title_x = self.x + (self.width - title_w) / 2;
         draw_string(

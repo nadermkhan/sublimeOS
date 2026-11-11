@@ -15,12 +15,12 @@ impl AboutApp {
         let center_x = x + 16;
         let mut draw_y = y + 14;
 
-        // Big stylized macOS title
+        // Big stylized CosmicOS title
         draw_string_scaled(
             canvas,
             center_x,
             draw_y,
-            "✦ macOS Sequoia",
+            "✦ CosmicOS",
             Color::WHITE,
             2,
         );
@@ -30,7 +30,7 @@ impl AboutApp {
             canvas,
             center_x,
             draw_y,
-            "Version 15.1 (Build 24B83)",
+            "Version 1.0 (Build 1A01)",
             Color::ACCENT_CYAN,
         );
         draw_y += FONT_HEIGHT + 4;
@@ -39,7 +39,7 @@ impl AboutApp {
             canvas,
             center_x,
             draw_y,
-            "MacBook Pro (16-inch, 2024)",
+            "CosmicStation Pro (x86_64)",
             Color::TEXT_PRIMARY,
         );
         draw_y += FONT_HEIGHT + 10;
@@ -49,14 +49,14 @@ impl AboutApp {
         draw_y += 10;
 
         let specs = [
-            ("Chip:         ", "Apple M-Series (AMD64 x86_64)", Color::TEXT_MUTED),
-            ("Memory:       ", "128 MB Unified Memory", Color::TEXT_MUTED),
-            ("Startup Disk: ", "Macintosh HD (APFS Container)", Color::TEXT_MUTED),
+            ("Chip:         ", "Sublime Architecture (AMD64 x86_64)", Color::TEXT_MUTED),
+            ("Memory:       ", "128 MB Unified Architecture", Color::TEXT_MUTED),
+            ("Startup Disk: ", "Cosmic HD (CosmicFS)", Color::TEXT_MUTED),
             ("Graphics:     ", "Linear Framebuffer (1024x768 32bpp)", Color::ACCENT_GREEN),
-            ("Kernel:       ", "Darwin 24.1.0 (xnu-monolithic)", Color::TEXT_MUTED),
-            ("Toolchain:    ", "Rust 1.101.0-nightly (#![no_std])", Color::TEXT_MUTED),
-            ("Serial Number:", "C02C1234MD6R", Color::TEXT_MUTED),
-            ("Firmware:     ", "11215.1.31 (UEFI / BIOS Hybrid)", Color::ACCENT_YELLOW),
+            ("Kernel:       ", "Sublime Kernel 1.0.0 (Monolithic)", Color::TEXT_MUTED),
+            ("Toolchain:    ", "Rust nightly (#![no_std])", Color::TEXT_MUTED),
+            ("Serial Number:", "CS1000SUBX64", Color::TEXT_MUTED),
+            ("Firmware:     ", "1.0.0 (UEFI / BIOS Hybrid)", Color::ACCENT_YELLOW),
         ];
 
         for (label, val, col) in specs.iter() {
@@ -70,7 +70,7 @@ impl AboutApp {
             canvas,
             center_x,
             draw_y,
-            "™ and © 1983-2026 Apple Inc. All rights reserved.",
+            "© 2026 CosmicOS Project. All rights reserved.",
             Color::TEXT_MUTED,
         );
     }

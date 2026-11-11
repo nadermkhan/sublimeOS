@@ -1,11 +1,11 @@
-# Cosmos macOS Boot Media Preparation Script
+# CosmicOS Boot Media Preparation Script
 param(
     [string]$DriveLetter = "",
     [switch]$CreateRawImage
 )
 
 Write-Host "=======================================================" -ForegroundColor Cyan
-Write-Host "    Cosmos macOS Sequoia (Darwin) Boot Media Creator    " -ForegroundColor Cyan
+Write-Host "        CosmicOS (Sublime Kernel) Boot Media Creator    " -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 
 # 1. Check and build kernel if necessary
@@ -43,17 +43,17 @@ insmod video_bochs
 insmod video_cirrus
 insmod all_video
 
-menuentry "Cosmos macOS Sequoia 15.1 (Darwin 24.1.0 x86_64)" {
+menuentry "CosmicOS 1.0 (Sublime Kernel x86_64)" {
     multiboot /cosmoskernel32.elf
     boot
 }
 
-menuentry "Cosmos macOS (Verbose / Safe Boot -v)" {
+menuentry "CosmicOS (Verbose / Safe Boot -v)" {
     multiboot /cosmoskernel32.elf -v
     boot
 }
 
-menuentry "Cosmos macOS (Darwin Text Console Mode -s)" {
+menuentry "CosmicOS (Sublime Console Mode -s)" {
     multiboot /cosmoskernel32.elf -s
     boot
 }

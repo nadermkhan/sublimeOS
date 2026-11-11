@@ -47,7 +47,7 @@ impl Desktop {
         let icons = [
             DesktopIcon {
                 id: DesktopAppId::FileManager,
-                title: "Macintosh HD",
+                title: "Cosmic HD",
                 x: 930,
                 y: 42,
                 icon_char: '@',
@@ -55,7 +55,7 @@ impl Desktop {
             },
             DesktopIcon {
                 id: DesktopAppId::FileManager,
-                title: "Cosmos USB",
+                title: "Cosmic USB",
                 x: 930,
                 y: 136,
                 icon_char: '#',
@@ -71,7 +71,7 @@ impl Desktop {
             },
             DesktopIcon {
                 id: DesktopAppId::About,
-                title: "About Mac",
+                title: "About Cosmic",
                 x: 930,
                 y: 324,
                 icon_char: '✦',
@@ -100,8 +100,8 @@ impl Desktop {
         }
 
         // 3. Central Glowing Watermark Banner
-        let logo_text = "✦ macOS Sequoia";
-        let sub_text = "Version 15.1 (Darwin 24.1.0 x86_64)";
+        let logo_text = "✦ CosmicOS";
+        let sub_text = "Sublime Kernel Version 1.0.0 (x86_64)";
         let logo_w = measure_string(logo_text) * 2;
         let logo_x = (w - logo_w) / 2;
         let logo_y = (h - 36) / 2 - 40;
@@ -111,7 +111,7 @@ impl Desktop {
             logo_x,
             logo_y,
             logo_text,
-            Color::argb(50, 200, 210, 255), // Soft Apple blue glow
+            Color::argb(55, 180, 210, 255), // Soft Cosmic glow
             2,
         );
         let sub_w = measure_string(sub_text);
