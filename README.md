@@ -1,317 +1,231 @@
 # CosmicOS — Sublime Kernel (x86_64)
 
-> **A Clean, Neat, and Mature 64-bit Monolithic Operating System Kernel Written in Rust.**
+> **A Clean, Mature, and Feature-Complete 64-bit Monolithic Operating System Kernel Written in Pure Rust.**
 
 [![Target](https://img.shields.io/badge/target-x86__64--unknown--none-blue.svg)](https://www.rust-lang.org/)
 [![Toolchain](https://img.shields.io/badge/rustc-nightly-orange.svg)](https://rust-lang.github.io/rustup/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](LICENSE)
 [![Architecture](https://img.shields.io/badge/arch-x86__64%20(AMD64)-red.svg)]()
 [![OS](https://img.shields.io/badge/OS-CosmicOS%201.0-purple.svg)]()
+[![Filesystems](https://img.shields.io/badge/filesystems-FAT32%20%7C%20exFAT%20%7C%20ext4%20%7C%20NTFS-brightgreen.svg)]()
+[![Network](https://img.shields.io/badge/network-TCP%2FIP%20%7C%20802.11%20Wi--Fi%20%7C%20HTTP-cyan.svg)]()
+[![Audio](https://img.shields.io/badge/audio-Intel%20HDA%20%7C%20PCM%20%7C%20WAV-magenta.svg)]()
+[![UserSpace](https://img.shields.io/badge/userspace-ELF64%20%7C%20Ring%203%20%7C%20Syscall-blueviolet.svg)]()
 
-CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed in safe and idiomatic Rust, powered by the **Sublime Kernel**. It boots directly via Multiboot / Multiboot2, transitions into 64-bit Long Mode, maps kernel space to the higher half, sets up full memory management, preemptive multitasking, a clean property-list virtual file system (VFS), device nodes, inter-process communication, hardware drivers, system calls, virtual consoles (`ttys000`..`ttys003`), a native zsh-style shell with system diagnostic utilities (`sw_vers`, `system_profiler`, `diskutil`, `sysctl`, `say`, `open`, `defaults`), and an authentic Aqua graphical desktop with a top global menu bar, bottom glass dock, Finder, and Activity Monitor.
+CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed in safe, idiomatic `#![no_std]` Rust with zero external runtime dependencies. Powered by the **Sublime Kernel**, CosmicOS boots natively via Multiboot 1/2, transitions to 64-bit Long Mode, maps kernel space to the higher half (`0xFFFFFFFF80000000+`), and initializes an enterprise-grade OS stack:
+- **Multitasking & User Space**: Preemptive round-robin & priority scheduler, 64-bit ELF binary loader, hardware memory isolation, and Ring 3 user privilege transition (`iretq`, `syscall`/`sysretq`).
+- **Storage & Filesystems**: Real Read/Write FAT32 cluster allocator, exFAT parser, Linux ext4 superblock/extent-tree mapping, and Windows NTFS resident `$DATA` / `$MFT` parser, alongside USB Mass Storage (SCSI / Bulk-Only Transport over xHCI / EHCI).
+- **Network Protocol Stack**: Full TCP/IP stack (Ethernet II, ARP, IPv4, ICMP Ping, UDP, RFC 793 TCP state machine, BSD Socket API), IEEE 802.11 Wi-Fi subsystem (beacon frame parsing, 4-way handshake, WPA2-PSK with PBKDF2-SHA1), Intel e1000 Gigabit NIC driver, HTTP/1.1 client (`curl`), and embedded HTTP server (`httpd`).
+- **Intel HDA Audio Subsystem**: Intel High Definition Audio (HDA) controller driver, pure integer quarter-wave sine synthesis, RIFF/WAVE PCM parser, hardware PC speaker fallback, and the iconic CosmicOS startup chime.
+- **POSIX Shell, Pipelines & In-Terminal Editor**: Shell with pipelines (`|`), I/O redirection (`>`, `>>`, `<`), Unix filters (`grep`, `wc`, `head`, `tail`, `sort`, `uniq`), and full-screen terminal editor (`nano` / `edit`).
+- **Aqua Graphical Desktop**: 1024x768x32bpp double-buffered compositor, glass dock, top global menu bar, window manager with traffic light controls, Finder, Terminal, and Activity Monitor.
 
 ---
 
-## Key Subsystems & Architecture
+## Architectural Overview
 
 ```
-                    +------------------------------------------+
-                    |        Cosmos Desktop GUI Compositor     |
-                    |  (1024x768x32bpp Double-Buffered Canvas) |
-                    |  - Windows, Mouse, Taskbar, Apps, Theme  |
-                    +--------------------+---------------------+
-                                         |
-                    +--------------------+---------------------+
-                    |        Cosmos Interactive Shell          |
-                    |        (Built-in Diagnostic CLI)         |
-                    +--------------------+---------------------+
-                                         |
-    +------------------------------------+------------------------------------+
-    |                        Virtual File System (VFS)                        |
-    |   +------------------+  +------------------+  +---------------------+   |
-    |   |      RamFS       |  |      DevFS       |  |       ProcFS        |   |
-    |   | (/etc, /bin, /tmp|  | (/dev/null, tty, |  | (/proc/cpuinfo,    |   |
-    |   |  /home, rootfs)  |  |  zero, rtc, rnd) |  |  meminfo, version) |   |
-    |   +------------------+  +------------------+  +---------------------+   |
-    +------------------------------------+------------------------------------+
-                                         |
-    +-------------------+----------------+-------------------+----------------+
-    |    Syscall API    |        Preemptive Sched   |       IPC Pipes & Signals|
-    | (syscall / sysret)| (Round-Robin Context Switch)       | (Unix FIFO & POSIX Sig)|
-    +-------------------+----------------+-------------------+----------------+
-                                         |
-    +------------------------------------+------------------------------------+
-    |                         Memory Management                               |
-    |   +-----------------------------+  +--------------------------------+   |
-    |   |   Physical Memory (PMM)     |  |     Virtual Memory (VMM)       |   |
-    |   |   Bitmap Frame Allocator    |  |     4-Level Paging (PML4)      |   |
-    |   +-----------------------------+  +--------------------------------+   |
-    |   +-----------------------------------------------------------------+   |
-    |   |           Expandable Kernel Heap (GlobalAlloc)                  |   |
-    |   |           Enables Rust alloc (Box, Vec, String, Arc)            |   |
-    |   +-----------------------------------------------------------------+   |
-    +------------------------------------+------------------------------------+
-                                         |
-    +------------------------------------+------------------------------------+
-    |                     x86_64 Hardware & Drivers                           |
-    |  - Boot Trampoline (32 to 64-bit)    - 16550 UART COM1 Serial Driver    |
-    |  - GDT & 64-bit TSS with IST Stacks  - 80x25 Color VGA Console Driver   |
-    |  - IDT (256 Vectors & CPU Traps)     - 8254 PIT Timer (1000 Hz ticks)   |
-    |  - 8259 Dual PIC Remapping (32..47)  - CMOS Real-Time Clock (RTC)       |
-    |  - PS/2 Keyboard Driver (IRQ 1)      - Bochs VBE Display (1024x768x32)  |
-    |  - PS/2 Mouse Driver (IRQ 12)        - PCI Bus Enumerator (lspci)       |
-    +-------------------------------------------------------------------------+
+                    +-------------------------------------------------------------+
+                    |                CosmicOS Aqua Desktop Compositor             |
+                    |        (1024x768x32bpp TrueColor Double-Buffered Canvas)     |
+                    |        - Top Menu Bar, Glass Dock, Window Manager, Finder   |
+                    +------------------------------+------------------------------+
+                                                   |
+                    +------------------------------+------------------------------+
+                    |              CosmicSH Interactive Diagnostic Shell          |
+                    |   - Pipelines (|), File Redirection (>, >>, <), Nano Editor |
+                    |   - UNIX Filters: grep, wc, head, tail, sort, uniq          |
+                    +------------------------------+------------------------------+
+                                                   |
+     +---------------------------------------------+---------------------------------------------+
+     |                               Virtual File System (VFS)                                   |
+     |   +-------------+  +-------------+  +------------+  +-------------+  +----------------+   |
+     |   |    RamFS    |  |  FAT32 R/W  |  |   exFAT    |  |  ext4 extents|  |  NTFS resident |   |
+     |   | (/tmp,/etc) |  | (/Volumes/*)|  | (Heap LBA) |  | (Superblock)|  | ($MFT Records) |   |
+     |   +-------------+  +-------------+  +------------+  +-------------+  +----------------+   |
+     |   +-------------------+  +--------------------+  +------------------------------------+   |
+     |   |   DevFS (/dev/*)  |  |   ProcFS (/proc/*) |  |   USB Mass Storage (SCSI / BOT)    |   |
+     |   +-------------------+  +--------------------+  +------------------------------------+   |
+     +---------------------------------------------+---------------------------------------------+
+                                                   |
+     +--------------------+------------------------+-----------------------+---------------------+
+     |    User Mode Ring 3|        Preemptive Scheduler                    |     Network Stack   |
+     | - 64-bit ELF Loader| - Round-Robin & Sleep Deadlines                | - ARP, IPv4, ICMP   |
+     | - iretq / sysretq  | - cosmos_context_switch (assembly)             | - TCP State Machine |
+     | - Trap & Fault Iso | - Thread & Process Control Blocks              | - Sockets, curl,    |
+     | - exec <binary>    | - Anonymous Pipes & POSIX Signals              |   httpd web server  |
+     +--------------------+------------------------+-----------------------+---------------------+
+                                                   |
+     +---------------------------------------------+---------------------------------------------+
+     |                                  Audio Subsystem                                          |
+     |   - Intel High Definition Audio (HDA) PCI Bus Master Controller Driver                    |
+     |   - Pure Integer Quarter-Wave Sine Tone Synthesizer & Speech Formants                     |
+     |   - RIFF / WAVE PCM Audio Parser & 4-Note Harmonic Startup Chime Generator               |
+     |   - Fallback 8254 PIT Timer 2 PC Speaker Hardware Tone Generator                          |
+     +---------------------------------------------+---------------------------------------------+
+                                                   |
+     +---------------------------------------------+---------------------------------------------+
+     |                             Memory Management Subsystem                                   |
+     |   +----------------------------------+  +---------------------------------------------+   |
+     |   |   Physical Memory Manager (PMM)  |  |        Virtual Memory Manager (VMM)         |   |
+     |   |   Bitmap Frame Allocator (4 KiB) |  |     4-Level Paging (PML4, PDPT, PD, PT)     |   |
+     |   +----------------------------------+  +---------------------------------------------+   |
+     |   +-----------------------------------------------------------------------------------+   |
+     |   |           Expandable Kernel Heap (GlobalAlloc -> Box, Vec, String, Arc)           |   |
+     |   +-----------------------------------------------------------------------------------+   |
+     +---------------------------------------------+---------------------------------------------+
+                                                   |
+     +---------------------------------------------+---------------------------------------------+
+     |                              x86_64 Hardware & Drivers                                    |
+     |  - Boot Trampoline (32 to 64-bit Long Mode) - Intel e1000 Gigabit Ethernet Controller     |
+     |  - GDT & 64-bit TSS with IST Stacks         - IEEE 802.11 Wi-Fi (WPA2-PSK / PBKDF2)       |
+     |  - IDT (256 Vector Traps & IRQs)            - xHCI / EHCI USB Host Controller Drivers     |
+     |  - 8259 Dual PIC Remapping & Local APIC     - ATA / IDE PIO LBA48 & AHCI SATA Controller  |
+     |  - 8254 PIT Timer (1000 Hz) & CMOS RTC      - PS/2 Keyboard & Mouse Drivers               |
+     |  - 16550A UART COM1 / COM2 (115200 baud)    - Bochs VBE Display (1024x768x32bpp)         |
+     +-------------------------------------------------------------------------------------------+
 ```
 
-### 1. Architecture & CPU (`src/arch/x86_64`)
-- **Boot Protocol**: Multiboot 1 and Multiboot 2 headers. Starts in 32-bit protected mode, performs CPUID and Long Mode checks, builds early 4-level page tables with identity and higher-half mapping, enables PAE, EFER.LME, and CR0.PG/WP, loads 64-bit GDT, and jumps into higher-half 64-bit Rust `kernel_main`.
-- **Multiboot Framebuffer & Memory Parser (`multiboot.rs`)**: Parses Multiboot 1 and Multiboot 2 information structures, extracting UEFI GOP / VBE linear framebuffers (address, pitch, width, height, bpp) and memory maps passed by bootloaders (GRUB, Ventoy, Syslinux).
-- **ACPI Subsystem & Hardware Power Management (`acpi.rs`)**: Searches EBDA and BIOS ROM space for RSDP, parses RSDT, XSDT, and FADT (`FACP`), extracts `PM1a_CNT_BLK`, reset registers, and `_S5` sleep packages for clean hardware ACPI power-off and reset on physical PCs.
-- **Global Descriptor Table (GDT) & TSS**: 64-bit Kernel Code (0x08), Kernel Data (0x10), User Data (0x1B), User Code (0x23), and 64-bit Task State Segment (0x28). Configures dedicated IST stacks for Double Fault (`IST1`) and Page Fault (`IST2`).
-- **Interrupt Descriptor Table (IDT)**: Complete 256-vector table. Handles all 32 x86_64 CPU exceptions with register dumps, CR2 fault decoding, hardware IRQs 32..47, and user syscall vector `0x80`.
-- **Interrupt Controller (PIC & APIC)**: Remaps legacy dual 8259 PICs to IRQ 32..47 and manages Local APIC.
-- **Timers & RTC**: 8254 Programmable Interval Timer (PIT) configured at 1000 Hz (1ms tick) for preemptive scheduling; CMOS Real-Time Clock with BCD decoding for UTC time.
-- **Console & Serial**: 80x25 color VGA text console with scrolling and hardware cursor; 16550 UART driver for COM1 (115200 baud).
-- **Fast System Calls**: Sets up AMD64 `syscall`/`sysret` via MSRs `STAR`, `LSTAR`, and `FMASK`.
+---
+
+## Core Subsystems
+
+### 1. Architecture & Low-Level Hardware (`src/arch/x86_64`)
+- **Long Mode Trampoline (`boot.s`)**: Multiboot 1 and 2 compliant. Verifies CPUID and Long Mode, builds initial 4-level PML4 page tables mapping the first 1 GiB physically and to the higher half (`0xFFFFFFFF80000000`), enables PAE, `EFER.LME`, and `CR0.PG/WP`, and jumps into higher-half 64-bit Rust.
+- **Global Descriptor Table (GDT) & TSS (`gdt.rs`)**: Configures 64-bit Kernel Code (`0x08`), Kernel Data (`0x10`), User Data (`0x1B`, DPL 3), User Code (`0x23`, DPL 3), and Task State Segment (`0x28`). Installs dedicated Interrupt Stack Tables (`IST1` for Double Fault, `IST2` for Page Fault).
+- **Interrupt Descriptor Table (IDT) (`idt.rs`)**: 256 vector gates handling all x86_64 CPU exceptions with registers/CR2 dump, hardware IRQs 32..47, and `int 0x80` syscall vector. Isolates user-mode traps (`#PF`, `#GP`, `#UD`, `#DE`) to prevent kernel panics.
+- **Fast AMD64 System Calls (`syscall.rs`)**: Configures MSRs `IA32_EFER.SCE`, `IA32_STAR`, `IA32_LSTAR` (`syscall_entry`), and `IA32_FMASK` for hardware-accelerated user/kernel transitions.
+- **ACPI Power Management (`acpi.rs`)**: Parses RSDP, RSDT, XSDT, and FADT tables; enables clean hardware poweroff (`_S5`) and reset across real Intel and AMD motherboards.
+- **Serial & VGA Text Display (`serial.rs`, `vga.rs`)**: 16550A UART driver with IRQ-driven ring buffers for COM1 and COM2; 80x25 color VGA text driver with scrolling, ANSI escape color rendering, and thread-safe stdout capture hooks.
 
 ### 2. Memory Management (`src/mm`)
-- **Physical Memory Manager (PMM)**: Bitmap frame allocator tracking all 4KiB page frames up to 1 GiB. Functions: `alloc_frame()`, `alloc_contiguous_frames(count)`, `free_frame(phys)`.
-- **Virtual Memory Manager (VMM)**: 4-level paging (`PageTableEntry`, `PageTable`) manipulating PML4, PDPT, PD, and PT. Supports `map_page`, `unmap_page`, `translate`, `invlpg`, and `create_address_space`.
-- **Kernel Heap Allocator**: Implements `core::alloc::GlobalAlloc` managing an expandable heap. Automatically requests physical frames from PMM and extends free lists with block coalescing. Unlocks Rust's standard `alloc` crate (`Box`, `Vec`, `String`, `Arc`, `format!`).
-- **User Address Space (`AddressSpace`)**: Manages per-process Virtual Memory Areas (VMAs) for code, data, heap, user stack, and POSIX `brk()`.
+- **Physical Memory Manager (PMM) (`pmm.rs`)**: Fast bitmap allocator managing 4 KiB physical frames up to 1 GiB. Supports single-frame and contiguous multi-frame allocation.
+- **Virtual Memory Manager (VMM) (`vmm.rs`)**: 4-level paging manager. Supports dynamic page mapping/unmapping, address translation, TLB invalidation (`invlpg`), and non-cacheable MMIO mapping (`map_mmio_range`) for hardware BARs.
+- **Kernel Heap (`heap.rs`)**: Expandable `GlobalAlloc` implementation backed by PMM frames. Unlocks Rust `alloc` data structures (`Vec`, `Box`, `String`, `Arc`, `format!`).
+- **User Address Space (`address_space.rs`)**: Per-process PML4 address spaces with kernel higher-half clone, Virtual Memory Areas (VMAs), and POSIX `brk()` heap expansion.
 
-### 3. Preemptive Task Management & Scheduler (`src/task`)
-- **Process & Thread Abstractions**: Process Control Block (`ProcessControlBlock`) with PID, PPID, and file descriptor table; Thread Control Block (`ThreadControlBlock`) with 16 KiB kernel stack.
-- **Preemptive Scheduler**: Round-Robin and Priority scheduler driven by PIT timer ticks. Manages ready queue, sleeping queue (with tick deadlines), and idle thread.
-- **Assembly Context Switching**: Hand-crafted assembly routine `cosmos_context_switch(prev_rsp, next_rsp)` preserving callee-saved registers (`rbx, rbp, r12-r15, rflags`) and switching stacks atomically.
+### 3. Task Management & 64-bit Ring 3 User Space (`src/task`)
+- **Preemptive Multitasking (`scheduler.rs`, `switch.s`)**: Timer-preempted scheduler with sleeping queues, priority queues, and atomic assembly context switching saving callee-saved registers (`rbx, rbp, r12-r15, rflags`).
+- **ELF64 Binary Loader (`elf.rs`)**: Validates 64-bit ELF headers (`\x7FELF`, EM_X86_64), parses program headers, allocates user frames, maps `PT_LOAD` segments with hardware permissions (`PAGE_USER`, `PAGE_WRITABLE`), zero-initializes BSS sections, and allocates a 64 KiB user stack at `0x00007FFFFFFF0000`.
+- **Ring 3 Transition Engine (`user_switch.s`, `user.rs`)**:
+  - `enter_user_mode_asm`: sets user segments (`0x1B`), configures `TSS.rsp[0]`, constructs 64-bit `iretq` frame `[SS, RSP, RFLAGS, CS, RIP]`, and drops CPU privilege level to Ring 3 (CPL 3).
+  - `exit_user_mode_asm`: on `SYS_EXIT` or user fault, safely restores kernel CR3, kernel segment registers, and kernel stack, cleanly returning the process exit code to the kernel caller.
+  - Shell command `exec <path>` to launch any 64-bit ELF binary.
 
-### 4. Virtual File System & Storage (`src/fs`)
-- **VFS Abstraction**: Standard POSIX-style interface with `InodeOperations`, `Stat`, `DirEntry`, `File`, and dynamic mount manager (`add_child_node`).
-- **FAT32 Filesystem Driver (`fat32.rs`)**: Complete `#![no_std]` FAT32 implementation with MBR partition table detection, BPB parsing, cluster chain traversal, LFN (Long File Name) support, and file reading. Automatically mounts physical drives at `/Volumes/Cosmic USB`.
-- **RamFS**: In-memory hierarchical filesystem supporting creation, reading, writing, seeking, and deletion.
-- **DevFS (`/dev`)**:
-  - `/dev/null`: Discards writes, EOF on read.
-  - `/dev/zero`: Continuous stream of zero bytes.
-  - `/dev/random` & `/dev/urandom`: Fast pseudo-random number generator.
-  - `/dev/tty` & `/dev/console`: Reads keyboard input, writes to VGA and serial.
-  - `/dev/rtc`: Formatted date & time string from CMOS RTC.
-  - `/dev/disk0`, `/dev/disk1`: Physical block storage devices.
-- **ProcFS (`/proc`)**:
-  - `/proc/version`: Kernel version, architecture, compiler.
-  - `/proc/uptime`: System uptime in seconds and timer ticks.
-  - `/proc/meminfo`: Physical RAM total/free/used and heap allocation statistics.
-  - `/proc/cpuinfo`: CPU model, frequency, feature flags.
-  - `/proc/tasks`: Real-time task list with states and ticks.
-  - `/proc/mounts`: Mounted filesystem table.
+### 4. Advanced Filesystems & USB Storage (`src/fs`)
+- **FAT32 R/W (`fat32.rs`)**: Real Read/Write implementation with partition discovery, BPB decoding, cluster allocation bitmap scanning, cluster chain traversal, LFN directory parsing, and file creation/overwriting.
+- **exFAT (`exfat.rs`)**: Sector-accurate exFAT parser supporting Main Boot Region, Volume Flags, Cluster Heap allocation, Stream Extension entries, and file traversal.
+- **ext4 (`ext4.rs`)**: Linux ext4 superblock parser, Block Group Descriptor Table lookup, inode table traversal, and B-tree extent tree (`ext4_extent_header`, `ext4_extent`) physical block resolution.
+- **NTFS (`ntfs.rs`)**: Windows NTFS VBR parsing, `$MFT` record decoding, and resident `$DATA` attribute extraction.
+- **USB Mass Storage (`src/drivers/usb/`)**: Bulk-Only Transport (BOT) driver sending SCSI Command Descriptor Blocks (`INQUIRY`, `READ CAPACITY 10`, `READ 10`, `WRITE 10`) over xHCI and EHCI controllers.
 
-### 5. Inter-Process Communication (`src/ipc`)
-- **Anonymous Pipes**: Circular memory buffer with read/write ends, reader/writer reference counts, and EOF signaling. Implements `InodeOperations`.
-- **POSIX Signals**: Full signal set (`SIGINT`, `SIGTERM`, `SIGKILL`, `SIGSEGV`, `SIGALRM`, `SIGCHLD`, etc.) with pending masks and delivery state.
+### 5. Networking, 802.11 Wi-Fi & Sockets (`src/net`)
+- **IEEE 802.11 Wi-Fi (`wifi.rs`)**: Beacon frame management (SSID, BSSID, RSSI, WPA2-RSN capabilities), WPA2-PSK authentication, and 4-way handshake state machine.
+- **Network Cryptography (`src/drivers/net/crypto.rs`)**: Pure Rust SHA-1, HMAC-SHA1, and PBKDF2 key derivation (4096 iterations) for WPA2 Pairwise Master Key generation.
+- **TCP/IP Protocol Stack**:
+  - **Ethernet II & ARP (`ethernet.rs`, `arp.rs`)**: Frame encapsulation, hardware MAC resolution, and ARP table caching.
+  - **IPv4 & ICMP (`ipv4.rs`, `icmp.rs`)**: Packet serialization, checksum computation, fragmentation handling, and ICMP Echo Request/Reply (`ping`).
+  - **UDP & DNS (`udp.rs`)**: Connectionless datagram transport and DNS resolution (`nslookup`).
+  - **TCP State Machine (`tcp.rs`)**: RFC 793 compliant 3-way handshake (`SYN` $\to$ `SYN-ACK` $\to$ `ACK`), sliding window flow control, packet sequencing, and `FIN`/`ACK` teardown.
+- **BSD Socket API (`socket.rs`)**: Standard socket primitives (`socket_open`, `socket_connect`, `socket_send`, `socket_recv`, `socket_close`).
+- **HTTP/1.1 Engine (`http.rs`)**:
+  - Client: `curl [-i] <url>` fetching web pages and REST APIs over TCP.
+  - Server: Embedded `httpd` web server serving interactive status dashboards and JSON APIs (`/api/status`).
 
-### 6. Hardware Drivers & Storage Subsystem (`src/drivers`)
-- **Physical Block Storage Manager (`src/drivers/storage/`)**:
-  - **`BlockDevice` Trait**: Unified sector-based interface (`read_sectors`, `write_sectors`, `total_sectors`).
-  - **ATA / IDE Driver (`ata.rs`)**: Real PIO LBA28/LBA48 controller driver across Primary and Secondary buses (0x1F0/0x170). Communicates via hardware I/O ports, queries drive `IDENTIFY` (model name, sector capacity), and handles sector read/writes.
-  - **AHCI SATA Driver (`ahci.rs`)**: Scans PCI for SATA AHCI controllers (Class 0x01, Subclass 0x06, Prog-IF 0x01).
-- **Display Controllers (`vbe.rs`)**:
-  - **Universal Linear Framebuffer**: Uses Multiboot GOP/VBE framebuffer handover when available (works on real Intel, AMD, and NVIDIA graphics hardware).
-  - **Bochs VBE Ports Fallback**: Falls back to I/O ports 0x1CE/0x1CF when running on emulators.
-- **PS/2 Keyboard**: IRQ 1 handler, Set 1/2 scancode decoder, Shift/Ctrl/Alt/CapsLock modifier tracking, and thread-safe input ring buffer.
-- **PS/2 Mouse**: IRQ 12 handler, 3-byte packet decoder, clamping, and hardware cursor compositing.
-- **PCI Bus Scanner**: Scans PCI configuration space (ports 0xCF8/0xCFC), identifying host bridges, IDE controllers, VGA controllers, and NICs (`lspci`).
+### 6. Intel High Definition Audio & Sound Subsystem (`src/drivers/audio`)
+- **Intel HDA Driver (`hda.rs`)**: Scans PCI for Intel HDA controllers (Class 0x04, Subclass 0x03), maps MMIO BAR0, executes hardware reset (`CRST`), configures Stream Descriptor 0 for 44.1 kHz 16-bit stereo PCM, and streams samples via DMA.
+- **PCM Waveform Synthesizer (`pcm.rs`)**:
+  - Quarter-wave integer sine lookup table (`integer_sin()`), avoiding floating point instructions in kernel space.
+  - RIFF/WAVE parser supporting uncompressed 8-bit and 16-bit PCM WAV audio.
+  - Tone generator (`generate_sine_wave()`) with smooth anti-pop envelopes.
+  - CosmicOS Startup Chime (`generate_cosmic_chime()`): 4-note resonant harmonic F-Major chord (F3, C4, F4, A4) with natural acoustic decay.
+  - Phonetic formant synthesis for text-to-speech audio.
+- **PC Speaker Fallback (`mod.rs`)**: 8254 PIT Timer 2 square-wave hardware tone generation via I/O ports `0x42`, `0x43`, and `0x61`.
 
-### 7. Interactive CosmicOS Shell (`zsh`) & Virtual TTYs
-Built-in interactive CLI available on VGA display, COM1 serial, and virtual consoles:
-- **Virtual Consoles**:
-  - `Alt+F1`: `ttys000` (Primary interactive zsh shell)
-  - `Alt+F2`: `ttys001` (Secondary login session)
-  - `Alt+F3`: `ttys002` (Console.app / dmesg kernel diagnostic stream)
-  - `Alt+F4`: `ttys003` (Activity Monitor / top diagnostic view)
-- **CosmicOS Command Suite**:
-  - `sw_vers` - Display CosmicOS ProductVersion (1.0), Build (1A01), and Sublime Kernel Version
-  - `system_profiler` - Hardware overview (CosmicStation Pro, Sublime Architecture, Unified Memory, Bus Speed)
-  - `sysctl` - Query kernel variables (`kern.version`, `hw.ncpu`, `hw.memsize`, `hw.model`)
-  - `diskutil` - Enumerate CosmicFS containers and physical disk nodes (`disk0`, `disk0s1`)
-  - `defaults` - Read and write Cosmic preference plists (`defaults read`)
-  - `say <text>` - Cosmic speech synthesis simulation
-  - `open <app|file>` - Cosmic LaunchServices application launcher
-  - `top` - Real-time Sublime task, thread, and wired memory monitor
-  - `whoami` & `hostname` - Return user (`cosmos`) and host (`CosmicOS.local`)
-  - `gui` - Launch the interactive CosmicOS Aqua desktop interface (1024x768)
-  - `ls`, `cat`, `mkdir`, `touch`, `rm`, `test`, `reboot`, `halt`
+### 7. POSIX Shell, Pipelines, Redirection & Editor (`src/shell`)
+- **POSIX Pipelines (`pipeline.rs`)**: Arbitrary multi-stage command piping (`cmd1 | cmd2 | cmd3`) with in-memory stdout interception.
+- **File Redirection**:
+  - `> <file>`: Redirect stdout to overwrite file.
+  - `>> <file>`: Redirect stdout to append to file.
+  - `< <file>`: Redirect file contents into command stdin.
+- **UNIX Filter Commands**:
+  - `grep [-i] [-v] <pattern> [file]`: Regular text line filtering.
+  - `wc [-l] [-w] [-c] [file]`: Line, word, and byte counting.
+  - `head [-n N] [file]` & `tail [-n N] [file]`: Line head/tail extraction.
+  - `sort [-r] [file]`: Alphabetical and reversed line sorting.
+  - `uniq [file]`: Adjacent duplicate line elimination.
+- **In-Terminal Text Editor (`editor.rs`)**: Full-screen terminal text editor (`nano <path>` or `edit <path>`) with title header, line numbers (`001 | ...`), cursor positioning, arrow keys, Backspace, Delete, Tab, `Ctrl+S` direct VFS saving, and `Ctrl+X` exit.
 
-### 8. Graphical User Interface Subsystem (`src/gui`)
-CosmicOS features a modern Aqua desktop environment:
-- **Linear Framebuffer Graphics**: Bochs VBE display controller running at 1024x768 with 32-bit ARGB true color mapped directly to higher-half virtual memory (`0xFFFFFFFFD0000000`).
-- **Compositor & 2D Canvas**: Double-buffered software rendering engine (`Canvas`) with anti-aliasing, rounded glass rectangles, drop shadows, and horizontal gradients.
-- **Window Chrome**: Centered window titles, dark glass titlebar, and top-left traffic light buttons:
-  - 🔴 **Red** (`x+16`): Close window
-  - 🟡 **Yellow** (`x+32`): Minimize window
-  - 🟢 **Green** (`x+48`): Zoom / Maximize window
-- **Top Global Menu Bar**: Docked at `y=0` with Cosmic menu `✦`, active application menus (`Finder`, `File`, `Edit`, `View`, `Go`, `Window`, `Help`), live RAM status badge, and control center.
-- **Bottom Glass Dock**: Centered translucent glass dock with animated hover backgrounds, app launcher tiles, and cyan running indicator dots for active apps.
-- **Desktop Applications**:
-  - **Terminal (`Terminal.app`)**: Authentic zsh terminal (`cosmos@CosmicOS ~ % `) with history and auto-scrolling.
-  - **Activity Monitor (`Activity Monitor.app`)**: Task manager tracking CPU load, threads, memory pressure gauge (Normal/High), wired memory, and kernel subsystem health.
-  - **Finder (`Finder.app`)**: Two-pane file manager with **Favorites** (`Applications`, `Desktop`, `Documents`, `Downloads`), **Locations** (`Cosmic HD`, `Cosmic USB`), and Quick Look file preview.
-  - **About CosmicOS**: System dialog with CosmicOS 1.0 badge, Sublime Kernel specs, and memory allocation counters.
-
-### 9. Booting on Real Hardware (USB & HDD)
-CosmicOS is designed to run on bare-metal x86_64 PCs (Intel & AMD) as well as emulators:
-- **Option 1: Ventoy (Recommended - Easiest for any USB drive)**
-  1. Install [Ventoy](https://www.ventoy.net) on any USB flash drive.
-  2. Copy `cosmoskernel32.elf` into the root of the Ventoy USB.
-  3. Insert the USB into any PC (UEFI or Legacy BIOS), power on, and boot directly!
-- **Option 2: Rufus / GRUB2 Boot Media**
-  1. Format your USB stick as FAT32.
-  2. Run `.\create_boot_media.ps1 -DriveLetter E:` (replace `E:` with your USB letter).
-  3. Install GRUB2 or Syslinux using Rufus.
+### 8. Aqua Graphical Desktop (`src/gui`)
+- **Bochs VBE Linear Framebuffer**: 1024x768 with 32-bit ARGB true color mapped directly into higher-half virtual memory (`0xFFFFFFFFD0000000`).
+- **Double-Buffered Compositor**: Software rendering engine (`Canvas`) with anti-aliasing, rounded glass rectangles, drop shadows, and horizontal gradients.
+- **Window Management**: Window chrome with titlebar dragging, active/inactive focus states, and traffic light buttons (🔴 Close, 🟡 Minimize, 🟢 Zoom).
+- **Top Global Menu Bar & Bottom Glass Dock**: Application menus, live RAM status gauge, translucent dock tiles, and running app indicator dots.
+- **Built-in Desktop Apps**:
+  - **Terminal (`Terminal.app`)**: Graphical zsh shell session.
+  - **Activity Monitor (`Activity Monitor.app`)**: Live CPU load, threads, memory pressure meter, and kernel subsystem health.
+  - **Finder (`Finder.app`)**: Two-pane file manager with quick volume navigation (`Cosmic HD`, `Cosmic USB`).
+  - **About CosmicOS**: Hardware specs and memory counters.
 
 ---
 
-## Project Structure
+## Interactive Shell Command Reference (43 Commands)
 
-```
-cosmos/
-├── .cargo/
-│   └── config.toml                  # Target & rust-lld linker flags
-├── Cargo.toml                       # Package configuration (pure Rust dependencies)
-├── kernel.ld                        # Higher-half x86_64 ELF linker script
-├── build.ps1                        # PowerShell one-click build script
-├── run.ps1                          # PowerShell QEMU launch script
-├── Makefile                         # GNU Makefile for build/run/clean
-├── README.md                        # Documentation
-└── src/
-    ├── main.rs                      # Kernel entry point & initialization sequence
-    ├── arch/
-    │   ├── mod.rs                   # Architecture HAL
-    │   └── x86_64/
-    │       ├── boot.s               # Multiboot 1/2 headers, 32->64 trampoline, paging
-    │       ├── gdt.rs               # GDT, TSS, IST stacks
-    │       ├── idt.rs               # IDT, 256 vector handlers, CPU traps
-    │       ├── interrupts.s         # Interrupt stubs & register context frame
-    │       ├── io.rs                # Type-safe Port I/O (inb, outb, inw, outw, inl, outl)
-    │       ├── msr.rs               # MSR access (IA32_EFER, STAR, LSTAR, FMASK)
-    │       ├── registers.rs         # CR0, CR2, CR3, CR4, RFLAGS manipulation
-    │       ├── pic.rs               # Dual 8259 PIC remapping (IRQs 32..47)
-    │       ├── pit.rs               # 8254 PIT (1000 Hz timer ticks)
-    │       ├── rtc.rs               # CMOS Real-Time Clock driver
-    │       ├── apic.rs              # Local APIC detection and driver
-    │       ├── serial.rs            # 16550 UART driver for COM1
-    │       ├── syscall.rs           # Fast AMD64 syscall MSR setup
-    │       └── vga.rs               # 80x25 color VGA text driver with scrolling
-    ├── mm/
-    │   ├── mod.rs                   # Memory subsystem definitions & HHDM conversions
-    │   ├── pmm.rs                   # Bitmap physical frame allocator
-    │   ├── vmm.rs                   # 4-level paging (PML4 -> PDPT -> PD -> PT)
-    │   ├── heap.rs                  # Expandable GlobalAlloc kernel heap
-    │   └── address_space.rs         # Process address spaces & VMAs
-    ├── sync/
-    │   ├── mod.rs                   # Synchronization primitives
-    │   └── spinlock.rs              # Spinlock & IrqSafeSpinlock
-    ├── task/
-    │   ├── mod.rs                   # Process and thread management
-    │   ├── thread.rs                # TCB, thread states, kernel stack
-    │   ├── process.rs               # PCB, file descriptors, exit status
-    │   ├── scheduler.rs             # Preemptive round-robin / priority scheduler
-    │   └── switch.s                 # Assembly context switch routine
-    ├── fs/
-    │   ├── mod.rs                   # Root filesystem mounting
-    │   ├── vfs.rs                   # InodeOperations, File, Stat, DirEntry
-    │   ├── ramfs.rs                 # In-memory RamFS
-    │   ├── devfs.rs                 # /dev (null, zero, random, tty, rtc)
-    │   └── procfs.rs                # /proc (version, uptime, meminfo, cpuinfo, tasks)
-    ├── ipc/
-    │   ├── mod.rs                   # Inter-process communication
-    │   ├── pipe.rs                  # Anonymous Unix pipes
-    │   └── signal.rs                # POSIX signal definitions & delivery
-    ├── drivers/
-    │   ├── mod.rs                   # Device driver manager
-    │   ├── keyboard.rs              # PS/2 keyboard driver & scancode decoder
-    │   ├── mouse.rs                 # PS/2 mouse driver & IRQ 12 packet decoder
-    │   ├── pci.rs                   # PCI Configuration Space scanner
-    │   └── vbe.rs                   # Bochs VBE display adapter (1024x768x32bpp)
-    ├── gui/
-    │   ├── mod.rs                   # Compositor event loop & DesktopManager
-    │   ├── canvas.rs                # Double-buffered 2D drawing canvas & primitives
-    │   ├── color.rs                 # ARGB8888 color, alpha blending & cosmic palette
-    │   ├── desktop.rs               # Space wallpaper, starfield & desktop icons
-    │   ├── font.rs                  # 8x16 monospace font renderer
-    │   ├── font_data.rs             # CP437 ASCII glyph bitmap tables
-    │   ├── mouse.rs                 # Arrow mouse cursor sprite & compositing
-    │   ├── taskbar.rs               # Taskbar dock, Start menu, clock & RAM meter
-    │   ├── window.rs                # Window chrome, dragging & control buttons
-    │   └── apps/
-    │       ├── mod.rs               # Application suite coordinator
-    │       ├── terminal.rs          # Graphical virtual terminal (CosmosSH)
-    │       ├── sysmon.rs            # Live task manager & memory usage meter
-    │       ├── files.rs             # Graphical file explorer & content previewer
-    │       └── about.rs             # About Cosmos operating system dialog
-    ├── syscall/
-    │   ├── mod.rs                   # Syscall dispatcher
-    │   ├── table.rs                 # POSIX system call numbers
-    │   ├── fs_calls.rs              # Syscall implementations (read, write, uname)
-    │   └── syscall_entry.s          # AMD64 fast syscall assembly entry
-    ├── shell/
-    │   ├── mod.rs                   # CosmosSH interactive loop
-    │   └── commands.rs              # Shell commands implementation
-    └── tests/
-        └── mod.rs                   # Kernel automated verification harness
-```
+CosmicOS features a native zsh-style shell available across all virtual consoles (`Alt+F1` through `Alt+F4`), COM1 serial, and the graphical desktop terminal:
+
+| Category | Command | Description |
+| :--- | :--- | :--- |
+| **System Info** | `sw_vers` | Display CosmicOS ProductVersion (1.0) and Sublime Kernel build |
+| | `system_profiler` | Hardware overview (model, CPU architecture, unified RAM, UUID) |
+| | `sysctl [-a]` | Query kernel variables (`kern.version`, `hw.ncpu`, `hw.memsize`, `hw.model`) |
+| | `uname` | Print kernel release and machine architecture |
+| | `uptime` | Show system uptime in seconds |
+| | `date` | Display current UTC hardware timestamp from CMOS RTC |
+| | `whoami` / `hostname` | Print current user (`cosmos`) and host (`CosmicOS.local`) |
+| | `mem` | Detailed physical frame and expandable heap allocation metrics |
+| | `top` / `ps` | Display real-time active tasks, threads, and CPU/memory statistics |
+| **Filesystem & I/O** | `ls [path]` | List contents of a directory (default `/`) |
+| | `cat <path>` | Read file contents to terminal |
+| | `echo <text>` | Output text to console or pipeline |
+| | `touch <path>` | Create an empty file |
+| | `mkdir <path>` | Create a new directory |
+| | `rm <path>` | Remove a file |
+| | `mount` | Display mounted filesystems (RamFS, DevFS, ProcFS, FAT32, exFAT, ext4, NTFS) |
+| | `diskutil [list]` | Manage storage containers and physical partitions (`disk0`, `disk0s1`) |
+| **Text Editing & Filters**| `nano <path>` / `edit` | Launch in-terminal full-screen text editor (`Ctrl+S` save, `Ctrl+X` exit) |
+| | `grep [-i] [-v] <pat>` | Filter lines matching pattern (supports `-i` case-insensitive, `-v` invert) |
+| | `wc [-l] [-w] [-c]` | Count lines, words, and bytes |
+| | `head [-n N]` | Print first N lines of input |
+| | `tail [-n N]` | Print last N lines of input |
+| | `sort [-r]` | Sort lines alphabetically or reversed |
+| | `uniq` | Omit repeated adjacent lines |
+| | `\|`, `>`, `>>`, `<` | Shell pipelines and file redirection |
+| **Network & Web** | `ifconfig` | Display network interfaces (`lo0`, `en0`, `wlan0`) and IP configurations |
+| | `ping <target>` | Send ICMP ECHO_REQUEST packets to network hosts |
+| | `nslookup <host>` | Resolve domain names to IPv4 addresses via DNS |
+| | `wifi [subcmd]` | 802.11 Wi-Fi manager (`scan`, `connect <ssid> <pass>`, `status`, `disconnect`) |
+| | `curl [-i] <url>` | Fetch web pages & REST APIs over TCP / HTTP |
+| | `httpd [status]` | Embedded web server dashboard and REST API |
+| **Audio & Speech** | `beep [freq] [ms]` | Play audio tone through Intel HDA / PC Speaker (default 880 Hz, 250 ms) |
+| | `chime` | Play iconic CosmicOS Sublime startup chime (F-Major harmonic chord) |
+| | `play <file.wav>` | Play RIFF/WAVE PCM audio file from VFS or external storage |
+| | `say <text>` | Synthesize phonetic speech audio |
+| **User Space & Execution**| `exec <binary>` | Execute 64-bit ELF binary in isolated Ring 3 user space |
+| | `open <app/file>` | LaunchServices application launcher (e.g. `open Finder.app`) |
+| | `defaults [read]` | Read user preferences and plist defaults |
+| **Hardware & Power** | `lspci` | Enumerate PCI Express controller devices |
+| | `gui` | Launch CosmicOS Aqua graphical desktop compositor |
+| | `clear` | Clear terminal screen |
+| | `test` | Run the complete automated kernel verification suite |
+| | `reboot` / `halt` | ACPI power reset or shutdown |
 
 ---
 
-## Building and Running
+## Automated Verification Suite (19 Self-Tests)
 
-### Prerequisites
-1. **Rust Nightly**:
-   ```bash
-   rustup default nightly
-   rustup target add x86_64-unknown-none
-   rustup component add rust-src llvm-tools
-   ```
-2. **QEMU**:
-   Install `qemu-system-x86_64` (available in MinGW, MSYS2, or official QEMU Windows installer).
+On startup, CosmicOS executes its automated self-test verification suite, thoroughly testing each subsystem:
 
-### 1. Build
-To compile the kernel:
-```powershell
-.\build.ps1
-```
-Or with `make`:
-```bash
-make build
-```
-
-This compiles `target/x86_64-unknown-none/release/cosmoskernel` and generates the Multiboot-compatible `cosmoskernel32.elf`.
-
-### 2. Run in QEMU
-
-#### Terminal Mode (COM1 Serial):
-```powershell
-.\run.ps1
-```
-Or:
-```bash
-make run
-```
-
-#### Graphical VGA Window (with PS/2 Keyboard):
-```powershell
-.\run.ps1 -Graphic
-```
-Or:
-```bash
-make run-graphic
-```
-
----
-
-## Verification Test Output
-
-On boot, CosmosKernel executes its self-test harness, verifying physical frame allocation, heap allocation, filesystem operations, pipes, and task context switching:
-
-```
+```text
 =======================================================
              CosmosKernel Verification Suite           
 =======================================================
@@ -320,22 +234,74 @@ On boot, CosmosKernel executes its self-test harness, verifying physical frame a
   [TEST] Virtual File System & Mounts ... [PASS]
   [TEST] Anonymous IPC Pipes ... [PASS]
   [TEST] Task Context Switch & Yield ... [PASS]
+  [TEST] 16550A UART & /dev/ttyS0 ... [PASS]
+  [TEST] FAT32 Read/Write & Cluster Alloc ... [INFO] FAT32 Filesystem Mounted ... [PASS]
+  [TEST] exFAT Parser & Inode Traversal ... [INFO] exFAT Filesystem Mounted ... [PASS]
+  [TEST] ext4 Superblock & Inode Mapping ... [INFO] ext4 Filesystem Mounted ... [PASS]
+  [TEST] NTFS Resident $DATA & Index Root ... [INFO] NTFS Filesystem Mounted ... [PASS]
+  [TEST] USB Mass Storage (SCSI / BOT) ... [PASS]
+  [TEST] Network Crypto (SHA-1, HMAC-SHA1, PBKDF2) ... [PASS]
+  [TEST] IEEE 802.11 Wi-Fi (Beacons & WPA2-PSK) ... [INFO] 4-Way Handshake ... [PASS]
+  [TEST] TCP/IP Protocol Stack & ICMP Ping ... [PASS]
+  [TEST] TCP Protocol & Socket Engine ... [PASS]
+  [TEST] HTTP Client & Embedded Server ... [PASS]
+  [TEST] Audio Subsystem & PCM Synthesis ... [PASS]
+  [TEST] ELF64 Loader & Ring 3 User Mode ... [INFO] Executing in Ring 3 ... [PASS]
+  [TEST] POSIX Pipelines, Redirection & Editor ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================
 ```
 
-You are then greeted with the interactive prompt:
-```
-cosmos:/# uname
-CosmosKernel 0.1.0-monolithic x86_64 GNU/Cosmos #1 SMP PREEMPT 2026
+---
 
-cosmos:/# cat /proc/meminfo
-MemTotal:         131072 kB
-MemFree:          121856 kB
-MemUsed:            9216 kB
-HeapTotal:          1024 kB
-HeapUsed:             21 kB
-HeapFree:           1002 kB
-PageSize:              4 kB
+## Building and Running
+
+### Prerequisites
+1. **Rust Nightly**:
+   ```powershell
+   rustup default nightly
+   rustup target add x86_64-unknown-none
+   rustup component add rust-src llvm-tools
+   ```
+2. **QEMU Emulator**:
+   Ensure `qemu-system-x86_64` is installed and in your PATH.
+
+### 1. Build Kernel Binary
+```powershell
+.\build.ps1
 ```
+This compiles the 64-bit kernel (`target/x86_64-unknown-none/release/cosmoskernel`) with zero warnings and generates the multiboot-compatible `cosmoskernel32.elf`.
+
+### 2. Run in QEMU
+
+#### Terminal Mode (Headless COM1 Serial):
+```powershell
+.\run.ps1 -Headless
+```
+
+#### Graphical Aqua Desktop Mode (with Intel HDA sound and PS/2 mouse):
+```powershell
+.\run.ps1
+```
+
+---
+
+## Booting on Real Bare-Metal Hardware
+
+CosmicOS is tested on real Intel and AMD x86_64 PCs:
+1. **Ventoy (Recommended)**:
+   - Install [Ventoy](https://www.ventoy.net) on any USB flash drive.
+   - Copy `cosmoskernel32.elf` into the root of the Ventoy USB drive.
+   - Insert USB into any PC (UEFI or Legacy BIOS), power on, select `cosmoskernel32.elf`, and boot!
+2. **GRUB2 / Rufus**:
+   - Format USB as FAT32.
+   - Run `.\create_boot_media.ps1 -DriveLetter E:` (replace `E:` with your USB drive letter).
+   - Boot via GRUB2 multiboot loader.
+
+---
+
+## License
+Dual-licensed under either of:
+- **MIT License** ([LICENSE-MIT](LICENSE-MIT))
+- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
