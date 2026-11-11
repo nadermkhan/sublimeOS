@@ -74,6 +74,7 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     arch::x86_64::registers::disable_interrupts();
+    let _ = arch::x86_64::vga::stop_stdout_capture();
     kerror!("==================== KERNEL PANIC ====================");
     if let Some(location) = info.location() {
         kerror!("Panicked at {}:{}:{}", location.file(), location.line(), location.column());

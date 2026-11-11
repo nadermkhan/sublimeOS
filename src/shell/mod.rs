@@ -1,4 +1,6 @@
 pub mod commands;
+pub mod editor;
+pub mod pipeline;
 
 extern crate alloc;
 use alloc::collections::VecDeque;
@@ -10,7 +12,7 @@ use crate::println;
 static INPUT_QUEUE: crate::sync::IrqSafeSpinlock<VecDeque<u8>> =
     crate::sync::IrqSafeSpinlock::new(VecDeque::new());
 
-fn get_next_input_char() -> Option<u8> {
+pub fn get_next_input_char() -> Option<u8> {
     if let Some(ch) = crate::drivers::keyboard::read_char() {
         return Some(ch);
     }
@@ -34,11 +36,12 @@ fn get_next_input_char() -> Option<u8> {
     INPUT_QUEUE.lock().pop_front()
 }
 
-const COMMAND_LIST: [&str; 35] = [
+const COMMAND_LIST: [&str; 43] = [
     "sw_vers", "system_profiler", "sysctl", "diskutil", "open", "say", "beep", "chime", "play", "exec", "defaults",
     "whoami", "hostname", "top", "help", "clear", "uname", "uptime", "date", "mem",
     "ps", "ls", "cat", "echo", "mkdir", "touch", "rm", "mount", "wifi", "ifconfig",
-    "ping", "nslookup", "curl", "httpd", "reboot"
+    "ping", "nslookup", "curl", "httpd", "reboot", "nano", "edit", "grep", "wc", "head",
+    "tail", "sort", "uniq"
 ];
 
 pub fn run_shell() -> ! {
@@ -177,7 +180,9 @@ pub fn run_shell() -> ! {
                         if history.last().map(|s| s.as_str()) != Some(trimmed) {
                             history.push(String::from(trimmed));
                         }
-                        commands::execute_command(trimmed);
+                        if !pipeline::try_execute_pipeline(trimmed) {
+                            commands::execute_command(trimmed);
+                        }
                     }
                     line_buffer.clear();
                     cursor_pos = 0;

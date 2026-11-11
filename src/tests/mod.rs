@@ -29,6 +29,7 @@ pub fn run_all_tests() {
     test_http_engine();
     test_audio_subsystem();
     test_elf_loader();
+    test_pipelines_and_editor();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -824,6 +825,91 @@ fn test_elf_loader() {
     let exit_code = crate::task::user::execute_user_binary(&elf_bytes)
         .expect("Failed to execute user binary in Ring 3");
     assert_eq!(exit_code, 42);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_pipelines_and_editor() {
+    print!("  [TEST] POSIX Pipelines, Redirection & Editor ... ");
+
+    // 1. Test grep filter
+    let text = "apple\nbanana\ncherry\nCosmicOS\n";
+    let grep_res = crate::shell::pipeline::run_grep(text, &["an"]);
+    assert_eq!(grep_res, "banana\n");
+
+    let grep_ci = crate::shell::pipeline::run_grep(text, &["-i", "cosmic"]);
+    assert_eq!(grep_ci, "CosmicOS\n");
+
+    let grep_inv = crate::shell::pipeline::run_grep("one\ntwo\nthree\n", &["-v", "two"]);
+    assert_eq!(grep_inv, "one\nthree\n");
+
+    // 2. Test wc filter
+    let wc_res = crate::shell::pipeline::run_wc("hello world\nline two\n", &["-l"]);
+    assert!(wc_res.contains("2"));
+
+    // 3. Test head and tail filters
+    let multi = "1\n2\n3\n4\n5\n6\n";
+    let head_res = crate::shell::pipeline::run_head(multi, &["-n", "2"]);
+    assert_eq!(head_res, "1\n2\n");
+
+    let tail_res = crate::shell::pipeline::run_tail(multi, &["-n", "2"]);
+    assert_eq!(tail_res, "5\n6\n");
+
+    // 4. Test sort and uniq filters
+    let unsorted = "zebra\napple\nmango\n";
+    let sorted = crate::shell::pipeline::run_sort(unsorted, &[]);
+    assert_eq!(sorted, "apple\nmango\nzebra\n");
+
+    let dups = "a\na\nb\nc\nc\n";
+    let uniq_res = crate::shell::pipeline::run_uniq(dups, &[]);
+    assert_eq!(uniq_res, "a\nb\nc\n");
+
+    // 5. Test File Writing & Redirection Pipeline
+    let pipe_file = "/tmp/pipe_test.txt";
+    let content = b"Line 1: CosmicOS\nLine 2: Sublime Kernel\nLine 3: CosmicOS Rules\n";
+    crate::shell::pipeline::write_file_to_vfs(pipe_file, content, false)
+        .expect("Failed to write test file");
+
+    let read_back = crate::shell::pipeline::read_file_from_vfs(pipe_file)
+        .expect("Failed to read test file");
+    assert_eq!(read_back.as_bytes(), content);
+
+    // Test pipeline execution with redirection: cat pipe_file | grep CosmicOS > /tmp/out.txt
+    let pipeline_cmd = "cat /tmp/pipe_test.txt | grep CosmicOS > /tmp/out.txt";
+    let handled = crate::shell::pipeline::try_execute_pipeline(pipeline_cmd);
+    assert!(handled);
+
+    let filtered = crate::shell::pipeline::read_file_from_vfs("/tmp/out.txt")
+        .expect("Failed to read redirected output");
+    assert!(filtered.contains("Line 1: CosmicOS"));
+    assert!(filtered.contains("Line 3: CosmicOS Rules"));
+    assert!(!filtered.contains("Sublime Kernel"));
+
+    // Test append redirection: cat /tmp/pipe_test.txt | head -n 1 >> /tmp/out.txt
+    let append_cmd = "cat /tmp/pipe_test.txt | head -n 1 >> /tmp/out.txt";
+    let handled_app = crate::shell::pipeline::try_execute_pipeline(append_cmd);
+    assert!(handled_app);
+
+    let appended = crate::shell::pipeline::read_file_from_vfs("/tmp/out.txt")
+        .expect("Failed to read appended output");
+    assert_eq!(appended.lines().count(), 3);
+
+    // 6. Test TextEditor buffer operations & saving
+    let mut editor = crate::shell::editor::TextEditor::new("/tmp/editor_save_test.txt");
+    editor.insert_char('C');
+    editor.insert_char('o');
+    editor.insert_char('s');
+    editor.insert_char('m');
+    editor.insert_char('i');
+    editor.insert_char('c');
+    editor.insert_newline();
+    editor.insert_char('O');
+    editor.insert_char('S');
+    editor.save().expect("Failed to save from TextEditor");
+
+    let saved_text = crate::shell::pipeline::read_file_from_vfs("/tmp/editor_save_test.txt")
+        .expect("Failed to read editor saved file");
+    assert_eq!(saved_text, "Cosmic\nOS");
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

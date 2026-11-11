@@ -1,3 +1,5 @@
+extern crate alloc;
+use alloc::string::String;
 use core::fmt;
 use core::ptr::write_volatile;
 use crate::arch::x86_64::io::outb;
@@ -237,9 +239,28 @@ impl fmt::Write for VgaWriter {
 
 pub static VGA_WRITER: IrqSafeSpinlock<VgaWriter> = IrqSafeSpinlock::new(VgaWriter::new());
 
+static STDOUT_CAPTURE: IrqSafeSpinlock<Option<String>> = IrqSafeSpinlock::new(None);
+
+/// Begin capturing stdout to an in-memory buffer (for shell pipelines and redirection).
+pub fn start_stdout_capture() {
+    *STDOUT_CAPTURE.lock() = Some(String::new());
+}
+
+/// Stop capturing stdout and return the accumulated string.
+pub fn stop_stdout_capture() -> Option<String> {
+    STDOUT_CAPTURE.lock().take()
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
+    {
+        let mut cap = STDOUT_CAPTURE.lock();
+        if let Some(ref mut s) = *cap {
+            let _ = s.write_fmt(args);
+            return;
+        }
+    }
     let mut writer = VGA_WRITER.lock();
     let _ = writer.write_fmt(args);
     let _ = crate::arch::x86_64::serial::SERIAL1.lock().write_fmt(args);

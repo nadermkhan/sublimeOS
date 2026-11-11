@@ -40,6 +40,13 @@ pub fn execute_command(line: &str) {
         "ls" => cmd_ls(args),
         "cat" => cmd_cat(args),
         "echo" => cmd_echo(args),
+        "grep" => cmd_grep(args),
+        "wc" => cmd_wc(args),
+        "head" => cmd_head(args),
+        "tail" => cmd_tail(args),
+        "sort" => cmd_sort(args),
+        "uniq" => cmd_uniq(args),
+        "nano" | "edit" => cmd_nano(args),
         "mkdir" => cmd_mkdir(args),
         "touch" => cmd_touch(args),
         "rm" => cmd_rm(args),
@@ -263,6 +270,44 @@ fn cmd_exec(args: &[&str]) {
     }
 }
 
+fn cmd_nano(args: &[&str]) {
+    if args.is_empty() {
+        println!("Usage: nano <file>");
+        return;
+    }
+    crate::shell::editor::run_editor(args[0]);
+}
+
+fn cmd_grep(args: &[&str]) {
+    let output = crate::shell::pipeline::run_grep("", args);
+    print!("{}", output);
+}
+
+fn cmd_wc(args: &[&str]) {
+    let output = crate::shell::pipeline::run_wc("", args);
+    print!("{}", output);
+}
+
+fn cmd_head(args: &[&str]) {
+    let output = crate::shell::pipeline::run_head("", args);
+    print!("{}", output);
+}
+
+fn cmd_tail(args: &[&str]) {
+    let output = crate::shell::pipeline::run_tail("", args);
+    print!("{}", output);
+}
+
+fn cmd_sort(args: &[&str]) {
+    let output = crate::shell::pipeline::run_sort("", args);
+    print!("{}", output);
+}
+
+fn cmd_uniq(args: &[&str]) {
+    let output = crate::shell::pipeline::run_uniq("", args);
+    print!("{}", output);
+}
+
 fn cmd_defaults(args: &[&str]) {
     let action = args.first().copied().unwrap_or("read");
     if action == "read" {
@@ -320,6 +365,14 @@ fn cmd_help() {
     println!("  mkdir <path>    Create directory");
     println!("  touch <path>    Create empty file");
     println!("  rm <path>       Remove file");
+    println!("  nano <path>     In-terminal full screen text editor (alias 'edit')");
+    println!("  grep <pattern>  Filter lines matching regular text pattern (-i, -v)");
+    println!("  wc [opts]       Count lines, words, and bytes (-l, -w, -c)");
+    println!("  head [-n N]     Print first N lines of input");
+    println!("  tail [-n N]     Print last N lines of input");
+    println!("  sort [-r]       Sort lines of text alphabetically or reversed");
+    println!("  uniq            Filter adjacent duplicate lines");
+    println!("  Pipelines & I/O:Use '|' for pipelines, '>' and '>>' for file redirect, '<' for input");
     println!("  clear           Clear the terminal screen");
     println!("  reboot          Restart computer");
     println!("  halt            Shut down computer");
