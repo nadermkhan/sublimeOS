@@ -39,6 +39,7 @@ pub fn execute_command(line: &str) {
         "mkdir" => cmd_mkdir(args),
         "touch" => cmd_touch(args),
         "rm" => cmd_rm(args),
+        "mount" => cmd_mount(),
         "gui" => cmd_gui(),
         "test" => crate::tests::run_all_tests(),
         "reboot" => cmd_reboot(),
@@ -105,13 +106,39 @@ fn cmd_diskutil(args: &[&str]) {
     if sub == "list" {
         let storage = crate::drivers::storage::STORAGE_MANAGER.lock();
         if !storage.devices.is_empty() {
-            for (_idx, dev) in storage.devices.iter().enumerate() {
+            for dev in storage.devices.iter() {
                 let size_mb = (dev.total_sectors() * 512) / (1024 * 1024);
                 println!("/dev/{} (internal, physical):", dev.name());
                 println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
                 println!("   0:      GUID_partition_scheme                        *{} MB    {}", size_mb, dev.name());
-                println!("   1:                        EFI EFI                     100.0 MB   {}s1", dev.name());
-                println!("   2:                  Cosmic_FS FAT32 Partition         *{} MB    {}s2\n", size_mb.saturating_sub(100), dev.name());
+
+                let partitions = crate::fs::partition::scan_device_partitions(dev.clone());
+                for (p_idx, part) in partitions.iter().enumerate() {
+                    let part_mb = (part.total_sectors() * 512) / (1024 * 1024);
+                    let (type_name, vol_name) = match crate::fs::mount::probe_filesystem(part.clone()) {
+                        Ok((_, fs_type, label)) => (
+                            match fs_type {
+                                "fat32" => "MS-DOS FAT32",
+                                "exfat" => "Microsoft exFAT",
+                                "ext4" => "Linux ext4",
+                                "ntfs" => "Windows NTFS",
+                                _ => "Unknown FS",
+                            },
+                            label,
+                        ),
+                        Err(_) => ("Unformatted / RAW", alloc::string::String::new()),
+                    };
+
+                    println!(
+                        "   {}: {:>26} {:<24} {:>4} MB   {}",
+                        p_idx + 1,
+                        type_name,
+                        vol_name,
+                        part_mb,
+                        part.name()
+                    );
+                }
+                println!();
             }
         } else {
             println!("/dev/disk0 (internal, physical):");
@@ -129,6 +156,13 @@ fn cmd_diskutil(args: &[&str]) {
         println!("   2:              Cosmic Volume Cosmic USB              15.6 MB    disk1s2");
     } else {
         println!("Usage: diskutil list");
+    }
+}
+
+fn cmd_mount() {
+    let entries = crate::fs::mount::MOUNT_TABLE.lock().list();
+    for entry in entries {
+        println!("{} on {} ({}, {})", entry.device_name, entry.mount_point, entry.fs_type, entry.options);
     }
 }
 
@@ -186,6 +220,7 @@ fn cmd_help() {
     println!("  system_profiler Display hardware system overview");
     println!("  sysctl [-a]     Get kernel and hardware state (hw.model, hw.memsize)");
     println!("  diskutil [list] Manage CosmicFS containers and disk volumes");
+    println!("  mount           List mounted filesystems (FAT32, exFAT, ext4, NTFS)");
     println!("  open <app/path> Open application or document (e.g. 'open Finder.app')");
     println!("  say <text>      Speech synthesis simulated audio banner");
     println!("  defaults [read] Access CosmicOS user preferences and defaults");

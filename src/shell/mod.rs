@@ -34,10 +34,10 @@ fn get_next_input_char() -> Option<u8> {
     INPUT_QUEUE.lock().pop_front()
 }
 
-const COMMAND_LIST: [&str; 24] = [
+const COMMAND_LIST: [&str; 25] = [
     "sw_vers", "system_profiler", "sysctl", "diskutil", "open", "say", "defaults",
     "whoami", "hostname", "top", "help", "clear", "uname", "uptime", "date", "mem",
-    "ps", "ls", "cat", "echo", "mkdir", "touch", "rm", "reboot"
+    "ps", "ls", "cat", "echo", "mkdir", "touch", "rm", "mount", "reboot"
 ];
 
 pub fn run_shell() -> ! {

@@ -17,6 +17,10 @@ pub fn run_all_tests() {
     test_pipes();
     test_multitasking();
     test_uart();
+    test_fat32_rw();
+    test_exfat();
+    test_ext4();
+    test_ntfs();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -106,5 +110,317 @@ fn test_uart() {
     let tty_node = vfs.open("/dev/ttyS0", 0).expect("Failed to open /dev/ttyS0");
     let stat = tty_node.stat();
     assert_eq!(stat.file_type, FileType::CharDevice, "/dev/ttyS0 should be CharDevice");
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+use alloc::sync::Arc;
+use crate::drivers::storage::BlockDevice;
+use crate::fs::exfat::{ExFatFileSystem, ExFatInode};
+use crate::fs::ext4::{Ext4FileSystem, Ext4Inode};
+use crate::fs::fat32::{Fat32FileSystem, Fat32Inode};
+use crate::fs::ntfs::{NtfsFileSystem, NtfsInode};
+use crate::sync::IrqSafeSpinlock;
+
+struct MemBlockDevice {
+    name: String,
+    data: IrqSafeSpinlock<Vec<u8>>,
+    sectors: u64,
+}
+
+impl MemBlockDevice {
+    fn new(name: &str, sectors: u64) -> Arc<Self> {
+        let size = (sectors as usize) * 512;
+        let mut v = Vec::with_capacity(size);
+        v.resize(size, 0);
+        Arc::new(Self {
+            name: String::from(name),
+            data: IrqSafeSpinlock::new(v),
+            sectors,
+        })
+    }
+}
+
+impl BlockDevice for MemBlockDevice {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn read_sectors(&self, lba: u64, count: u32, buf: &mut [u8]) -> Result<(), &'static str> {
+        let d = self.data.lock();
+        let start = (lba as usize) * 512;
+        let end = start + (count as usize) * 512;
+        if end > d.len() {
+            return Err("Read beyond MemBlockDevice bounds");
+        }
+        buf[..(count as usize) * 512].copy_from_slice(&d[start..end]);
+        Ok(())
+    }
+    fn write_sectors(&self, lba: u64, count: u32, buf: &[u8]) -> Result<(), &'static str> {
+        let mut d = self.data.lock();
+        let start = (lba as usize) * 512;
+        let end = start + (count as usize) * 512;
+        if end > d.len() {
+            return Err("Write beyond MemBlockDevice bounds");
+        }
+        d[start..end].copy_from_slice(&buf[..(count as usize) * 512]);
+        Ok(())
+    }
+    fn total_sectors(&self) -> u64 {
+        self.sectors
+    }
+}
+
+fn test_fat32_rw() {
+    print!("  [TEST] FAT32 Read/Write & Cluster Alloc ... ");
+    let dev = MemBlockDevice::new("mem_fat32", 1024);
+    {
+        let mut d = dev.data.lock();
+        // Sector 0 BPB
+        d[11] = 0x00; d[12] = 0x02; // bytes per sector = 512
+        d[13] = 1;                  // sectors per cluster = 1
+        d[14] = 32; d[15] = 0;      // reserved sectors = 32
+        d[16] = 2;                  // num fats = 2
+        d[36] = 32; d[37] = 0; d[38] = 0; d[39] = 0; // sectors per fat = 32
+        d[44] = 2;  d[45] = 0; d[46] = 0; d[47] = 0; // root cluster = 2
+        d[32] = 0x00; d[33] = 0x04; // total sectors = 1024
+        d[71..82].copy_from_slice(b"COSMIC_USB ");
+        d[510] = 0x55; d[511] = 0xAA;
+
+        // FAT table at LBA 32 (offset 32 * 512 = 16384)
+        let fat_start = 32 * 512;
+        // Cluster 0 and 1
+        d[fat_start] = 0xF8; d[fat_start + 1] = 0xFF; d[fat_start + 2] = 0xFF; d[fat_start + 3] = 0x0F;
+        d[fat_start + 4] = 0xFF; d[fat_start + 5] = 0xFF; d[fat_start + 6] = 0xFF; d[fat_start + 7] = 0x0F;
+        // Cluster 2 (root directory EOC)
+        d[fat_start + 8] = 0xFF; d[fat_start + 9] = 0xFF; d[fat_start + 10] = 0xFF; d[fat_start + 11] = 0x0F;
+    }
+
+    let fs = Fat32FileSystem::mount(dev.clone()).expect("Failed to mount FAT32");
+    assert_eq!(fs.volume_label, "COSMIC_USB");
+
+    let root = Fat32Inode::new_root(fs);
+    // 1. Create file
+    let file = root.lock().create("TEST.TXT", FileType::Regular).expect("Failed to create file");
+    // 2. Write data
+    let written = file.lock().write(0, b"Hello FAT32 Read/Write!").expect("Write failed");
+    assert_eq!(written, 23);
+    // 3. Read back
+    let mut read_buf = [0u8; 23];
+    let n = file.lock().read(0, &mut read_buf).expect("Read failed");
+    assert_eq!(n, 23);
+    assert_eq!(&read_buf, b"Hello FAT32 Read/Write!");
+
+    // 4. Verify directory listing
+    let entries = root.lock().readdir().expect("Readdir failed");
+    assert!(entries.iter().any(|e| e.name == "TEST.TXT"));
+
+    // 5. Unlink file
+    root.lock().unlink("TEST.TXT").expect("Unlink failed");
+    let entries_after = root.lock().readdir().expect("Readdir failed");
+    assert!(!entries_after.iter().any(|e| e.name == "TEST.TXT"));
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_exfat() {
+    print!("  [TEST] exFAT Parser & Inode Traversal ... ");
+    let dev = MemBlockDevice::new("mem_exfat", 1024);
+    {
+        let mut d = dev.data.lock();
+        // Sector 0: exFAT VBR
+        d[3..11].copy_from_slice(b"EXFAT   ");
+        d[80] = 32; // FAT offset = 32
+        d[84] = 32; // FAT length = 32
+        d[88] = 64; // Cluster heap offset = 64
+        d[92] = 200; // Cluster count = 200
+        d[96] = 2; // Root dir cluster = 2
+        d[108] = 9; // 512 bytes per sector (1 << 9)
+        d[109] = 0; // 1 sector per cluster (1 << 0)
+        d[510] = 0x55; d[511] = 0xAA;
+
+        // Root directory at Cluster 2 (LBA 64, offset 64 * 512 = 32768)
+        let root_off = 64 * 512;
+        // Entry 0: Volume label (0x83) "EXFAT_SD"
+        d[root_off] = 0x83;
+        d[root_off + 1] = 8;
+        for (i, &b) in b"EXFAT_SD".iter().enumerate() {
+            d[root_off + 2 + i * 2] = b;
+        }
+
+        // Entry 1: File directory entry (0x85)
+        let file_off = root_off + 32;
+        d[file_off] = 0x85;
+        d[file_off + 1] = 2; // 2 secondary entries (0xC0 and 0xC1)
+        d[file_off + 4] = 0x20; // Archive attribute
+
+        // Entry 2: Stream extension (0xC0)
+        let stream_off = root_off + 64;
+        d[stream_off] = 0xC0;
+        d[stream_off + 1] = 0x02; // NoFatChain = 1 (contiguous)
+        d[stream_off + 20] = 3; // First cluster = 3
+        d[stream_off + 24] = 19; // Data length = 19
+
+        // Entry 3: File name (0xC1) "EXFAT.TXT"
+        let name_off = root_off + 96;
+        d[name_off] = 0xC1;
+        for (i, &b) in b"EXFAT.TXT".iter().enumerate() {
+            d[name_off + 2 + i * 2] = b;
+        }
+
+        // Cluster 3 data (LBA 65, offset 65 * 512 = 33280)
+        let data_off = 65 * 512;
+        d[data_off..data_off + 19].copy_from_slice(b"Hello exFAT Driver!");
+    }
+
+    let fs = ExFatFileSystem::mount(dev).expect("Failed to mount exFAT");
+    assert_eq!(fs.volume_label, "EXFAT_SD");
+
+    let root = ExFatInode::new_root(fs);
+    let file = root.lock().lookup("EXFAT.TXT").expect("Failed to lookup EXFAT.TXT");
+    let mut buf = [0u8; 19];
+    let n = file.lock().read(0, &mut buf).expect("Failed to read EXFAT.TXT");
+    assert_eq!(n, 19);
+    assert_eq!(&buf, b"Hello exFAT Driver!");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_ext4() {
+    print!("  [TEST] ext4 Superblock & Inode Mapping ... ");
+    let dev = MemBlockDevice::new("mem_ext4", 1024);
+    {
+        let mut d = dev.data.lock();
+        // LBA 2 (byte 1024): Superblock
+        let sb = 1024;
+        d[sb + 0x18] = 0; // s_log_block_size = 0 (1024 bytes/block)
+        d[sb + 0x20] = 0x00; d[sb + 0x21] = 0x02; // 512 blocks per group
+        d[sb + 0x28] = 32; // 32 inodes per group
+        d[sb + 0x38] = 0x53; d[sb + 0x39] = 0xEF; // magic 0xEF53
+        d[sb + 0x58] = 128; // inode size = 128
+        d[sb + 0x78..sb + 0x82].copy_from_slice(b"LINUX_EXT4");
+
+        // Block 2 (descriptor table at byte 2048)
+        let desc = 2048;
+        d[desc + 8] = 3; // inode table block = 3
+
+        // Block 3 (inode table at byte 3072)
+        let itable = 3072;
+        // Inode 2: root directory (index 1, offset 128)
+        let ino2 = itable + 128;
+        d[ino2 + 0] = 0xED; d[ino2 + 1] = 0x41; // directory mode (0x41ED)
+        d[ino2 + 4] = 0x00; d[ino2 + 5] = 0x04; // size = 1024 bytes
+        d[ino2 + 40] = 4; // direct block 0 = block 4
+
+        // Inode 12: regular file (index 11, offset 11 * 128 = 1408)
+        let ino12 = itable + 1408;
+        d[ino12 + 0] = 0xA4; d[ino12 + 1] = 0x81; // file mode (0x81A4)
+        d[ino12 + 4] = 18; // size = 18 bytes
+        d[ino12 + 40] = 5; // direct block 0 = block 5
+
+        // Block 4: root directory data (byte 4096)
+        let dir = 4096;
+        // Entry 1: . (rec_len = 12)
+        d[dir + 0] = 2; d[dir + 4] = 12; d[dir + 6] = 1; d[dir + 7] = 2; d[dir + 8] = b'.';
+        // Entry 2: .. (rec_len = 12)
+        d[dir + 12] = 2; d[dir + 16] = 12; d[dir + 18] = 2; d[dir + 19] = 2; d[dir + 20] = b'.'; d[dir + 21] = b'.';
+        // Entry 3: TEST.TXT (rec_len = 1000)
+        let e3 = dir + 24;
+        d[e3 + 0] = 12; d[e3 + 4] = 0xE8; d[e3 + 5] = 0x03; // ino = 12, rec_len = 1000
+        d[e3 + 6] = 8; d[e3 + 7] = 1; // name_len = 8, file_type = 1
+        d[e3 + 8..e3 + 16].copy_from_slice(b"TEST.TXT");
+
+        // Block 5: file data (byte 5120)
+        let file_data = 5120;
+        d[file_data..file_data + 18].copy_from_slice(b"Hello ext4 Driver!");
+    }
+
+    let fs = Ext4FileSystem::mount(dev).expect("Failed to mount ext4");
+    assert_eq!(fs.volume_name, "LINUX_EXT4");
+
+    let root = Ext4Inode::new_root(fs).expect("Failed to get ext4 root");
+    let file = root.lock().lookup("TEST.TXT").expect("Failed to lookup TEST.TXT");
+    let mut buf = [0u8; 18];
+    let n = file.lock().read(0, &mut buf).expect("Failed to read TEST.TXT");
+    assert_eq!(n, 18);
+    assert_eq!(&buf, b"Hello ext4 Driver!");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_ntfs() {
+    print!("  [TEST] NTFS Resident $DATA & Index Root ... ");
+    let dev = MemBlockDevice::new("mem_ntfs", 1024);
+    {
+        let mut d = dev.data.lock();
+        // Sector 0: NTFS VBR
+        d[3..11].copy_from_slice(b"NTFS    ");
+        d[11] = 0x00; d[12] = 0x02; // bytes per sector = 512
+        d[13] = 1; // sectors per cluster = 1
+        d[48] = 10; // $MFT starting cluster = 10
+        d[64] = 0xF6; // -10 (1024 bytes per MFT record)
+        d[510] = 0x55; d[511] = 0xAA;
+
+        // MFT Record 5: root directory (at LBA 10 + 5*2 = 20, offset 20 * 512 = 10240)
+        let r5 = 20 * 512;
+        d[r5..r5 + 4].copy_from_slice(b"FILE");
+        d[r5 + 4] = 48; // USA offset
+        d[r5 + 6] = 3;  // USA count
+        d[r5 + 20] = 56; // first attr offset = 56
+        d[r5 + 22] = 0x03; // flags: in use + directory
+
+        // Attribute $INDEX_ROOT (type 0x90) at offset 56
+        let a90 = r5 + 56;
+        d[a90 + 0] = 0x90; // type 0x90
+        d[a90 + 4] = 120;  // length = 120
+        d[a90 + 8] = 0;    // resident
+        d[a90 + 20] = 24;  // value offset = 24 (starts at a90 + 24)
+
+        // Index root header (at a90 + 24)
+        let ir = a90 + 24;
+        d[ir + 0] = 0x30; // indexed attr type = $FILE_NAME
+        d[ir + 16] = 16;  // entries offset = 16 (relative to ir + 16)
+
+        // First index entry (at ir + 32)
+        let ie = ir + 32;
+        d[ie + 0] = 16;   // child MFT record number = 16
+        d[ie + 8] = 88;   // entry length = 88
+        d[ie + 10] = 72;  // content length = 72
+        d[ie + 12] = 0x02;// last entry
+
+        // $FILE_NAME payload (at ie + 16)
+        let fn_payload = ie + 16;
+        d[fn_payload + 48] = 18; // file size = 18
+        d[fn_payload + 56] = 0x20; // archive
+        d[fn_payload + 64] = 8; // name length = 8
+        d[fn_payload + 65] = 1; // namespace = Win32
+        for (i, &b) in b"TEST.TXT".iter().enumerate() {
+            d[fn_payload + 66 + i * 2] = b;
+        }
+
+        // MFT Record 16: file (at LBA 10 + 16*2 = 42, offset 42 * 512 = 21504)
+        let r16 = 42 * 512;
+        d[r16..r16 + 4].copy_from_slice(b"FILE");
+        d[r16 + 4] = 48; // USA offset
+        d[r16 + 6] = 3;  // USA count
+        d[r16 + 20] = 56; // first attr offset = 56
+        d[r16 + 22] = 0x01; // flags: in use
+
+        // Attribute $DATA (type 0x80) at offset 56
+        let a80 = r16 + 56;
+        d[a80 + 0] = 0x80; // type 0x80
+        d[a80 + 4] = 48;   // length = 48
+        d[a80 + 8] = 0;    // resident
+        d[a80 + 16] = 18;  // value length = 18
+        d[a80 + 20] = 24;  // value offset = 24
+        d[a80 + 24..a80 + 42].copy_from_slice(b"Hello NTFS Driver!");
+    }
+
+    let fs = NtfsFileSystem::mount(dev).expect("Failed to mount NTFS");
+    let root = NtfsInode::new_root(fs).expect("Failed to get NTFS root");
+    let file = root.lock().lookup("TEST.TXT").expect("Failed to lookup TEST.TXT");
+    let mut buf = [0u8; 18];
+    let n = file.lock().read(0, &mut buf).expect("Failed to read TEST.TXT");
+    assert_eq!(n, 18);
+    assert_eq!(&buf, b"Hello NTFS Driver!");
+
     println!("\x1b[32m[PASS]\x1b[0m");
 }

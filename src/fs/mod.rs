@@ -1,12 +1,16 @@
 pub mod devfs;
+pub mod exfat;
+pub mod ext4;
 pub mod fat32;
+pub mod mount;
+pub mod ntfs;
+pub mod partition;
 pub mod procfs;
 pub mod ramfs;
 pub mod vfs;
 
-use crate::drivers::storage::STORAGE_MANAGER;
 use crate::fs::devfs::DevFsDirectory;
-use crate::fs::fat32::{Fat32FileSystem, Fat32Inode};
+use crate::fs::mount::{mount_all_storage, MOUNT_TABLE};
 use crate::fs::procfs::ProcFsDirectory;
 use crate::fs::ramfs::RamInode;
 use crate::fs::vfs::VFS;
@@ -93,25 +97,18 @@ pub fn init() {
     // Register root with global VFS manager
     VFS.lock().set_root(root);
 
+    // Register initial system mounts in mount table
+    {
+        let mut mt = MOUNT_TABLE.lock();
+        mt.add("/dev/disk0", "/", "ramfs", "rw");
+        mt.add("devfs", "/dev", "devfs", "rw");
+        mt.add("procfs", "/proc", "procfs", "ro");
+    }
+
     kinfo!("VFS initialized: CosmicOS hierarchy (/System, /Library, /Applications, /Users, /Volumes)");
 }
 
-/// Mount detected physical storage block devices (FAT32 partition to /Volumes/Cosmic USB).
+/// Automatically detect and mount physical storage block devices (FAT32, exFAT, ext4, NTFS).
 pub fn mount_storage_devices() {
-    let storage = STORAGE_MANAGER.lock();
-    if let Some(dev) = storage.get_device(0) {
-        match Fat32FileSystem::mount(dev.clone()) {
-            Ok(fat32_fs) => {
-                let vfs = VFS.lock();
-                if let Ok(vol_node) = vfs.resolve_path("/Volumes") {
-                    let fat_root = Fat32Inode::new_root(fat32_fs);
-                    let _ = vol_node.lock().add_child_node("Cosmic USB", fat_root);
-                    kinfo!("Physical storage device mounted: {} -> /Volumes/Cosmic USB", dev.name());
-                }
-            }
-            Err(e) => {
-                kinfo!("Storage drive {} detected (non-FAT32 or unpartitioned: {})", dev.name(), e);
-            }
-        }
-    }
+    mount_all_storage();
 }
