@@ -27,10 +27,11 @@ pub struct EhciController {
 
 impl EhciController {
     pub fn new(pci: PciDevice) -> Result<Self, &'static str> {
-        let mmio_base = (pci.bar0 & 0xFFFFFFF0) as u64;
-        if mmio_base == 0 {
+        let mmio_phys = (pci.bar0 & 0xFFFFFFF0) as u64;
+        if mmio_phys == 0 {
             return Err("Invalid EHCI MMIO base address (BAR0 is 0)");
         }
+        let mmio_base = crate::mm::vmm::map_mmio_range(mmio_phys, 16 * 1024)?;
 
         unsafe {
             PciBus::enable_bus_mastering(pci.bus, pci.device, pci.function);

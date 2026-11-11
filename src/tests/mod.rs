@@ -22,6 +22,9 @@ pub fn run_all_tests() {
     test_ext4();
     test_ntfs();
     test_usb_mass_storage();
+    test_net_crypto();
+    test_wifi_subsystem();
+    test_tcpip_stack();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -514,6 +517,128 @@ fn test_usb_mass_storage() {
     let mut read_buf = [0u8; 512];
     dev.read_sectors(10, 1, &mut read_buf).expect("USB read_sectors failed");
     assert_eq!(read_buf, test_data);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_net_crypto() {
+    print!("  [TEST] Network Crypto (SHA-1, HMAC-SHA1, PBKDF2) ... ");
+
+    // 1. Test SHA-1 with standard test vector "abc"
+    let digest = crate::net::crypto::sha1(b"abc");
+    assert_eq!(
+        digest,
+        [0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d]
+    );
+
+    // 2. Test HMAC-SHA1
+    let hmac = crate::net::crypto::hmac_sha1(b"key", b"The quick brown fox jumps over the lazy dog");
+    assert_eq!(
+        hmac,
+        [0xde, 0x7c, 0x9b, 0x85, 0xb8, 0xb7, 0x8a, 0xa6, 0xbc, 0x8a, 0x7a, 0x36, 0xf7, 0x0a, 0x90, 0x70, 0x1c, 0x9d, 0xb4, 0xd9]
+    );
+
+    // 3. Test PBKDF2-HMAC-SHA1 (RFC 6070 Test 1: password="password", salt="salt", c=1, dkLen=20)
+    let mut pbkdf2_out = [0u8; 32];
+    crate::net::crypto::pbkdf2_sha1(b"password", b"salt", 1, &mut pbkdf2_out);
+    assert_eq!(
+        &pbkdf2_out[..20],
+        &[0x0c, 0x60, 0xc8, 0x0f, 0x96, 0x1f, 0x0e, 0x71, 0xf3, 0xa9, 0xb5, 0x24, 0xaf, 0x60, 0x12, 0x06, 0x2f, 0xe0, 0x37, 0xa6]
+    );
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_wifi_subsystem() {
+    print!("  [TEST] IEEE 802.11 Wi-Fi (Beacons & WPA2-PSK) ... ");
+
+    // 1. Test 802.11 Beacon frame parser
+    let mut beacon = [0u8; 64];
+    // Tag 0: SSID "CosmicNet" (len 9)
+    beacon[36] = 0;
+    beacon[37] = 9;
+    beacon[38..47].copy_from_slice(b"CosmicNet");
+    // Tag 3: Channel 11 (len 1)
+    beacon[47] = 3;
+    beacon[48] = 1;
+    beacon[49] = 11;
+    // Tag 48: RSN (WPA2)
+    beacon[50] = 48;
+    beacon[51] = 4;
+
+    let parsed = crate::net::wifi::parse_80211_beacon(&beacon[..56]);
+    assert!(parsed.is_some(), "Failed to parse 802.11 beacon");
+    let (ssid, ch, sec) = parsed.unwrap();
+    assert_eq!(ssid, "CosmicNet");
+    assert_eq!(ch, 11);
+    assert_eq!(sec, crate::net::wifi::WifiSecurity::Wpa2Psk);
+
+    // 2. Test WifiManager scan & connect
+    let mut mgr = crate::net::wifi::WifiManager::new();
+    let scan = mgr.scan();
+    assert!(scan.len() >= 3, "WifiManager scan returned too few APs");
+    assert_eq!(scan[0].ssid, "Cosmic-5G");
+
+    // Connect with WPA2 passphrase
+    mgr.connect("Cosmic-5G", Some("CosmicSecretKey!"))
+        .expect("WifiManager connect failed");
+    assert!(mgr.is_connected, "WifiManager not marked connected");
+    assert_eq!(mgr.current_channel, 36);
+    assert_eq!(mgr.link_speed_mbps, 866);
+
+    // Disconnect
+    mgr.disconnect();
+    assert!(!mgr.is_connected, "WifiManager still marked connected after disconnect");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_tcpip_stack() {
+    print!("  [TEST] TCP/IP Protocol Stack & ICMP Ping ... ");
+
+    // 1. Test IPv4 Header build & parse
+    let ip_pkt = crate::net::ip::build_ipv4_packet(
+        [192, 168, 1, 100],
+        [192, 168, 1, 1],
+        crate::net::ip::IP_PROTO_ICMP,
+        b"Echo payload",
+    );
+    let (proto, src, dst, payload) =
+        crate::net::ip::parse_ipv4_header(&ip_pkt).expect("Failed to parse IPv4 header");
+    assert_eq!(proto, crate::net::ip::IP_PROTO_ICMP);
+    assert_eq!(src, [192, 168, 1, 100]);
+    assert_eq!(dst, [192, 168, 1, 1]);
+    assert_eq!(payload, b"Echo payload");
+
+    // 2. Test ARP request and reply handling
+    let arp_req = crate::net::arp::build_arp_request(
+        [0x00, 0x14, 0x22, 0x01, 0x02, 0x03],
+        [192, 168, 1, 100],
+        [192, 168, 1, 1],
+    );
+    let reply = crate::net::arp::handle_arp_packet(
+        &arp_req,
+        [0x00, 0x14, 0x22, 0x01, 0x02, 0x03],
+        [192, 168, 1, 1],
+    );
+    assert!(reply.is_some(), "ARP reply not generated");
+
+    // 3. Test ICMP Echo Request & Reply
+    let echo = crate::net::icmp::build_echo_request(0x4242, 1, b"PING");
+    assert_eq!(echo[0], crate::net::icmp::ICMP_TYPE_ECHO_REQUEST);
+    let echo_reply = crate::net::icmp::handle_icmp_packet(&echo, [127, 0, 0, 1], [127, 0, 0, 1]);
+    assert!(echo_reply.is_some(), "ICMP reply not generated");
+    let (_, reply_buf) = echo_reply.unwrap();
+    assert_eq!(reply_buf[0], crate::net::icmp::ICMP_TYPE_ECHO_REPLY);
+
+    // 4. Test DNS Query Builder
+    let dns_query = crate::net::dns::build_dns_query("CosmicOS.local", 0x55AA);
+    assert!(dns_query.len() > 12);
+    assert_eq!(u16::from_be_bytes([dns_query[0], dns_query[1]]), 0x55AA);
+
+    // 5. Test Live Loopback Ping
+    let rtt = crate::net::ping("127.0.0.1").expect("Loopback ping failed");
+    assert!(rtt >= 1);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

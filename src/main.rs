@@ -17,6 +17,7 @@ pub mod fs;
 pub mod gui;
 pub mod ipc;
 pub mod mm;
+pub mod net;
 pub mod shell;
 pub mod sync;
 pub mod syscall;
@@ -47,11 +48,14 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     // 4. Initialize Virtual File System (VFS, RamFS, DevFS, ProcFS)
     fs::init();
 
-    // 5. Initialize Device Drivers (Keyboard, Mouse, PCI, Storage)
+    // 5. Initialize Device Drivers (Keyboard, Mouse, PCI, Storage, USB)
     drivers::init();
     fs::mount_storage_devices();
 
-    // 6. Initialize Master TTY Subsystem & Virtual Consoles
+    // 6. Initialize Master Network Subsystem (Ethernet, Wi-Fi 802.11, Loopback)
+    net::init();
+
+    // 7. Initialize Master TTY Subsystem & Virtual Consoles
     tty::init();
 
     // 7. Enable CPU interrupts now that all subsystems and scheduler are active

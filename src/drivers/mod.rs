@@ -1,5 +1,6 @@
 pub mod keyboard;
 pub mod mouse;
+pub mod net;
 pub mod pci;
 pub mod storage;
 pub mod usb;

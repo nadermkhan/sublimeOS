@@ -40,6 +40,10 @@ pub fn execute_command(line: &str) {
         "touch" => cmd_touch(args),
         "rm" => cmd_rm(args),
         "mount" => cmd_mount(),
+        "wifi" => cmd_wifi(args),
+        "ifconfig" => cmd_ifconfig(),
+        "ping" => cmd_ping(args),
+        "nslookup" => cmd_nslookup(args),
         "gui" => cmd_gui(),
         "test" => crate::tests::run_all_tests(),
         "reboot" => cmd_reboot(),
@@ -221,6 +225,10 @@ fn cmd_help() {
     println!("  sysctl [-a]     Get kernel and hardware state (hw.model, hw.memsize)");
     println!("  diskutil [list] Manage CosmicFS containers and disk volumes");
     println!("  mount           List mounted filesystems (FAT32, exFAT, ext4, NTFS)");
+    println!("  wifi [subcmd]   802.11 Wi-Fi manager (scan, connect, status, disconnect)");
+    println!("  ifconfig        Display network interface configuration (lo0, en0, wlan0)");
+    println!("  ping <target>   Send ICMP ECHO_REQUEST packets to network hosts");
+    println!("  nslookup <host> Query DNS nameservers for IPv4 host address");
     println!("  open <app/path> Open application or document (e.g. 'open Finder.app')");
     println!("  say <text>      Speech synthesis simulated audio banner");
     println!("  defaults [read] Access CosmicOS user preferences and defaults");
@@ -422,4 +430,180 @@ fn cmd_reboot() {
 fn cmd_halt() {
     println!("\x1b[31mShutting down CosmicOS...\x1b[0m");
     crate::arch::x86_64::acpi::poweroff();
+}
+
+fn cmd_wifi(args: &[&str]) {
+    let sub = args.first().copied().unwrap_or("help");
+    match sub {
+        "scan" => {
+            println!("Scanning 2.4 GHz and 5 GHz wireless spectrum for 802.11 beacons...");
+            let aps = crate::net::wifi::WIFI_MANAGER.lock().scan().to_vec();
+            println!("{:<20} {:<18} {:<8} {:<4} {:<12} {:<12}", "SSID", "BSSID", "RSSI", "CH", "SECURITY", "SIGNAL");
+            println!("{:-<20} {:-<18} {:-<8} {:-<4} {:-<12} {:-<12}", "", "", "", "", "", "");
+            for ap in aps {
+                let b = ap.bssid;
+                let bssid_str = format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", b[0], b[1], b[2], b[3], b[4], b[5]);
+                let rssi_str = format!("{}dBm", ap.rssi);
+                println!("{:<20} {:<18} {:<8} {:<4} {:<12} {:<12}",
+                    ap.ssid, bssid_str, rssi_str, ap.channel, ap.security.as_str(), ap.signal_bars());
+            }
+        }
+        "connect" => {
+            if args.len() < 2 {
+                println!("Usage: wifi connect <SSID> [passphrase]");
+                return;
+            }
+            let ssid = args[1];
+            let pass = args.get(2).copied();
+            println!("\x1b[36mInitiating association with '{}'...\x1b[0m", ssid);
+            match crate::net::wifi::WIFI_MANAGER.lock().connect(ssid, pass) {
+                Ok(()) => {
+                    println!("\x1b[32m[OK] Connected to '{}' via WPA2-PSK (AES-CCMP)\x1b[0m", ssid);
+                    println!("Interface: wlan0 (IPv4: 192.168.1.120, Netmask: 255.255.255.0, Gateway: 192.168.1.1)");
+                }
+                Err(e) => {
+                    println!("\x1b[31mwifi connect error: {}\x1b[0m", e);
+                }
+            }
+        }
+        "status" => {
+            let mgr = crate::net::wifi::WIFI_MANAGER.lock();
+            if mgr.is_connected {
+                let b = mgr.current_bssid.unwrap_or([0; 6]);
+                println!("Wi-Fi Status: \x1b[32mConnected\x1b[0m");
+                println!("  Interface:    wlan0 (IEEE 802.11ac SoftMAC)");
+                println!("  SSID:         {}", mgr.current_ssid.as_deref().unwrap_or("Unknown"));
+                println!("  BSSID:        {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", b[0], b[1], b[2], b[3], b[4], b[5]);
+                println!("  Channel:      {}", mgr.current_channel);
+                println!("  Tx Rate:      {} Mbps", mgr.link_speed_mbps);
+                println!("  Security:     WPA2-Personal (PBKDF2-SHA1 Key Derivation)");
+            } else {
+                println!("Wi-Fi Status: \x1b[33mDisconnected\x1b[0m (wlan0 inactive)");
+                println!("Type 'wifi scan' to search for available wireless networks.");
+            }
+        }
+        "disconnect" => {
+            crate::net::wifi::WIFI_MANAGER.lock().disconnect();
+            println!("wlan0: Disconnected from wireless network.");
+        }
+        _ => {
+            println!("Usage: wifi [scan | connect <ssid> [passphrase] | status | disconnect]");
+        }
+    }
+}
+
+fn cmd_ifconfig() {
+    let net = crate::net::device::NET_MANAGER.lock();
+    for (dev, cfg) in &net.devices {
+        let mac = dev.mac_address();
+        let mac_str = format!("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        let is_up = dev.is_link_up();
+        let status = if is_up { "active" } else { "inactive" };
+
+        match dev.device_type() {
+            crate::net::device::NetDeviceType::Loopback => {
+                println!("{}: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384", dev.name());
+                println!("        inet {}.{}.{}.{} netmask {}.{}.{}.{}",
+                    cfg.ipv4[0], cfg.ipv4[1], cfg.ipv4[2], cfg.ipv4[3],
+                    cfg.netmask[0], cfg.netmask[1], cfg.netmask[2], cfg.netmask[3]
+                );
+            }
+            crate::net::device::NetDeviceType::Ethernet => {
+                println!("{}: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500", dev.name());
+                println!("        ether {}", mac_str);
+                if cfg.ipv4 != [0, 0, 0, 0] {
+                    println!("        inet {}.{}.{}.{} netmask {}.{}.{}.{} broadcast 10.0.2.255",
+                        cfg.ipv4[0], cfg.ipv4[1], cfg.ipv4[2], cfg.ipv4[3],
+                        cfg.netmask[0], cfg.netmask[1], cfg.netmask[2], cfg.netmask[3]
+                    );
+                }
+                println!("        media: autoselect (1000baseT <full-duplex>)");
+                println!("        status: {}", status);
+            }
+            crate::net::device::NetDeviceType::Wireless80211 => {
+                println!("{}: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> mtu 1500", dev.name());
+                println!("        ether {}", mac_str);
+                if cfg.ipv4 != [0, 0, 0, 0] {
+                    println!("        inet {}.{}.{}.{} netmask {}.{}.{}.{} gateway {}.{}.{}.{}",
+                        cfg.ipv4[0], cfg.ipv4[1], cfg.ipv4[2], cfg.ipv4[3],
+                        cfg.netmask[0], cfg.netmask[1], cfg.netmask[2], cfg.netmask[3],
+                        cfg.gateway[0], cfg.gateway[1], cfg.gateway[2], cfg.gateway[3]
+                    );
+                }
+                let wifi_connected = crate::net::wifi::WIFI_MANAGER.lock().is_connected;
+                let wifi_status = if wifi_connected { "active" } else { "inactive" };
+                println!("        media: IEEE 802.11 (Wi-Fi 802.11ac 866 Mbps)");
+                println!("        status: {}", wifi_status);
+            }
+        }
+    }
+}
+
+fn cmd_ping(args: &[&str]) {
+    if args.is_empty() {
+        println!("Usage: ping <destination_ip | hostname>");
+        return;
+    }
+    let target = args[0];
+    let dst_ip = match crate::net::parse_or_resolve_ip(target) {
+        Ok(ip) => ip,
+        Err(e) => {
+            println!("ping: cannot resolve {}: {}", target, e);
+            return;
+        }
+    };
+
+    println!("PING {} ({}.{}.{}.{}): 56 data bytes",
+        target, dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3]
+    );
+
+    let mut received = 0;
+    let mut total_rtt = 0u64;
+
+    for seq in 1..=4 {
+        match crate::net::ping_ip(dst_ip, seq) {
+            Ok(rtt) => {
+                received += 1;
+                total_rtt += rtt;
+                println!("64 bytes from {}.{}.{}.{}: icmp_seq={} ttl=64 time={} ms",
+                    dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], seq, rtt
+                );
+            }
+            Err(e) => {
+                println!("Request timeout for icmp_seq {}: {}", seq, e);
+            }
+        }
+
+        // Small interval between pings
+        crate::arch::x86_64::pit::sleep_ms(200);
+    }
+
+    println!("\n--- {} ping statistics ---", target);
+    let loss_pct = ((4 - received) * 100) / 4;
+    println!("4 packets transmitted, {} packets received, {}% packet loss", received, loss_pct);
+    if received > 0 {
+        let avg_rtt = total_rtt / received as u64;
+        println!("round-trip avg = {} ms", avg_rtt);
+    }
+}
+
+fn cmd_nslookup(args: &[&str]) {
+    if args.is_empty() {
+        println!("Usage: nslookup <hostname>");
+        return;
+    }
+    let target = args[0];
+    println!("Server:\t\t1.1.1.1");
+    println!("Address:\t1.1.1.1#53\n");
+
+    match crate::net::parse_or_resolve_ip(target) {
+        Ok(ip) => {
+            println!("Non-authoritative answer:");
+            println!("Name:\t{}", target);
+            println!("Address:\t{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        }
+        Err(e) => {
+            println!("** server can't find {}: {}", target, e);
+        }
+    }
 }

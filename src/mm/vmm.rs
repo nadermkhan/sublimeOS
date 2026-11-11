@@ -252,3 +252,27 @@ impl VirtualMemoryManager {
 }
 
 pub static VMM: IrqSafeSpinlock<VirtualMemoryManager> = IrqSafeSpinlock::new(VirtualMemoryManager::new());
+
+static MMIO_NEXT_VIRT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0xFFFFFFFFE0000000);
+
+/// Map a physical MMIO memory range into a non-cacheable higher-half virtual address.
+pub fn map_mmio_range(phys_addr: u64, size: usize) -> Result<u64, &'static str> {
+    let page_offset = phys_addr & 0xFFF;
+    let phys_aligned = phys_addr & !0xFFF;
+    let total_size = (page_offset as usize + size + 4095) & !4095;
+    let pages = total_size / 4096;
+
+    let virt_base = MMIO_NEXT_VIRT.fetch_add(total_size as u64, core::sync::atomic::Ordering::SeqCst);
+
+    let vmm = VMM.lock();
+    let kernel_pml4 = vmm.get_kernel_pml4();
+    let flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_NO_CACHE;
+
+    for i in 0..pages {
+        let p = phys_aligned + (i as u64 * 4096);
+        let v = virt_base + (i as u64 * 4096);
+        vmm.map_page(kernel_pml4, v, p, flags)?;
+    }
+
+    Ok(virt_base + page_offset)
+}

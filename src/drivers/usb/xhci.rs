@@ -47,10 +47,11 @@ pub struct XhciController {
 
 impl XhciController {
     pub fn new(pci: PciDevice) -> Result<Self, &'static str> {
-        let mmio_base = (pci.bar0 & 0xFFFFFFF0) as u64;
-        if mmio_base == 0 {
+        let mmio_phys = (pci.bar0 & 0xFFFFFFF0) as u64;
+        if mmio_phys == 0 {
             return Err("Invalid xHCI MMIO base address (BAR0 is 0)");
         }
+        let mmio_base = crate::mm::vmm::map_mmio_range(mmio_phys, 64 * 1024)?;
 
         unsafe {
             // Enable PCI Bus Master and Memory Space
