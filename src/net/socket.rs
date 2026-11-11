@@ -1,4 +1,5 @@
 extern crate alloc;
+use crate::fs::vfs::{FileType, InodeOperations, Stat};
 use crate::net::device::NET_MANAGER;
 use crate::net::tcp::{
     send_tcp_packet, TcpConnection, TcpState, TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH,
@@ -150,4 +151,74 @@ pub fn socket_close(sock_id: usize) -> Result<(), &'static str> {
         }
     }
     Ok(())
+}
+
+/// Bind a socket to a specific local port and optional IP.
+pub fn socket_bind(sock_id: usize, local_ip: [u8; 4], local_port: u16) -> Result<(), &'static str> {
+    let mut table = TCP_TABLE.lock();
+    let conn = table.find(sock_id).ok_or("Invalid socket ID")?;
+    conn.local_port = local_port;
+    if local_ip != [0, 0, 0, 0] {
+        conn.local_ip = local_ip;
+    }
+    Ok(())
+}
+
+/// Mark a socket as listening for incoming TCP client connections.
+pub fn socket_listen(sock_id: usize, _backlog: usize) -> Result<(), &'static str> {
+    let mut table = TCP_TABLE.lock();
+    let conn = table.find(sock_id).ok_or("Invalid socket ID")?;
+    conn.state = TcpState::Listen;
+    Ok(())
+}
+
+/// Accept an established client connection from the listening socket's pending queue.
+pub fn socket_accept(sock_id: usize, timeout_ms: u64) -> Result<(usize, [u8; 4], u16), &'static str> {
+    let start_ticks = crate::arch::x86_64::pit::get_ticks();
+    let timeout_ticks = start_ticks + timeout_ms;
+
+    while crate::arch::x86_64::pit::get_ticks() < timeout_ticks {
+        crate::net::poll();
+
+        let mut table = TCP_TABLE.lock();
+        if let Some(conn) = table.find(sock_id) {
+            if let Some(client_id) = conn.pending_accept.pop_front() {
+                if let Some(client) = table.find(client_id) {
+                    let r_ip = client.remote_ip;
+                    let r_port = client.remote_port;
+                    return Ok((client_id, r_ip, r_port));
+                }
+            }
+        } else {
+            return Err("Listening socket not found");
+        }
+        drop(table);
+
+        core::hint::spin_loop();
+    }
+
+    Err("Accept timed out")
+}
+
+pub struct SocketInode {
+    pub sock_id: usize,
+}
+
+impl InodeOperations for SocketInode {
+    fn read(&self, _offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+        socket_recv(self.sock_id, buf, 1000)
+    }
+
+    fn write(&mut self, _offset: usize, buf: &[u8]) -> Result<usize, &'static str> {
+        socket_send(self.sock_id, buf)
+    }
+
+    fn stat(&self) -> Stat {
+        Stat {
+            inode: 200 + (self.sock_id as u64),
+            size: 0,
+            file_type: FileType::CharDevice,
+            mode: 0o666,
+        }
+    }
 }

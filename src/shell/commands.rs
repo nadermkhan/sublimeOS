@@ -57,6 +57,9 @@ pub fn execute_command(line: &str) {
         "nslookup" => cmd_nslookup(args),
         "curl" | "http" => cmd_curl(args),
         "httpd" => cmd_httpd(args),
+        "telnet" => cmd_telnet(args),
+        "telnetd" => cmd_telnetd(args),
+        "sshd" => cmd_sshd(args),
         "gui" => cmd_gui(),
         "windowserver" => cmd_windowserver(),
         "test" => crate::tests::run_all_tests(),
@@ -386,6 +389,70 @@ fn cmd_gui() {
 
 fn cmd_windowserver() {
     cmd_exec(&["/bin/windowserver"]);
+}
+
+fn cmd_telnetd(_args: &[&str]) {
+    cmd_exec(&["/bin/telnetd"]);
+}
+
+fn cmd_sshd(_args: &[&str]) {
+    cmd_exec(&["/bin/sshd"]);
+}
+
+fn cmd_telnet(args: &[&str]) {
+    if args.is_empty() {
+        println!("Usage: telnet <host_ip> [port]");
+        return;
+    }
+    let host_str = args[0];
+    let port: u16 = if args.len() > 1 {
+        args[1].parse().unwrap_or(23)
+    } else {
+        23
+    };
+
+    let ip_parts: Vec<&str> = host_str.split('.').collect();
+    if ip_parts.len() != 4 {
+        println!("\x1b[31mtelnet: Invalid IPv4 address '{}'\x1b[0m", host_str);
+        return;
+    }
+
+    let ip = [
+        ip_parts[0].parse().unwrap_or(127),
+        ip_parts[1].parse().unwrap_or(0),
+        ip_parts[2].parse().unwrap_or(0),
+        ip_parts[3].parse().unwrap_or(1),
+    ];
+
+    println!("Trying {}.{}.{}.{}...", ip[0], ip[1], ip[2], ip[3]);
+    let sock_id = match crate::net::socket::socket_open() {
+        Ok(id) => id,
+        Err(e) => {
+            println!("\x1b[31mtelnet: Unable to open socket: {}\x1b[0m", e);
+            return;
+        }
+    };
+
+    if let Err(e) = crate::net::socket::socket_connect(sock_id, ip, port) {
+        println!("\x1b[31mtelnet: Unable to connect to remote host: {}\x1b[0m", e);
+        let _ = crate::net::socket::socket_close(sock_id);
+        return;
+    }
+
+    println!("Connected to {}.{}.{}.{}:{}.", ip[0], ip[1], ip[2], ip[3], port);
+    println!("Escape character is '^]'.");
+
+    let mut rx_buf = [0u8; 1024];
+    if let Ok(n) = crate::net::socket::socket_recv(sock_id, &mut rx_buf, 1000) {
+        if n > 0 {
+            if let Ok(s) = core::str::from_utf8(&rx_buf[..n]) {
+                crate::print!("{}", s);
+            }
+        }
+    }
+
+    let _ = crate::net::socket::socket_close(sock_id);
+    println!("Connection closed by foreign host.");
 }
 
 fn cmd_clear() {

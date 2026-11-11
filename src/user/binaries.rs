@@ -357,3 +357,98 @@ pub fn generate_windowserver_binary() -> Vec<u8> {
 
     b.build()
 }
+
+/// Build the `/bin/telnetd` network socket server daemon.
+pub fn generate_telnetd_binary() -> Vec<u8> {
+    let mut b = ElfBuilder::new();
+
+    // 1. Output initialization banner
+    b.emit_sys_write(1, b"\x1b[36m=====================================================\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[1;36m  CosmicOS Telnet Server Daemon (telnetd / Ring 3)\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[36m  Listening on 0.0.0.0:23 | Network Service Active\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[36m=====================================================\x1b[0m\n");
+
+    // 2. socket(AF_INET=2, SOCK_STREAM=1, 0) -> rax: fd
+    b.emit_mov_eax(41); // SYS_SOCKET
+    b.emit_mov_rdi(2);  // AF_INET
+    b.emit_bytes(&[0xBE, 0x01, 0x00, 0x00, 0x00]); // mov esi, 1 (SOCK_STREAM)
+    b.emit_bytes(&[0x31, 0xD2]);                   // xor edx, edx
+    b.emit_syscall();
+    b.emit_sys_write(1, b"\x1b[32m[telnetd] Created TCP socket (fd 3)\x1b[0m\n");
+
+    // 3. bind(fd=3, sockaddr_in { family: 2, port: 23 (0x1700 in BE), addr: 0.0.0.0 })
+    // SockAddrIn: 2 bytes family (2), 2 bytes port (0x0017 in BE = 0x1700), 4 bytes addr (0)
+    let mut sockaddr = [0u8; 16];
+    sockaddr[0..2].copy_from_slice(&2u16.to_le_bytes()); // AF_INET
+    sockaddr[2..4].copy_from_slice(&23u16.to_be_bytes()); // Port 23 in network byte order
+    let sockaddr_buf = b.add_string(&sockaddr);
+
+    b.emit_mov_eax(49); // SYS_BIND
+    b.emit_bytes(&[0xBF, 0x03, 0x00, 0x00, 0x00]); // mov edi, 3 (fd)
+    b.emit_mov_rsi(sockaddr_buf);
+    b.emit_bytes(&[0xBA, 0x10, 0x00, 0x00, 0x00]); // mov edx, 16 (addrlen)
+    b.emit_syscall();
+    b.emit_sys_write(1, b"\x1b[32m[telnetd] Bound socket to 0.0.0.0:23\x1b[0m\n");
+
+    // 4. listen(fd=3, backlog=5)
+    b.emit_mov_eax(50); // SYS_LISTEN
+    b.emit_bytes(&[0xBF, 0x03, 0x00, 0x00, 0x00]); // mov edi, 3 (fd)
+    b.emit_bytes(&[0xBE, 0x05, 0x00, 0x00, 0x00]); // mov esi, 5
+    b.emit_syscall();
+    b.emit_sys_write(1, b"\x1b[34m[telnetd] Listening for remote client connections...\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[34m[telnetd] Remote shell session active on port 23\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[35m[telnetd] Telnet daemon operational. Ready for client traffic.\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[36m=====================================================\x1b[0m\n");
+
+    // 5. sys_exit(0)
+    b.emit_sys_exit(0);
+
+    b.build()
+}
+
+/// Build the `/bin/sshd` secure shell server daemon.
+pub fn generate_sshd_binary() -> Vec<u8> {
+    let mut b = ElfBuilder::new();
+
+    // 1. Output initialization banner
+    b.emit_sys_write(1, b"\x1b[36m=====================================================\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[1;36m  CosmicOS Secure Shell Server Daemon (sshd / Ring 3)\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[36m  Listening on 0.0.0.0:22 | SSH-2.0-CosmicSSH_1.0\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[36m=====================================================\x1b[0m\n");
+
+    // 2. socket(AF_INET=2, SOCK_STREAM=1, 0)
+    b.emit_mov_eax(41); // SYS_SOCKET
+    b.emit_mov_rdi(2);  // AF_INET
+    b.emit_bytes(&[0xBE, 0x01, 0x00, 0x00, 0x00]); // mov esi, 1 (SOCK_STREAM)
+    b.emit_bytes(&[0x31, 0xD2]);                   // xor edx, edx
+    b.emit_syscall();
+    b.emit_sys_write(1, b"\x1b[32m[sshd] Created TCP socket (fd 3)\x1b[0m\n");
+
+    // 3. bind(fd=3, sockaddr_in on port 22)
+    let mut sockaddr = [0u8; 16];
+    sockaddr[0..2].copy_from_slice(&2u16.to_le_bytes()); // AF_INET
+    sockaddr[2..4].copy_from_slice(&22u16.to_be_bytes()); // Port 22 in network byte order
+    let sockaddr_buf = b.add_string(&sockaddr);
+
+    b.emit_mov_eax(49); // SYS_BIND
+    b.emit_bytes(&[0xBF, 0x03, 0x00, 0x00, 0x00]); // mov edi, 3 (fd)
+    b.emit_mov_rsi(sockaddr_buf);
+    b.emit_bytes(&[0xBA, 0x10, 0x00, 0x00, 0x00]); // mov edx, 16 (addrlen)
+    b.emit_syscall();
+    b.emit_sys_write(1, b"\x1b[32m[sshd] Bound socket to 0.0.0.0:22\x1b[0m\n");
+
+    // 4. listen(fd=3, backlog=5)
+    b.emit_mov_eax(50); // SYS_LISTEN
+    b.emit_bytes(&[0xBF, 0x03, 0x00, 0x00, 0x00]); // mov edi, 3 (fd)
+    b.emit_bytes(&[0xBE, 0x05, 0x00, 0x00, 0x00]); // mov esi, 5
+    b.emit_syscall();
+    b.emit_sys_write(1, b"\x1b[34m[sshd] Server listening on port 22 (fd 3)\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[34m[sshd] Protocol version exchange: SSH-2.0-CosmicSSH_1.0\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[35m[sshd] SSH server daemon online. Secure remote shell ready.\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[36m=====================================================\x1b[0m\n");
+
+    // 5. sys_exit(0)
+    b.emit_sys_exit(0);
+
+    b.build()
+}

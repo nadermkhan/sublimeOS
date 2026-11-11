@@ -307,6 +307,66 @@ pub fn sched_getaffinity(pid: i32, mask_ptr: *mut u64) -> i32 {
     }
 }
 
+pub use crate::task::process::SockAddrIn;
+
+pub const AF_INET: i32 = 2;
+pub const SOCK_STREAM: i32 = 1;
+
+/// POSIX socket() system call wrapper
+pub fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
+    unsafe {
+        syscall3(SYS_SOCKET, domain as u64, sock_type as u64, protocol as u64) as i32
+    }
+}
+
+/// POSIX bind() system call wrapper
+pub fn bind(fd: usize, addr: &SockAddrIn) -> i32 {
+    unsafe {
+        syscall3(SYS_BIND, fd as u64, addr as *const SockAddrIn as u64, core::mem::size_of::<SockAddrIn>() as u64) as i32
+    }
+}
+
+/// POSIX listen() system call wrapper
+pub fn listen(fd: usize, backlog: i32) -> i32 {
+    unsafe {
+        syscall2(SYS_LISTEN, fd as u64, backlog as u64) as i32
+    }
+}
+
+/// POSIX accept() system call wrapper
+pub fn accept(fd: usize, addr_out: Option<&mut SockAddrIn>) -> i32 {
+    let (ptr, len_ptr) = if let Some(a) = addr_out {
+        let mut len = core::mem::size_of::<SockAddrIn>() as u32;
+        (a as *mut SockAddrIn as u64, &mut len as *mut u32 as u64)
+    } else {
+        (0, 0)
+    };
+    unsafe {
+        syscall3(SYS_ACCEPT, fd as u64, ptr, len_ptr) as i32
+    }
+}
+
+/// POSIX connect() system call wrapper
+pub fn connect(fd: usize, addr: &SockAddrIn) -> i32 {
+    unsafe {
+        syscall3(SYS_CONNECT, fd as u64, addr as *const SockAddrIn as u64, core::mem::size_of::<SockAddrIn>() as u64) as i32
+    }
+}
+
+/// POSIX send() system call wrapper
+pub fn send(fd: usize, buf: &[u8], flags: i32) -> isize {
+    unsafe {
+        syscall6(SYS_SENDTO, fd as u64, buf.as_ptr() as u64, buf.len() as u64, flags as u64, 0, 0) as isize
+    }
+}
+
+/// POSIX recv() system call wrapper
+pub fn recv(fd: usize, buf: &mut [u8], flags: i32) -> isize {
+    unsafe {
+        syscall6(SYS_RECVFROM, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64, flags as u64, 0, 0) as isize
+    }
+}
+
 /// POSIX exit() system call wrapper
 pub fn exit(status: i32) -> ! {
     unsafe {

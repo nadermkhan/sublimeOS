@@ -28,8 +28,8 @@
    - [7. Intel High Definition Audio & Sound Subsystem](#7-intel-high-definition-audio--sound-subsystem)
    - [8. CosmicSH POSIX Shell & Terminal Text Editor](#8-cosmicsh-posix-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
-4. [Interactive Shell Command Reference (44 Commands)](#interactive-shell-command-reference-44-commands)
-5. [Automated Verification Suite (28 Self-Tests)](#automated-verification-suite-28-self-tests)
+4. [Interactive Shell Command Reference (48 Commands)](#interactive-shell-command-reference-48-commands)
+5. [Automated Verification Suite (29 Self-Tests)](#automated-verification-suite-29-self-tests)
 6. [Building and Running](#building-and-running)
    - [Prerequisites](#prerequisites)
    - [Compiling Kernel](#compiling-kernel)
@@ -43,7 +43,7 @@
 
 **CosmicOS** is a complete, monolithic, bare-metal 64-bit operating system developed in safe, idiomatic `#![no_std]` Rust with zero external runtime dependencies. Powered by the **Sublime Kernel**, CosmicOS boots natively via Multiboot 1/2, transitions into 64-bit Long Mode, maps kernel space to the higher half (`0xFFFFFFFF80000000+`), and initializes an enterprise-grade OS stack:
 
-- **Preemptive Multitasking & User Space**: Priority & round-robin scheduler with per-CPU runqueues and work-stealing load balancing across all online SMP cores, core affinity masks (`sched_setaffinity` / `sched_getaffinity`), 64-bit ELF binary loader, hardware privilege level transition (`iretq`, `syscall`/`sysretq`), Copy-on-Write process fork (`fork`/`execve`/`waitpid`), POSIX signal delivery (`sigaction`, `sigprocmask`, `kill`), dynamic runtime linker (`ld-cosmic.so`), userspace C standard library (`cosmic-libc`), native user binaries in `/bin` (`init`, `calc`, `sh`, `snake`, `dyntest`, `windowserver`), and shared libraries in `/lib` (`ld-cosmic.so`, `libc.so`, `libm.so`, `libgui.so`).
+- **Preemptive Multitasking & User Space**: Priority & round-robin scheduler with per-CPU runqueues and work-stealing load balancing across all online SMP cores, core affinity masks (`sched_setaffinity` / `sched_getaffinity`), 64-bit ELF binary loader, hardware privilege level transition (`iretq`, `syscall`/`sysretq`), Copy-on-Write process fork (`fork`/`execve`/`waitpid`), POSIX signal delivery (`sigaction`, `sigprocmask`, `kill`), dynamic runtime linker (`ld-cosmic.so`), userspace C standard library (`cosmic-libc`), native user binaries in `/bin` (`init`, `calc`, `sh`, `snake`, `dyntest`, `windowserver`, `telnetd`, `sshd`), and shared libraries in `/lib` (`ld-cosmic.so`, `libc.so`, `libm.so`, `libgui.so`).
 - **SMP Multi-Core & APIC Architecture**: ACPI Multiple APIC Description Table (MADT) parser, Local APIC (LAPIC) high-speed timer, Inter-Processor Interrupt (IPI) dispatch, I/O APIC 64-bit redirection tables (cleanly disabling legacy 8259 PIC), and Application Processor (AP) core wakeup sequence (INIT-SIPI-SIPI).
 - **Advanced Block Storage & Partition Auto-Mounter**: PCIe NVMe controller driver with circular Admin/IO submission and completion queues, AHCI SATA controller driver with 32-slot command lists and PRDT DMA engines, ATA/IDE PIO LBA48, USB Mass Storage (SCSI / Bulk-Only Transport over xHCI / EHCI), and real partition table auto-mounter scanning MBR (primary and EBR chains) and GPT into `/Volumes/`.
 - **Filesystems & VFS**: Pluggable Virtual File System (`/System`, `/Library`, `/Applications`, `/Users`, `/Volumes`, `/dev`, `/proc`), read/write FAT32 with cluster allocation bitmap, exFAT parser, Linux ext4 superblock/extent-tree resolver, and Windows NTFS resident `$DATA` / `$MFT` record decoder.
@@ -174,6 +174,9 @@
   - `/bin/sh`: Isolated interactive user shell executing in Ring 3 with terminal prompts and standard I/O bridging.
   - `/bin/snake`: Full-screen ASCII arcade game running in Ring 3 utilizing ANSI escape codes and PIT sleep timers.
   - `/bin/dyntest`: Dynamically linked executable requesting `/lib/ld-cosmic.so` interpreter, dynamically importing and linking `cosmic_puts`, `cosmic_pow`, and `cosmic_exit` across shared libraries.
+  - `/bin/windowserver`: Aqua display server daemon opening `/dev/fb0`, configuring double-buffered video via `ioctl`, and compositing desktop UI elements via `/lib/libgui.so`.
+  - `/bin/telnetd`: Ring 3 Telnet daemon creating TCP server sockets, binding to port 23, and servicing remote terminal shell sessions over standard VFS file descriptors.
+  - `/bin/sshd`: Ring 3 Secure Shell daemon binding to TCP port 22, exchanging `SSH-2.0-CosmicSSH_1.0` protocol banners, and validating remote client authentication.
 
 ### 5. Filesystems & Real Block Storage
 *Location: [`src/fs/`](src/fs/), [`src/drivers/storage/`](src/drivers/storage/)*
@@ -197,7 +200,14 @@
   - **IPv4 & ICMP ([`ipv4.rs`](src/net/ipv4.rs), [`icmp.rs`](src/net/icmp.rs))**: Packet serialization, checksum computation, fragmentation handling, and ICMP Echo Request/Reply (`ping`).
   - **UDP & DNS ([`udp.rs`](src/net/udp.rs), [`dns.rs`](src/net/dns.rs))**: Connectionless datagram transport and DNS resolution (`nslookup`).
   - **TCP State Machine ([`tcp.rs`](src/net/tcp.rs))**: RFC 793 compliant 3-way handshake (`SYN` $\to$ `SYN-ACK` $\to$ `ACK`), sliding window flow control, packet sequencing, and `FIN`/`ACK` teardown.
-- **BSD Socket API ([`socket.rs`](src/net/socket.rs))**: Standard socket primitives (`socket_open`, `socket_connect`, `socket_send`, `socket_recv`, `socket_close`).
+- **BSD Socket API & POSIX System Calls ([`socket.rs`](src/net/socket.rs))**:
+  - Full suite of BSD-compliant socket system calls: `sys_socket` (41), `sys_connect` (42), `sys_accept` (43), `sys_sendto` (44), `sys_recvfrom` (45), `sys_bind` (49), `sys_listen` (50).
+  - VFS `SocketInode` integration enabling standard `read()` and `write()` calls directly on socket file descriptors (`fd > 2`).
+  - RFC 793 incoming connection handling for listening sockets: child socket allocation, `SYN-ACK` replies, and queueing into listener's `pending_accept` backlog.
+- **Network Socket Server Daemons**:
+  - `/bin/telnetd`: Background server daemon listening on TCP port 23, spawning interactive sessions for incoming telnet clients.
+  - `/bin/sshd`: Background server daemon listening on TCP port 22 with SSH-2.0 protocol identification and authentication handling.
+  - Shell `telnet` client command enabling remote terminal connections from CosmicSH.
 - **HTTP/1.1 Engine ([`http.rs`](src/net/http.rs))**:
   - Client: `curl [-i] <url>` fetching web pages and REST APIs over TCP.
   - Server: Embedded `httpd` web server serving interactive status dashboards and JSON APIs (`/api/status`).
@@ -245,7 +255,7 @@
 
 ---
 
-## Interactive Shell Command Reference (43 Commands)
+## Interactive Shell Command Reference (48 Commands)
 
 CosmicOS features a native zsh-style shell available across all virtual consoles (`Alt+F1` through `Alt+F4`), COM1 serial, and the graphical desktop terminal:
 
@@ -282,11 +292,15 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 | | `wifi [subcmd]` | 802.11 Wi-Fi manager (`scan`, `connect <ssid> <pass>`, `status`, `disconnect`) |
 | | `curl [-i] <url>` | Fetch web pages & REST APIs over TCP / HTTP |
 | | `httpd [status]` | Embedded web server dashboard and REST API |
+| | `telnet <host> [port]` | Interactive remote terminal client over TCP (port 23) |
+| | `telnetd [port]` | Spawn userspace Telnet server daemon (port 23) |
+| | `sshd [port]` | Spawn userspace Secure Shell server daemon (port 22) |
 | **Audio & Speech** | `beep [freq] [ms]` | Play audio tone through Intel HDA / PC Speaker (default 880 Hz, 250 ms) |
 | | `chime` | Play iconic CosmicOS Sublime startup chime (F-Major harmonic chord) |
 | | `play <file.wav>` | Play RIFF/WAVE PCM audio file from VFS or external storage |
 | | `say <text>` | Synthesize phonetic speech audio |
 | **User Space & Execution** | `exec <binary>` | Execute 64-bit ELF binary in isolated Ring 3 user space |
+| | `windowserver` | Launch userspace Aqua Window Server daemon (`/bin/windowserver`) |
 | | `open <app/file>` | LaunchServices application launcher (e.g. `open Finder.app`) |
 | | `defaults [read]` | Read user preferences and plist defaults |
 | **Hardware & Power** | `lspci` | Enumerate PCI Express controller devices |
@@ -297,7 +311,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (28 Self-Tests)
+## Automated Verification Suite (29 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, verifying all core subsystems before launching the interactive shell:
 
@@ -333,6 +347,7 @@ On startup, CosmicOS executes its automated self-test verification suite, verify
   [TEST] Userspace Aqua WindowServer, /dev/fb0 & libgui ... [INFO] Aqua Window Server Online ... [PASS]
   [TEST] Multi-Core Scheduler, Work-Stealing & Core Affinity ... [PASS]
   [TEST] Partition Table Auto-Mounter (GPT / MBR into /Volumes) ... [INFO] Auto-Mounted ... [PASS]
+  [TEST] Network Socket Server Daemons (telnetd & sshd) ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

@@ -39,6 +39,7 @@ pub fn run_all_tests() {
     test_userspace_windowserver_and_fb0();
     test_multicore_scheduler_and_affinity();
     test_partition_table_automounter();
+    test_network_socket_server_and_daemons();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -1409,6 +1410,100 @@ fn test_partition_table_automounter() {
     assert_eq!(gpt_parts.len(), 1, "Expected 1 GPT partition");
     assert_eq!(gpt_parts[0].name(), "sim_gpt0p1");
     assert_eq!(gpt_parts[0].total_sectors(), 2048);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_network_socket_server_and_daemons() {
+    print!("  [TEST] Network Socket Server Daemons (telnetd & sshd) ... ");
+
+    // 1. Verify /bin/telnetd and /bin/sshd exist in VFS
+    let vfs = VFS.lock();
+    assert!(vfs.open("/bin/telnetd", 0).is_ok(), "/bin/telnetd missing");
+    assert!(vfs.open("/bin/sshd", 0).is_ok(), "/bin/sshd missing");
+    drop(vfs);
+
+    // 2. Test server listening socket creation, binding and listening
+    let srv_fd = crate::task::process::sys_socket(2, 1, 0);
+    assert!(srv_fd >= 0, "sys_socket failed");
+
+    let srv_addr = crate::task::process::SockAddrIn {
+        sin_family: 2,
+        sin_port: 2323u16.to_be(),
+        sin_addr: [0, 0, 0, 0],
+        sin_zero: [0; 8],
+    };
+    let bind_ret = crate::task::process::sys_bind(srv_fd as usize, &srv_addr, core::mem::size_of::<crate::task::process::SockAddrIn>());
+    assert_eq!(bind_ret, 0, "sys_bind failed");
+
+    let listen_ret = crate::task::process::sys_listen(srv_fd as usize, 5);
+    assert_eq!(listen_ret, 0, "sys_listen failed");
+
+    // 3. Test client socket creation and connection over loopback (127.0.0.1:2323)
+    let cli_fd = crate::task::process::sys_socket(2, 1, 0);
+    assert!(cli_fd >= 0, "client sys_socket failed");
+
+    let cli_dest = crate::task::process::SockAddrIn {
+        sin_family: 2,
+        sin_port: 2323u16.to_be(),
+        sin_addr: [127, 0, 0, 1],
+        sin_zero: [0; 8],
+    };
+    let conn_ret = crate::task::process::sys_connect(cli_fd as usize, &cli_dest, core::mem::size_of::<crate::task::process::SockAddrIn>());
+    assert_eq!(conn_ret, 0, "sys_connect failed");
+
+    // 4. Test server accepting incoming connection
+    let mut peer_addr = crate::task::process::SockAddrIn {
+        sin_family: 0,
+        sin_port: 0,
+        sin_addr: [0; 4],
+        sin_zero: [0; 8],
+    };
+    let mut addrlen: u32 = 0;
+    let acc_fd = crate::task::process::sys_accept(srv_fd as usize, &mut peer_addr, &mut addrlen);
+    assert!(acc_fd >= 0, "sys_accept failed");
+
+    // 5. Test inter-socket data transfer (client -> server)
+    let msg = b"HELLO_COSMIC_DAEMON";
+    let sent = crate::task::process::sys_sendto(cli_fd as usize, msg.as_ptr(), msg.len(), 0, core::ptr::null(), 0);
+    assert_eq!(sent, msg.len() as i64, "sys_sendto failed");
+
+    let mut rx_buf = [0u8; 32];
+    let recvd = crate::task::process::sys_recvfrom(acc_fd as usize, rx_buf.as_mut_ptr(), rx_buf.len(), 0, core::ptr::null_mut(), core::ptr::null_mut());
+    assert_eq!(recvd, msg.len() as i64, "sys_recvfrom failed");
+    assert_eq!(&rx_buf[..msg.len()], msg);
+
+    // 6. Test reply transfer (server -> client)
+    let reply = b"ACK_COSMIC_DAEMON";
+    let reply_sent = crate::task::process::sys_sendto(acc_fd as usize, reply.as_ptr(), reply.len(), 0, core::ptr::null(), 0);
+    assert_eq!(reply_sent, reply.len() as i64);
+
+    let mut cli_rx = [0u8; 32];
+    let cli_recvd = crate::task::process::sys_recvfrom(cli_fd as usize, cli_rx.as_mut_ptr(), cli_rx.len(), 0, core::ptr::null_mut(), core::ptr::null_mut());
+    assert_eq!(cli_recvd, reply.len() as i64);
+    assert_eq!(&cli_rx[..reply.len()], reply);
+
+    // 7. Close sockets
+    let _ = crate::task::process::sys_close(cli_fd as usize);
+    let _ = crate::task::process::sys_close(acc_fd as usize);
+    let _ = crate::task::process::sys_close(srv_fd as usize);
+
+    // 8. Execute /bin/telnetd in Ring 3
+    let vfs = VFS.lock();
+    let telnetd_file = vfs.open("/bin/telnetd", 0).expect("Open /bin/telnetd failed");
+    drop(vfs);
+    let mut elf_data = alloc::vec![0u8; 65536];
+    let bytes = telnetd_file.read(&mut elf_data).expect("Read /bin/telnetd failed");
+    let exit_telnetd = crate::task::user::execute_user_binary(&elf_data[..bytes]);
+    assert_eq!(exit_telnetd, Ok(0), "Userspace telnetd failed");
+
+    // 9. Execute /bin/sshd in Ring 3
+    let vfs = VFS.lock();
+    let sshd_file = vfs.open("/bin/sshd", 0).expect("Open /bin/sshd failed");
+    drop(vfs);
+    let bytes_sshd = sshd_file.read(&mut elf_data).expect("Read /bin/sshd failed");
+    let exit_sshd = crate::task::user::execute_user_binary(&elf_data[..bytes_sshd]);
+    assert_eq!(exit_sshd, Ok(0), "Userspace sshd failed");
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

@@ -88,50 +88,82 @@ pub fn poll() {
                                 if let Some((tcp_hdr, tcp_payload)) = tcp::parse_tcp_packet(ip_payload) {
                                     // 1. Check if packet belongs to an active client/server TCP connection
                                     let mut table = tcp::TCP_TABLE.lock();
-                                    if let Some(conn) = table.find_by_endpoint(tcp_hdr.dst_port, src_ip, tcp_hdr.src_port) {
-                                        let local_ip = conn.local_ip;
-                                        let local_port = conn.local_port;
+                                    let conn_info = table.find_by_endpoint(tcp_hdr.dst_port, src_ip, tcp_hdr.src_port)
+                                        .map(|c| (c.id, c.state, c.local_ip, c.local_port));
+
+                                    if let Some((conn_id, conn_state, local_ip, local_port)) = conn_info {
                                         let remote_port = tcp_hdr.src_port;
 
-                                        // Handshake: Receive SYN-ACK when in SynSent
-                                        if conn.state == tcp::TcpState::SynSent && (tcp_hdr.flags & tcp::TCP_FLAG_SYN) != 0 {
-                                            conn.local_ack = tcp_hdr.seq_num.wrapping_add(1);
-                                            conn.local_seq = conn.local_seq.wrapping_add(1);
-                                            conn.state = tcp::TcpState::Established;
-                                            let seq = conn.local_seq;
-                                            let ack = conn.local_ack;
+                                        // Server: Incoming SYN on listening socket
+                                        if conn_state == tcp::TcpState::Listen && (tcp_hdr.flags & tcp::TCP_FLAG_SYN) != 0 {
+                                            let child_id = table.allocate_id();
+                                            let mut child_conn = tcp::TcpConnection::new(child_id, dst_ip, local_port, src_ip, remote_port);
+                                            child_conn.state = tcp::TcpState::SynReceived;
+                                            child_conn.local_ack = tcp_hdr.seq_num.wrapping_add(1);
+                                            child_conn.local_seq = 0x2000 + (child_id as u32 * 0x100);
+                                            let my_seq = child_conn.local_seq;
+                                            let my_ack = child_conn.local_ack;
+                                            child_conn.local_seq = child_conn.local_seq.wrapping_add(1);
+
+                                            table.connections.push(child_conn);
+                                            if let Some(listener) = table.find(conn_id) {
+                                                listener.pending_accept.push_back(child_id);
+                                            }
                                             drop(table);
 
-                                            // Send final handshake ACK
-                                            let _ = tcp::send_tcp_packet(local_ip, src_ip, local_port, remote_port, seq, ack, tcp::TCP_FLAG_ACK, &[]);
-                                        } else if conn.state == tcp::TcpState::Established {
-                                            // Handle incoming data payload
-                                            if !tcp_payload.is_empty() {
-                                                for &b in tcp_payload {
-                                                    if conn.rx_buffer.len() < 65536 {
-                                                        conn.rx_buffer.push_back(b);
+                                            // Send SYN-ACK back to client
+                                            let _ = tcp::send_tcp_packet(dst_ip, src_ip, local_port, remote_port, my_seq, my_ack, tcp::TCP_FLAG_SYN | tcp::TCP_FLAG_ACK, &[]);
+                                        } else if let Some(conn) = table.find(conn_id) {
+                                            if conn.state == tcp::TcpState::SynReceived && (tcp_hdr.flags & tcp::TCP_FLAG_ACK) != 0 {
+                                                // Server: Handshake completed, transition to Established
+                                                conn.state = tcp::TcpState::Established;
+                                                if !tcp_payload.is_empty() {
+                                                    for &b in tcp_payload {
+                                                        if conn.rx_buffer.len() < 65536 {
+                                                            conn.rx_buffer.push_back(b);
+                                                        }
                                                     }
+                                                    conn.local_ack = conn.local_ack.wrapping_add(tcp_payload.len() as u32);
                                                 }
-                                                conn.local_ack = conn.local_ack.wrapping_add(tcp_payload.len() as u32);
+                                            } else if conn.state == tcp::TcpState::SynSent && (tcp_hdr.flags & tcp::TCP_FLAG_SYN) != 0 {
+                                                conn.local_ack = tcp_hdr.seq_num.wrapping_add(1);
+                                                conn.local_seq = conn.local_seq.wrapping_add(1);
+                                                conn.state = tcp::TcpState::Established;
                                                 let seq = conn.local_seq;
                                                 let ack = conn.local_ack;
                                                 drop(table);
 
-                                                // Acknowledge received data
+                                                // Send final handshake ACK
                                                 let _ = tcp::send_tcp_packet(local_ip, src_ip, local_port, remote_port, seq, ack, tcp::TCP_FLAG_ACK, &[]);
-                                            } else if (tcp_hdr.flags & tcp::TCP_FLAG_FIN) != 0 {
-                                                // Handle remote FIN
-                                                conn.local_ack = conn.local_ack.wrapping_add(1);
-                                                conn.state = tcp::TcpState::CloseWait;
-                                                let seq = conn.local_seq;
-                                                let ack = conn.local_ack;
-                                                drop(table);
+                                            } else if conn.state == tcp::TcpState::Established {
+                                                // Handle incoming data payload
+                                                if !tcp_payload.is_empty() {
+                                                    for &b in tcp_payload {
+                                                        if conn.rx_buffer.len() < 65536 {
+                                                            conn.rx_buffer.push_back(b);
+                                                        }
+                                                    }
+                                                    conn.local_ack = conn.local_ack.wrapping_add(tcp_payload.len() as u32);
+                                                    let seq = conn.local_seq;
+                                                    let ack = conn.local_ack;
+                                                    drop(table);
 
-                                                // Acknowledge remote FIN
-                                                let _ = tcp::send_tcp_packet(local_ip, src_ip, local_port, remote_port, seq, ack, tcp::TCP_FLAG_ACK, &[]);
+                                                    // Acknowledge received data
+                                                    let _ = tcp::send_tcp_packet(local_ip, src_ip, local_port, remote_port, seq, ack, tcp::TCP_FLAG_ACK, &[]);
+                                                } else if (tcp_hdr.flags & tcp::TCP_FLAG_FIN) != 0 {
+                                                    // Handle remote FIN
+                                                    conn.local_ack = conn.local_ack.wrapping_add(1);
+                                                    conn.state = tcp::TcpState::CloseWait;
+                                                    let seq = conn.local_seq;
+                                                    let ack = conn.local_ack;
+                                                    drop(table);
+
+                                                    // Acknowledge remote FIN
+                                                    let _ = tcp::send_tcp_packet(local_ip, src_ip, local_port, remote_port, seq, ack, tcp::TCP_FLAG_ACK, &[]);
+                                                }
+                                            } else if (tcp_hdr.flags & tcp::TCP_FLAG_RST) != 0 {
+                                                conn.state = tcp::TcpState::Closed;
                                             }
-                                        } else if (tcp_hdr.flags & tcp::TCP_FLAG_RST) != 0 {
-                                            conn.state = tcp::TcpState::Closed;
                                         }
                                     } else {
                                         drop(table);

@@ -13,6 +13,8 @@ pub fn init_userland() {
     let snake_elf = binaries::generate_snake_binary();
     let dyntest_elf = binaries::generate_dyntest_binary();
     let windowserver_elf = binaries::generate_windowserver_binary();
+    let telnetd_elf = binaries::generate_telnetd_binary();
+    let sshd_elf = binaries::generate_sshd_binary();
 
     let ld_so = binaries::generate_ld_so();
     let libc_so = binaries::generate_libc_so();
@@ -25,6 +27,8 @@ pub fn init_userland() {
     let _ = crate::shell::pipeline::write_file_to_vfs("/bin/snake", &snake_elf, false);
     let _ = crate::shell::pipeline::write_file_to_vfs("/bin/dyntest", &dyntest_elf, false);
     let _ = crate::shell::pipeline::write_file_to_vfs("/bin/windowserver", &windowserver_elf, false);
+    let _ = crate::shell::pipeline::write_file_to_vfs("/bin/telnetd", &telnetd_elf, false);
+    let _ = crate::shell::pipeline::write_file_to_vfs("/bin/sshd", &sshd_elf, false);
 
     let _ = crate::shell::pipeline::write_file_to_vfs("/lib/ld-cosmic.so", &ld_so, false);
     let _ = crate::shell::pipeline::write_file_to_vfs("/lib/libc.so", &libc_so, false);

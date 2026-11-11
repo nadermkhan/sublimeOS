@@ -40,6 +40,13 @@ pub extern "C" fn syscall_dispatcher(
             0
         }
         SYS_GETPID => crate::task::process::get_current_pid() as i64,
+        SYS_SOCKET => crate::task::process::sys_socket(a1 as i32, a2 as i32, a3 as i32),
+        SYS_CONNECT => crate::task::process::sys_connect(a1 as usize, a2 as *const crate::task::process::SockAddrIn, a3 as usize),
+        SYS_ACCEPT => crate::task::process::sys_accept(a1 as usize, a2 as *mut crate::task::process::SockAddrIn, a3 as *mut u32),
+        SYS_SENDTO => crate::task::process::sys_sendto(a1 as usize, a2 as *const u8, a3 as usize, _a4 as i32, _a5 as *const crate::task::process::SockAddrIn, _a6 as usize),
+        SYS_RECVFROM => crate::task::process::sys_recvfrom(a1 as usize, a2 as *mut u8, a3 as usize, _a4 as i32, _a5 as *mut crate::task::process::SockAddrIn, _a6 as *mut u32),
+        SYS_BIND => crate::task::process::sys_bind(a1 as usize, a2 as *const crate::task::process::SockAddrIn, a3 as usize),
+        SYS_LISTEN => crate::task::process::sys_listen(a1 as usize, a2 as i32),
         SYS_FORK => crate::task::process::sys_fork() as i64,
         SYS_EXECVE => crate::task::process::sys_execve(a1 as *const u8, a2 as *const *const u8, a3 as *const *const u8) as i64,
         SYS_WAIT4 => crate::task::process::sys_waitpid(a1 as i64, a2 as *mut i32, a3 as i32) as i64,

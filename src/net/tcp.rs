@@ -168,6 +168,7 @@ pub struct TcpConnection {
     pub local_ack: u32,
     pub remote_win: u16,
     pub rx_buffer: VecDeque<u8>,
+    pub pending_accept: VecDeque<usize>,
 }
 
 impl TcpConnection {
@@ -183,6 +184,7 @@ impl TcpConnection {
             local_ack: 0,
             remote_win: 65535,
             rx_buffer: VecDeque::with_capacity(8192),
+            pending_accept: VecDeque::new(),
         }
     }
 }
@@ -219,8 +221,16 @@ impl TcpTable {
     }
 
     pub fn find_by_endpoint(&mut self, local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> Option<&mut TcpConnection> {
+        // 1. First look for exact match (local_port + remote_ip + remote_port)
+        if let Some(pos) = self.connections.iter().position(|c| {
+            c.local_port == local_port && c.remote_port == remote_port && (c.remote_ip == remote_ip || remote_ip == [0, 0, 0, 0]) && c.state != TcpState::Closed
+        }) {
+            return Some(&mut self.connections[pos]);
+        }
+
+        // 2. Look for listening socket on local_port
         self.connections.iter_mut().find(|c| {
-            c.local_port == local_port && (c.remote_port == 0 || c.remote_port == remote_port) && (c.remote_ip == [0, 0, 0, 0] || c.remote_ip == remote_ip)
+            c.local_port == local_port && c.state == TcpState::Listen
         })
     }
 }

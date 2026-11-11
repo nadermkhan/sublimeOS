@@ -28,6 +28,20 @@ pub fn sys_write(fd: usize, buf: *const u8, count: usize) -> isize {
     }
 
     // Write to VFS file descriptor if available
+    let current_pid = crate::task::process::get_current_pid();
+    if let Some(proc) = crate::task::process::get_process(current_pid) {
+        let p = proc.lock();
+        if fd < p.fd_table.len() {
+            if let Some(ref file) = p.fd_table[fd] {
+                let f = file.clone();
+                drop(p);
+                if let Ok(n) = f.write(slice) {
+                    return n as isize;
+                }
+            }
+        }
+    }
+
     count as isize
 }
 
@@ -44,6 +58,21 @@ pub fn sys_read(fd: usize, buf: *mut u8, count: usize) -> isize {
             return 1;
         }
         return 0;
+    }
+
+    let current_pid = crate::task::process::get_current_pid();
+    if let Some(proc) = crate::task::process::get_process(current_pid) {
+        let p = proc.lock();
+        if fd < p.fd_table.len() {
+            if let Some(ref file) = p.fd_table[fd] {
+                let f = file.clone();
+                drop(p);
+                let slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
+                if let Ok(n) = f.read(slice) {
+                    return n as isize;
+                }
+            }
+        }
     }
 
     0

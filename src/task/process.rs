@@ -602,3 +602,163 @@ pub fn sys_sched_getaffinity(pid: i32, _len: usize, mask_ptr: *mut u64) -> i32 {
     }
     0
 }
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SockAddrIn {
+    pub sin_family: u16,   // AF_INET = 2
+    pub sin_port: u16,     // Network byte order (big endian)
+    pub sin_addr: [u8; 4], // IPv4 address
+    pub sin_zero: [u8; 8],
+}
+
+pub fn sys_socket(domain: i32, _sock_type: i32, _protocol: i32) -> i64 {
+    if domain != 2 && domain != 1 {
+        return -97; // -EAFNOSUPPORT
+    }
+
+    let sock_id = match crate::net::socket::socket_open() {
+        Ok(id) => id,
+        Err(_) => return -24, // -EMFILE
+    };
+
+    let inode = Arc::new(IrqSafeSpinlock::new(crate::net::socket::SocketInode { sock_id }));
+    let file = Arc::new(crate::fs::vfs::File::new(inode, crate::user::libc::O_RDWR));
+
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        if let Some(fd) = proc.lock().alloc_fd(file) {
+            return fd as i64;
+        }
+    }
+
+    let _ = crate::net::socket::socket_close(sock_id);
+    -24 // -EMFILE
+}
+
+fn get_sock_id(fd: usize) -> Option<usize> {
+    let current_pid = get_current_pid();
+    let proc = get_process(current_pid)?;
+    let p = proc.lock();
+    if fd < p.fd_table.len() {
+        if let Some(ref file) = p.fd_table[fd] {
+            let stat = file.inode.lock().stat();
+            if stat.inode >= 200 {
+                return Some((stat.inode - 200) as usize);
+            }
+        }
+    }
+    None
+}
+
+pub fn sys_bind(fd: usize, sockaddr_ptr: *const SockAddrIn, _addrlen: usize) -> i64 {
+    if sockaddr_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let sock_id = match get_sock_id(fd) {
+        Some(id) => id,
+        None => return -88, // -ENOTSOCK
+    };
+    let addr = unsafe { *sockaddr_ptr };
+    let port = u16::from_be(addr.sin_port);
+    match crate::net::socket::socket_bind(sock_id, addr.sin_addr, port) {
+        Ok(()) => 0,
+        Err(_) => -98, // -EADDRINUSE
+    }
+}
+
+pub fn sys_listen(fd: usize, backlog: i32) -> i64 {
+    let sock_id = match get_sock_id(fd) {
+        Some(id) => id,
+        None => return -88, // -ENOTSOCK
+    };
+    let bl = if backlog > 0 { backlog as usize } else { 5 };
+    match crate::net::socket::socket_listen(sock_id, bl) {
+        Ok(()) => 0,
+        Err(_) => -22, // -EINVAL
+    }
+}
+
+pub fn sys_accept(fd: usize, sockaddr_out: *mut SockAddrIn, addrlen_out: *mut u32) -> i64 {
+    let sock_id = match get_sock_id(fd) {
+        Some(id) => id,
+        None => return -88, // -ENOTSOCK
+    };
+
+    match crate::net::socket::socket_accept(sock_id, 3000) {
+        Ok((client_id, r_ip, r_port)) => {
+            if !sockaddr_out.is_null() {
+                let out = SockAddrIn {
+                    sin_family: 2,
+                    sin_port: r_port.to_be(),
+                    sin_addr: r_ip,
+                    sin_zero: [0; 8],
+                };
+                unsafe {
+                    *sockaddr_out = out;
+                    if !addrlen_out.is_null() {
+                        *addrlen_out = core::mem::size_of::<SockAddrIn>() as u32;
+                    }
+                }
+            }
+
+            let inode = Arc::new(IrqSafeSpinlock::new(crate::net::socket::SocketInode { sock_id: client_id }));
+            let file = Arc::new(crate::fs::vfs::File::new(inode, crate::user::libc::O_RDWR));
+            let current_pid = get_current_pid();
+            if let Some(proc) = get_process(current_pid) {
+                if let Some(client_fd) = proc.lock().alloc_fd(file) {
+                    return client_fd as i64;
+                }
+            }
+            let _ = crate::net::socket::socket_close(client_id);
+            -24 // -EMFILE
+        }
+        Err(_) => -11, // -EAGAIN / timed out
+    }
+}
+
+pub fn sys_connect(fd: usize, sockaddr_ptr: *const SockAddrIn, _addrlen: usize) -> i64 {
+    if sockaddr_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let sock_id = match get_sock_id(fd) {
+        Some(id) => id,
+        None => return -88, // -ENOTSOCK
+    };
+    let addr = unsafe { *sockaddr_ptr };
+    let port = u16::from_be(addr.sin_port);
+    match crate::net::socket::socket_connect(sock_id, addr.sin_addr, port) {
+        Ok(()) => 0,
+        Err(_) => -111, // -ECONNREFUSED
+    }
+}
+
+pub fn sys_sendto(fd: usize, buf: *const u8, len: usize, _flags: i32, _dest: *const SockAddrIn, _addrlen: usize) -> i64 {
+    if buf.is_null() {
+        return -14; // -EFAULT
+    }
+    let sock_id = match get_sock_id(fd) {
+        Some(id) => id,
+        None => return -88, // -ENOTSOCK
+    };
+    let slice = unsafe { core::slice::from_raw_parts(buf, len) };
+    match crate::net::socket::socket_send(sock_id, slice) {
+        Ok(n) => n as i64,
+        Err(_) => -32, // -EPIPE
+    }
+}
+
+pub fn sys_recvfrom(fd: usize, buf: *mut u8, len: usize, _flags: i32, _src: *mut SockAddrIn, _addrlen: *mut u32) -> i64 {
+    if buf.is_null() {
+        return -14; // -EFAULT
+    }
+    let sock_id = match get_sock_id(fd) {
+        Some(id) => id,
+        None => return -88, // -ENOTSOCK
+    };
+    let slice = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    match crate::net::socket::socket_recv(sock_id, slice, 2000) {
+        Ok(n) => n as i64,
+        Err(_) => -11, // -EAGAIN
+    }
+}
