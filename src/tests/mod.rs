@@ -30,6 +30,7 @@ pub fn run_all_tests() {
     test_audio_subsystem();
     test_elf_loader();
     test_pipelines_and_editor();
+    test_userland_binaries();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -910,6 +911,54 @@ fn test_pipelines_and_editor() {
     let saved_text = crate::shell::pipeline::read_file_from_vfs("/tmp/editor_save_test.txt")
         .expect("Failed to read editor saved file");
     assert_eq!(saved_text, "Cosmic\nOS");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_userland_binaries() {
+    print!("  [TEST] Userspace Libc & Native Binaries (/bin) ... ");
+
+    // 1. Verify /bin entries exist in VFS
+    let vfs = crate::fs::vfs::VFS.lock();
+    let bin_dir = vfs.resolve_path("/bin").expect("Missing /bin in VFS");
+    let entries = bin_dir.lock().readdir().expect("Failed to read /bin");
+    drop(vfs);
+
+    let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+    assert!(names.contains(&String::from("init")));
+    assert!(names.contains(&String::from("calc")));
+    assert!(names.contains(&String::from("sh")));
+    assert!(names.contains(&String::from("snake")));
+
+    // 2. Execute /bin/init in Ring 3
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/init", 0).expect("Failed to open /bin/init");
+    drop(vfs);
+    let mut buf = alloc::vec![0u8; 16384];
+    let n = file.read(&mut buf).expect("Failed to read /bin/init");
+    let exit_init = crate::task::user::execute_user_binary(&buf[..n])
+        .expect("Failed to execute /bin/init in Ring 3");
+    assert_eq!(exit_init, 0);
+
+    // 3. Execute /bin/calc in Ring 3
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/calc", 0).expect("Failed to open /bin/calc");
+    drop(vfs);
+    let mut buf = alloc::vec![0u8; 16384];
+    let n = file.read(&mut buf).expect("Failed to read /bin/calc");
+    let exit_calc = crate::task::user::execute_user_binary(&buf[..n])
+        .expect("Failed to execute /bin/calc in Ring 3");
+    assert_eq!(exit_calc, 0);
+
+    // 4. Execute /bin/snake in Ring 3
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/snake", 0).expect("Failed to open /bin/snake");
+    drop(vfs);
+    let mut buf = alloc::vec![0u8; 16384];
+    let n = file.read(&mut buf).expect("Failed to read /bin/snake");
+    let exit_snake = crate::task::user::execute_user_binary(&buf[..n])
+        .expect("Failed to execute /bin/snake in Ring 3");
+    assert_eq!(exit_snake, 0);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

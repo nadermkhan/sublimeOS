@@ -25,6 +25,7 @@ pub mod syscall;
 pub mod task;
 pub mod tests;
 pub mod tty;
+pub mod user;
 
 #[no_mangle]
 pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
@@ -52,6 +53,7 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     // 5. Initialize Device Drivers (Keyboard, Mouse, PCI, Storage, USB)
     drivers::init();
     fs::mount_storage_devices();
+    user::init_userland();
 
     // 6. Initialize Master Network Subsystem (Ethernet, Wi-Fi 802.11, Loopback)
     net::init();

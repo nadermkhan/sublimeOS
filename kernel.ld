@@ -40,6 +40,7 @@ SECTIONS
     {
         __data_start = .;
         *(.data .data.*)
+        *(.got .got.*)
         __data_end = .;
     }
 

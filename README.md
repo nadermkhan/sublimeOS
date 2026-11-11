@@ -13,7 +13,7 @@
 [![UserSpace](https://img.shields.io/badge/userspace-ELF64%20%7C%20Ring%203%20%7C%20Syscall-blueviolet.svg)]()
 
 CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed in safe, idiomatic `#![no_std]` Rust with zero external runtime dependencies. Powered by the **Sublime Kernel**, CosmicOS boots natively via Multiboot 1/2, transitions to 64-bit Long Mode, maps kernel space to the higher half (`0xFFFFFFFF80000000+`), and initializes an enterprise-grade OS stack:
-- **Multitasking & User Space**: Preemptive round-robin & priority scheduler, 64-bit ELF binary loader, hardware memory isolation, and Ring 3 user privilege transition (`iretq`, `syscall`/`sysretq`).
+- **Multitasking & User Space**: Preemptive round-robin & priority scheduler, 64-bit ELF binary loader, hardware memory isolation, Ring 3 user privilege transition (`iretq`, `syscall`/`sysretq`), userspace C standard library (`cosmic-libc`), and native user binaries in `/bin` (`/bin/init`, `/bin/calc`, `/bin/sh`, `/bin/snake`).
 - **Storage & Filesystems**: Real Read/Write FAT32 cluster allocator, exFAT parser, Linux ext4 superblock/extent-tree mapping, and Windows NTFS resident `$DATA` / `$MFT` parser, alongside USB Mass Storage (SCSI / Bulk-Only Transport over xHCI / EHCI).
 - **Network Protocol Stack**: Full TCP/IP stack (Ethernet II, ARP, IPv4, ICMP Ping, UDP, RFC 793 TCP state machine, BSD Socket API), IEEE 802.11 Wi-Fi subsystem (beacon frame parsing, 4-way handshake, WPA2-PSK with PBKDF2-SHA1), Intel e1000 Gigabit NIC driver, HTTP/1.1 client (`curl`), and embedded HTTP server (`httpd`).
 - **Intel HDA Audio Subsystem**: Intel High Definition Audio (HDA) controller driver, pure integer quarter-wave sine synthesis, RIFF/WAVE PCM parser, hardware PC speaker fallback, and the iconic CosmicOS startup chime.
@@ -112,14 +112,27 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
   - `exit_user_mode_asm`: on `SYS_EXIT` or user fault, safely restores kernel CR3, kernel segment registers, and kernel stack, cleanly returning the process exit code to the kernel caller.
   - Shell command `exec <path>` to launch any 64-bit ELF binary.
 
-### 4. Advanced Filesystems & USB Storage (`src/fs`)
+### 4. Userspace C Standard Library (`cosmic-libc`) & Native User Binaries (`src/user`)
+- **Userspace C Standard Library (`libc.rs`)**: Standard userspace runtime implementing POSIX syscall wrappers (`syscall0`..`syscall3`):
+  - File I/O: `write()`, `read()`, `open()`, `close()`.
+  - Memory Management: `brk()` and `malloc()` / `free()` heap allocator.
+  - Process Credentials & Control: `getpid()`, `uname()`, `nanosleep()`, and `exit()`.
+  - Console Printing: `puts()`, `putchar()`, ANSI formatting.
+- **ELF64 Binary Synthesizer (`builder.rs`)**: Lightweight assembler generating self-contained 64-bit ELF executables with valid headers, load segments, string tables, and machine code.
+- **Native Userland Binaries (`/bin`)**:
+  - `/bin/init`: System init executable validating Ring 3 user privileges, `getpid()`, `uname()`, dynamic `brk()` heap expansion (+8192 bytes), and clean process termination.
+  - `/bin/calc`: 64-bit user arithmetic engine computing multiplication, division, and Gauss summation loop (`Sum(1..100) = 5050`) entirely in Ring 3.
+  - `/bin/sh`: Isolated interactive user shell executing in Ring 3 with terminal prompts and standard I/O bridging.
+  - `/bin/snake`: Full-screen ASCII arcade game running in Ring 3 utilizing ANSI escape codes and PIT sleep timers.
+
+### 5. Advanced Filesystems & USB Storage (`src/fs`)
 - **FAT32 R/W (`fat32.rs`)**: Real Read/Write implementation with partition discovery, BPB decoding, cluster allocation bitmap scanning, cluster chain traversal, LFN directory parsing, and file creation/overwriting.
 - **exFAT (`exfat.rs`)**: Sector-accurate exFAT parser supporting Main Boot Region, Volume Flags, Cluster Heap allocation, Stream Extension entries, and file traversal.
 - **ext4 (`ext4.rs`)**: Linux ext4 superblock parser, Block Group Descriptor Table lookup, inode table traversal, and B-tree extent tree (`ext4_extent_header`, `ext4_extent`) physical block resolution.
 - **NTFS (`ntfs.rs`)**: Windows NTFS VBR parsing, `$MFT` record decoding, and resident `$DATA` attribute extraction.
 - **USB Mass Storage (`src/drivers/usb/`)**: Bulk-Only Transport (BOT) driver sending SCSI Command Descriptor Blocks (`INQUIRY`, `READ CAPACITY 10`, `READ 10`, `WRITE 10`) over xHCI and EHCI controllers.
 
-### 5. Networking, 802.11 Wi-Fi & Sockets (`src/net`)
+### 6. Networking, 802.11 Wi-Fi & Sockets (`src/net`)
 - **IEEE 802.11 Wi-Fi (`wifi.rs`)**: Beacon frame management (SSID, BSSID, RSSI, WPA2-RSN capabilities), WPA2-PSK authentication, and 4-way handshake state machine.
 - **Network Cryptography (`src/drivers/net/crypto.rs`)**: Pure Rust SHA-1, HMAC-SHA1, and PBKDF2 key derivation (4096 iterations) for WPA2 Pairwise Master Key generation.
 - **TCP/IP Protocol Stack**:
@@ -132,7 +145,7 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
   - Client: `curl [-i] <url>` fetching web pages and REST APIs over TCP.
   - Server: Embedded `httpd` web server serving interactive status dashboards and JSON APIs (`/api/status`).
 
-### 6. Intel High Definition Audio & Sound Subsystem (`src/drivers/audio`)
+### 7. Intel High Definition Audio & Sound Subsystem (`src/drivers/audio`)
 - **Intel HDA Driver (`hda.rs`)**: Scans PCI for Intel HDA controllers (Class 0x04, Subclass 0x03), maps MMIO BAR0, executes hardware reset (`CRST`), configures Stream Descriptor 0 for 44.1 kHz 16-bit stereo PCM, and streams samples via DMA.
 - **PCM Waveform Synthesizer (`pcm.rs`)**:
   - Quarter-wave integer sine lookup table (`integer_sin()`), avoiding floating point instructions in kernel space.
@@ -142,7 +155,7 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
   - Phonetic formant synthesis for text-to-speech audio.
 - **PC Speaker Fallback (`mod.rs`)**: 8254 PIT Timer 2 square-wave hardware tone generation via I/O ports `0x42`, `0x43`, and `0x61`.
 
-### 7. POSIX Shell, Pipelines, Redirection & Editor (`src/shell`)
+### 8. POSIX Shell, Pipelines, Redirection & Editor (`src/shell`)
 - **POSIX Pipelines (`pipeline.rs`)**: Arbitrary multi-stage command piping (`cmd1 | cmd2 | cmd3`) with in-memory stdout interception.
 - **File Redirection**:
   - `> <file>`: Redirect stdout to overwrite file.
@@ -156,7 +169,7 @@ CosmicOS is a complete, monolithic, bare-metal 64-bit operating system developed
   - `uniq [file]`: Adjacent duplicate line elimination.
 - **In-Terminal Text Editor (`editor.rs`)**: Full-screen terminal text editor (`nano <path>` or `edit <path>`) with title header, line numbers (`001 | ...`), cursor positioning, arrow keys, Backspace, Delete, Tab, `Ctrl+S` direct VFS saving, and `Ctrl+X` exit.
 
-### 8. Aqua Graphical Desktop (`src/gui`)
+### 9. Aqua Graphical Desktop (`src/gui`)
 - **Bochs VBE Linear Framebuffer**: 1024x768 with 32-bit ARGB true color mapped directly into higher-half virtual memory (`0xFFFFFFFFD0000000`).
 - **Double-Buffered Compositor**: Software rendering engine (`Canvas`) with anti-aliasing, rounded glass rectangles, drop shadows, and horizontal gradients.
 - **Window Management**: Window chrome with titlebar dragging, active/inactive focus states, and traffic light buttons (🔴 Close, 🟡 Minimize, 🟢 Zoom).
@@ -221,7 +234,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (19 Self-Tests)
+## Automated Verification Suite (20 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, thoroughly testing each subsystem:
 
@@ -248,6 +261,7 @@ On startup, CosmicOS executes its automated self-test verification suite, thorou
   [TEST] Audio Subsystem & PCM Synthesis ... [PASS]
   [TEST] ELF64 Loader & Ring 3 User Mode ... [INFO] Executing in Ring 3 ... [PASS]
   [TEST] POSIX Pipelines, Redirection & Editor ... [PASS]
+  [TEST] Userspace Libc & Native Binaries (/bin) ... [INFO] Executing in Ring 3 ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

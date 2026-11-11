@@ -39,7 +39,7 @@ pub fn sys_read(fd: usize, buf: *mut u8, count: usize) -> isize {
     // Standard input (stdin)
     if fd == 0 {
         let slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
-        if let Some(ch) = crate::drivers::keyboard::read_char() {
+        if let Some(ch) = crate::shell::get_next_input_char() {
             slice[0] = ch;
             return 1;
         }

@@ -77,7 +77,8 @@ impl AddressSpace {
 
             for i in 0..pages {
                 let virt = old_aligned + i * (PAGE_SIZE as u64);
-                if let Some(phys) = PMM.lock().alloc_frame() {
+                let frame_opt = PMM.lock().alloc_frame();
+                if let Some(phys) = frame_opt {
                     let _ = vmm.map_page(pml4, virt, phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
                 } else {
                     return self.brk_current;

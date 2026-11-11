@@ -17,13 +17,21 @@ pub extern "C" fn syscall_dispatcher(
     match num {
         SYS_READ => fs_calls::sys_read(a1 as usize, a2 as *mut u8, a3 as usize) as i64,
         SYS_WRITE => fs_calls::sys_write(a1 as usize, a2 as *const u8, a3 as usize) as i64,
+        SYS_BRK => crate::task::user::sys_brk(a1) as i64,
         SYS_UNAME => fs_calls::sys_uname(a1 as *mut fs_calls::UtsName) as i64,
         SYS_SCHED_YIELD => {
             crate::task::scheduler::yield_now();
             0
         }
         SYS_NANOSLEEP => {
-            crate::task::scheduler::sleep_ms(a1);
+            let was_enabled = crate::arch::x86_64::registers::are_interrupts_enabled();
+            if !was_enabled {
+                crate::arch::x86_64::registers::enable_interrupts();
+            }
+            crate::arch::x86_64::pit::sleep_ms(a1);
+            if !was_enabled {
+                crate::arch::x86_64::registers::disable_interrupts();
+            }
             0
         }
         SYS_GETPID => 1,

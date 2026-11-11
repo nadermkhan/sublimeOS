@@ -1,6 +1,19 @@
 use crate::mm::address_space::AddressSpace;
 use crate::task::elf::ElfBinary;
+use crate::sync::IrqSafeSpinlock;
 use crate::kinfo;
+
+pub static CURRENT_USER_ADDRESS_SPACE: IrqSafeSpinlock<Option<AddressSpace>> = IrqSafeSpinlock::new(None);
+
+/// Implement the sys_brk syscall (12) for dynamic user heap allocation.
+pub fn sys_brk(new_brk: u64) -> u64 {
+    let mut space = CURRENT_USER_ADDRESS_SPACE.lock();
+    if let Some(ref mut s) = *space {
+        s.brk(new_brk)
+    } else {
+        0
+    }
+}
 
 extern "C" {
     fn enter_user_mode_asm(user_rip: u64, user_rsp: u64, user_cr3: u64, kstack: u64) -> i32;
@@ -59,10 +72,15 @@ pub fn execute_user_binary(data: &[u8]) -> Result<i32, &'static str> {
     let kstack_top = get_user_kernel_stack_top();
     crate::arch::x86_64::gdt::set_kernel_stack(kstack_top);
 
+    let pml4_phys = address_space.pml4_phys;
+    *CURRENT_USER_ADDRESS_SPACE.lock() = Some(address_space);
+
     // 5. Transition to Ring 3 via iretq
     let exit_code = unsafe {
-        enter_user_mode_asm(user_rip, user_rsp, address_space.pml4_phys, kstack_top)
+        enter_user_mode_asm(user_rip, user_rsp, pml4_phys, kstack_top)
     };
+
+    CURRENT_USER_ADDRESS_SPACE.lock().take();
 
     Ok(exit_code)
 }
