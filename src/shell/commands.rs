@@ -36,6 +36,9 @@ pub fn execute_command(line: &str) {
         "date" => cmd_date(),
         "mem" => cmd_mem(),
         "ps" => cmd_ps(),
+        "jobs" => crate::shell::job::cmd_jobs(),
+        "fg" => crate::shell::job::cmd_fg(args),
+        "bg" => crate::shell::job::cmd_bg(args),
         "lspci" => cmd_lspci(),
         "ls" => cmd_ls(args),
         "cat" => cmd_cat(args),
@@ -359,6 +362,9 @@ fn cmd_help() {
     println!("  defaults [read] Access CosmicOS user preferences and defaults");
     println!("  top             Display live Sublime tasks & memory stats");
     println!("  ps              List active Sublime tasks and kernel threads");
+    println!("  jobs            List active and suspended background jobs");
+    println!("  fg [%n]         Bring job to foreground with SIGCONT");
+    println!("  bg [%n]         Resume stopped job in background");
     println!("  uname           Print Sublime kernel version info");
     println!("  uptime          Show system uptime in seconds");
     println!("  date            Current UTC hardware clock timestamp");

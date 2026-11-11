@@ -27,12 +27,15 @@ pub fn set_current_pid(pid: ProcessId) {
 pub enum ProcessState {
     Running,
     Waiting,
+    Stopped(i32),
     Zombie(i32),
 }
 
 pub struct ProcessControlBlock {
     pub pid: ProcessId,
     pub ppid: ProcessId,
+    pub pgid: ProcessId,
+    pub sid: ProcessId,
     pub name: String,
     pub state: ProcessState,
     pub address_space: Option<AddressSpace>,
@@ -53,6 +56,8 @@ impl ProcessControlBlock {
         Self {
             pid,
             ppid,
+            pgid: pid,
+            sid: if ppid > 0 { ppid } else { pid },
             name: String::from(name),
             state: ProcessState::Running,
             address_space: AddressSpace::new(),
@@ -147,10 +152,12 @@ pub fn sys_fork() -> i32 {
             let mut child_pcb = ProcessControlBlock::new(child_pid, parent_pid, "fork_child");
             child_pcb.address_space = Some(child_space);
 
-            // Inherit signals and record child in parent PCB
+            // Inherit signals, process group, session, and record child in parent PCB
             if let Some(parent_proc) = get_process(parent_pid) {
                 let mut p = parent_proc.lock();
                 p.children.push(child_pid);
+                child_pcb.pgid = p.pgid;
+                child_pcb.sid = p.sid;
                 child_pcb.sigactions = p.sigactions;
                 child_pcb.signal_state.blocked = p.signal_state.blocked;
             }
@@ -162,19 +169,45 @@ pub fn sys_fork() -> i32 {
     -1 // -EAGAIN / -ENOMEM
 }
 
-/// POSIX sys_waitpid (Syscall 61): Waits for child process termination and retrieves exit code.
-pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, _options: i32) -> i32 {
+pub const WNOHANG: i32 = 1;
+pub const WUNTRACED: i32 = 2;
+pub const WCONTINUED: i32 = 8;
+
+/// POSIX sys_waitpid (Syscall 61): Waits for child process termination or state change.
+pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, options: i32) -> i32 {
     let current_pid = get_current_pid();
     loop {
         let mut target_child = None;
+        let mut target_stopped = None;
         {
             let table = PROCESS_TABLE.lock();
             for p in table.iter() {
                 let proc = p.lock();
-                if (pid == -1 && proc.ppid == current_pid) || (pid > 0 && proc.pid == pid as u64) {
-                    if let ProcessState::Zombie(code) = proc.state {
-                        target_child = Some((proc.pid, code));
-                        break;
+                let matches_target = if pid == -1 {
+                    proc.ppid == current_pid
+                } else if pid > 0 {
+                    proc.pid == pid as u64
+                } else if pid < -1 {
+                    proc.pgid == (-pid) as u64
+                } else {
+                    // pid == 0: same process group
+                    let current_pgid = get_process(current_pid).map(|cp| cp.lock().pgid).unwrap_or(current_pid);
+                    proc.pgid == current_pgid
+                };
+
+                if matches_target {
+                    match proc.state {
+                        ProcessState::Zombie(code) => {
+                            target_child = Some((proc.pid, code));
+                            break;
+                        }
+                        ProcessState::Stopped(sig) => {
+                            if (options & WUNTRACED) != 0 {
+                                target_stopped = Some((proc.pid, sig));
+                                break;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -192,12 +225,30 @@ pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, _options: i32) -> i32 {
             return child_pid as i32;
         }
 
+        if let Some((child_pid, stop_sig)) = target_stopped {
+            if !status_ptr.is_null() {
+                unsafe {
+                    *status_ptr = 0x007F | ((stop_sig & 0xFF) << 8);
+                }
+            }
+            return child_pid as i32;
+        }
+
         // If no matching child exists, return -ECHILD (-10)
         let has_child = {
             let table = PROCESS_TABLE.lock();
             table.iter().any(|p| {
                 let proc = p.lock();
-                (pid == -1 && proc.ppid == current_pid) || (pid > 0 && proc.pid == pid as u64)
+                if pid == -1 {
+                    proc.ppid == current_pid
+                } else if pid > 0 {
+                    proc.pid == pid as u64
+                } else if pid < -1 {
+                    proc.pgid == (-pid) as u64
+                } else {
+                    let current_pgid = get_process(current_pid).map(|cp| cp.lock().pgid).unwrap_or(current_pid);
+                    proc.pgid == current_pgid
+                }
             })
         };
 
@@ -205,9 +256,13 @@ pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, _options: i32) -> i32 {
             return -10; // -ECHILD
         }
 
+        if (options & WNOHANG) != 0 {
+            return 0; // Child is still running, non-blocking return
+        }
+
         // Yield to let child run
         crate::task::scheduler::yield_now();
-        break; // In cooperative single-turn wait, return immediately if still running or return child
+        break;
     }
     0
 }
@@ -292,52 +347,49 @@ pub fn sys_kill(pid: i32, sig: i32) -> i32 {
         None => return -22, // -EINVAL
     };
 
-    let target_pid = if pid > 0 {
-        pid as u64
-    } else if pid == 0 || pid == -1 {
-        get_current_pid()
-    } else {
-        (-pid) as u64
-    };
+    let current_pid = get_current_pid();
+    let current_pgid = get_process(current_pid).map(|cp| cp.lock().pgid).unwrap_or(current_pid);
 
-    let proc = match get_process(target_pid) {
-        Some(p) => p,
-        None => return -3, // -ESRCH
-    };
-
-    let mut p = proc.lock();
-
-    // SIGKILL cannot be caught or ignored
-    if signal == crate::ipc::signal::Signal::SIGKILL {
-        p.state = ProcessState::Zombie(128 + sig);
-        p.exit_code = 128 + sig;
-        let ppid = p.ppid;
-        drop(p);
-        if ppid != 0 {
-            if let Some(parent) = get_process(ppid) {
-                parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
+    let mut target_pids = Vec::new();
+    {
+        let table = PROCESS_TABLE.lock();
+        if pid > 0 {
+            if table.iter().any(|p| p.lock().pid == pid as u64) {
+                target_pids.push(pid as u64);
             }
+        } else if pid == 0 {
+            // All processes in caller's process group
+            for p in table.iter() {
+                let proc = p.lock();
+                if proc.pgid == current_pgid {
+                    target_pids.push(proc.pid);
+                }
+            }
+        } else if pid < -1 {
+            // All processes in process group -pid
+            let target_pgid = (-pid) as u64;
+            for p in table.iter() {
+                let proc = p.lock();
+                if proc.pgid == target_pgid {
+                    target_pids.push(proc.pid);
+                }
+            }
+        } else {
+            // pid == -1: caller process
+            target_pids.push(current_pid);
         }
-        return 0;
     }
 
-    let action = p.sigactions[sig as usize];
-    if action.sa_handler == crate::ipc::signal::SIG_IGN {
-        return 0;
+    if target_pids.is_empty() {
+        return -3; // -ESRCH
     }
 
-    p.signal_state.send(signal);
+    for target_pid in target_pids {
+        if let Some(proc) = get_process(target_pid) {
+            let mut p = proc.lock();
 
-    // If default action for terminating signals
-    if action.sa_handler == crate::ipc::signal::SIG_DFL {
-        match signal {
-            crate::ipc::signal::Signal::SIGINT
-            | crate::ipc::signal::Signal::SIGTERM
-            | crate::ipc::signal::Signal::SIGQUIT
-            | crate::ipc::signal::Signal::SIGABRT
-            | crate::ipc::signal::Signal::SIGSEGV
-            | crate::ipc::signal::Signal::SIGBUS
-            | crate::ipc::signal::Signal::SIGFPE => {
+            // SIGKILL cannot be caught or ignored
+            if signal == crate::ipc::signal::Signal::SIGKILL {
                 p.state = ProcessState::Zombie(128 + sig);
                 p.exit_code = 128 + sig;
                 let ppid = p.ppid;
@@ -347,12 +399,122 @@ pub fn sys_kill(pid: i32, sig: i32) -> i32 {
                         parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
                     }
                 }
+                continue;
             }
-            _ => {}
+
+            let action = p.sigactions[sig as usize];
+            if action.sa_handler == crate::ipc::signal::SIG_IGN {
+                continue;
+            }
+
+            p.signal_state.send(signal);
+
+            // Default actions for signals
+            if action.sa_handler == crate::ipc::signal::SIG_DFL {
+                match signal {
+                    crate::ipc::signal::Signal::SIGINT
+                    | crate::ipc::signal::Signal::SIGTERM
+                    | crate::ipc::signal::Signal::SIGQUIT
+                    | crate::ipc::signal::Signal::SIGABRT
+                    | crate::ipc::signal::Signal::SIGSEGV
+                    | crate::ipc::signal::Signal::SIGBUS
+                    | crate::ipc::signal::Signal::SIGFPE => {
+                        p.state = ProcessState::Zombie(128 + sig);
+                        p.exit_code = 128 + sig;
+                        let ppid = p.ppid;
+                        drop(p);
+                        if ppid != 0 {
+                            if let Some(parent) = get_process(ppid) {
+                                parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
+                            }
+                        }
+                    }
+                    crate::ipc::signal::Signal::SIGTSTP | crate::ipc::signal::Signal::SIGSTOP => {
+                        p.state = ProcessState::Stopped(sig);
+                        let ppid = p.ppid;
+                        drop(p);
+                        if ppid != 0 {
+                            if let Some(parent) = get_process(ppid) {
+                                parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
+                            }
+                        }
+                    }
+                    crate::ipc::signal::Signal::SIGCONT => {
+                        if matches!(p.state, ProcessState::Stopped(_)) {
+                            p.state = ProcessState::Running;
+                        }
+                        let ppid = p.ppid;
+                        drop(p);
+                        if ppid != 0 {
+                            if let Some(parent) = get_process(ppid) {
+                                parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
     0
+}
+
+/// POSIX sys_setpgid (Syscall 109): Sets process group ID of process.
+pub fn sys_setpgid(pid: i32, pgid: i32) -> i32 {
+    let target_pid = if pid <= 0 { get_current_pid() } else { pid as u64 };
+    let new_pgid = if pgid <= 0 { target_pid } else { pgid as u64 };
+
+    if let Some(proc) = get_process(target_pid) {
+        let mut p = proc.lock();
+        p.pgid = new_pgid;
+        0
+    } else {
+        -3 // -ESRCH
+    }
+}
+
+/// POSIX sys_getpgrp (Syscall 111): Returns calling process's process group ID.
+pub fn sys_getpgrp() -> i32 {
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        proc.lock().pgid as i32
+    } else {
+        current_pid as i32
+    }
+}
+
+/// POSIX sys_getpgid (Syscall 121): Returns process group ID of specified process.
+pub fn sys_getpgid(pid: i32) -> i32 {
+    let target_pid = if pid <= 0 { get_current_pid() } else { pid as u64 };
+    if let Some(proc) = get_process(target_pid) {
+        proc.lock().pgid as i32
+    } else {
+        -3 // -ESRCH
+    }
+}
+
+/// POSIX sys_setsid (Syscall 112): Creates a new session if caller is not group leader.
+pub fn sys_setsid() -> i32 {
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let mut p = proc.lock();
+        p.sid = current_pid;
+        p.pgid = current_pid;
+        current_pid as i32
+    } else {
+        -1 // -EPERM
+    }
+}
+
+/// POSIX sys_getsid (Syscall 124): Obtains session ID of a process.
+pub fn sys_getsid(pid: i32) -> i32 {
+    let target_pid = if pid <= 0 { get_current_pid() } else { pid as u64 };
+    if let Some(proc) = get_process(target_pid) {
+        proc.lock().sid as i32
+    } else {
+        -3 // -ESRCH
+    }
 }
 
 /// POSIX sys_rt_sigaction (Syscall 13): Examines and changes a signal action.

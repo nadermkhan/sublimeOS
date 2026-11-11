@@ -393,6 +393,41 @@ pub fn grantpt(_fd: usize) -> i32 {
     0
 }
 
+/// POSIX setpgid() system call wrapper
+pub fn setpgid(pid: i32, pgid: i32) -> i32 {
+    unsafe {
+        syscall2(SYS_SETPGID, pid as u64, pgid as u64) as i32
+    }
+}
+
+/// POSIX getpgrp() system call wrapper
+pub fn getpgrp() -> i32 {
+    unsafe {
+        syscall0(SYS_GETPGRP) as i32
+    }
+}
+
+/// POSIX getpgid() system call wrapper
+pub fn getpgid(pid: i32) -> i32 {
+    unsafe {
+        syscall1(SYS_GETPGID, pid as u64) as i32
+    }
+}
+
+/// POSIX setsid() system call wrapper
+pub fn setsid() -> i32 {
+    unsafe {
+        syscall0(SYS_SETSID) as i32
+    }
+}
+
+/// POSIX getsid() system call wrapper
+pub fn getsid(pid: i32) -> i32 {
+    unsafe {
+        syscall1(SYS_GETSID, pid as u64) as i32
+    }
+}
+
 /// POSIX exit() system call wrapper
 pub fn exit(status: i32) -> ! {
     unsafe {

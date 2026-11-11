@@ -95,6 +95,12 @@ impl EhciController {
                 kinfo!("EHCI Port {}: Attached USB 2.0 Device Detected", port);
                 self.connected_devices.push(port);
 
+                // Register USB HID Keyboard and Mouse endpoints
+                let kb = crate::drivers::usb::hid::UsbHidDevice::new(&format!("ehcikb{}", port - 1), crate::drivers::usb::hid::UsbHidType::Keyboard);
+                let mouse = crate::drivers::usb::hid::UsbHidDevice::new(&format!("ehcimouse{}", port - 1), crate::drivers::usb::hid::UsbHidType::Mouse);
+                crate::drivers::usb::hid::USB_HID.lock().register(kb);
+                crate::drivers::usb::hid::USB_HID.lock().register(mouse);
+
                 let transport = Arc::new(EhciUsbTransport {
                     port,
                     op_base: self.op_base,

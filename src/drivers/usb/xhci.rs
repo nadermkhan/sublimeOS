@@ -138,6 +138,14 @@ impl XhciController {
 
                 self.connected_devices.push(port);
 
+                // Register USB HID Keyboard and Mouse endpoints for Low/Full speed human interface devices
+                if speed == UsbPortSpeed::LowSpeed || speed == UsbPortSpeed::FullSpeed {
+                    let kb = crate::drivers::usb::hid::UsbHidDevice::new(&format!("usbkb{}", port - 1), crate::drivers::usb::hid::UsbHidType::Keyboard);
+                    let mouse = crate::drivers::usb::hid::UsbHidDevice::new(&format!("usbmouse{}", port - 1), crate::drivers::usb::hid::UsbHidType::Mouse);
+                    crate::drivers::usb::hid::USB_HID.lock().register(kb);
+                    crate::drivers::usb::hid::USB_HID.lock().register(mouse);
+                }
+
                 // Initialize USB Mass Storage transport for this port
                 let transport = Arc::new(XhciUsbTransport {
                     port,

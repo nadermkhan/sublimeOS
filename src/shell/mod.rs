@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod editor;
+pub mod job;
 pub mod pipeline;
 
 extern crate alloc;
@@ -36,10 +37,10 @@ pub fn get_next_input_char() -> Option<u8> {
     INPUT_QUEUE.lock().pop_front()
 }
 
-const COMMAND_LIST: [&str; 43] = [
+const COMMAND_LIST: [&str; 46] = [
     "sw_vers", "system_profiler", "sysctl", "diskutil", "open", "say", "beep", "chime", "play", "exec", "defaults",
     "whoami", "hostname", "top", "help", "clear", "uname", "uptime", "date", "mem",
-    "ps", "ls", "cat", "echo", "mkdir", "touch", "rm", "mount", "wifi", "ifconfig",
+    "ps", "jobs", "fg", "bg", "ls", "cat", "echo", "mkdir", "touch", "rm", "mount", "wifi", "ifconfig",
     "ping", "nslookup", "curl", "httpd", "reboot", "nano", "edit", "grep", "wc", "head",
     "tail", "sort", "uniq"
 ];

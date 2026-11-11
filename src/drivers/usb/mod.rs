@@ -7,6 +7,7 @@ use crate::sync::IrqSafeSpinlock;
 use crate::kinfo;
 
 pub mod ehci;
+pub mod hid;
 pub mod msc;
 pub mod xhci;
 

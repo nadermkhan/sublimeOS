@@ -43,6 +43,8 @@ pub fn run_all_tests() {
     test_pseudo_terminal_subsystem();
     test_tls_and_https_engine();
     test_realtek_and_qualcomm_drivers();
+    test_posix_job_control_and_sessions();
+    test_usb_hid_subsystem();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -1759,6 +1761,180 @@ fn test_realtek_and_qualcomm_drivers() {
     assert!(found_en2.is_some());
     let found_wlan1 = NET_MANAGER.lock().get_device("wlan1");
     assert!(found_wlan1.is_some());
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_posix_job_control_and_sessions() {
+    print!("  [TEST] POSIX Job Control, Process Groups & Sessions ... ");
+
+    use alloc::sync::Arc;
+    use crate::sync::IrqSafeSpinlock;
+    use crate::fs::vfs::InodeOperations;
+    use crate::task::process::{
+        get_current_pid, sys_getpgid, sys_getpgrp, sys_getsid, sys_kill, sys_setpgid,
+        sys_setsid, sys_waitpid, ProcessControlBlock, ProcessState, PROCESS_TABLE,
+        WNOHANG, WUNTRACED,
+    };
+    use crate::tty::pty::{PtySlaveDev, PTY_TABLE, TIOCGPGRP, TIOCSPGRP};
+
+    // 1. Process Group & Session ID introspection
+    let my_pid = get_current_pid();
+    assert_eq!(sys_getpgrp() as u64, my_pid);
+    assert_eq!(sys_getpgid(my_pid as i32) as u64, my_pid);
+    assert!(sys_getsid(0) > 0);
+    assert!(sys_setsid() > 0);
+
+    // 2. Mock child process creation in process table
+    let mock_child_pid = 7777u64;
+    let mock_child = ProcessControlBlock::new(mock_child_pid, my_pid, "bg_worker");
+    PROCESS_TABLE.lock().push(Arc::new(IrqSafeSpinlock::new(mock_child)));
+
+    // Assign mock child to a new process group (pgid 4200)
+    assert_eq!(sys_setpgid(mock_child_pid as i32, 4200), 0);
+    assert_eq!(sys_getpgid(mock_child_pid as i32), 4200);
+
+    // 3. Process Group Signal Broadcast & Job Suspension (Ctrl+Z / SIGTSTP)
+    // Sending to -4200 targets the entire process group 4200
+    assert_eq!(sys_kill(-4200, 20), 0); // 20 = SIGTSTP
+
+    // Verify child transitioned to Stopped state
+    let child_pcb = crate::task::process::get_process(mock_child_pid).expect("Child PCB not found");
+    assert_eq!(child_pcb.lock().state, ProcessState::Stopped(20));
+
+    // Wait for stopped child via WUNTRACED
+    let mut status = 0i32;
+    let wait_res = sys_waitpid(-4200, &mut status, WUNTRACED | WNOHANG);
+    assert_eq!(wait_res, mock_child_pid as i32);
+    assert_eq!(status & 0xFF, 0x7F); // POSIX WIFSTOPPED indicator
+    assert_eq!((status >> 8) & 0xFF, 20); // Signal 20 (SIGTSTP)
+
+    // 4. Resume child process via SIGCONT (Signal 18)
+    assert_eq!(sys_kill(-4200, 18), 0); // 18 = SIGCONT
+    assert_eq!(child_pcb.lock().state, ProcessState::Running);
+
+    // Clean up mock child
+    PROCESS_TABLE.lock().retain(|p| p.lock().pid != mock_child_pid);
+
+    // 5. PTY Terminal Foreground Process Group ioctls (TIOCGPGRP / TIOCSPGRP)
+    let (pty_id, pty_pair) = PTY_TABLE.lock().allocate();
+    let mut pty_slave = PtySlaveDev {
+        id: pty_id,
+        pair: pty_pair.clone(),
+    };
+
+    let fg_pgid = 4200u32;
+    assert_eq!(
+        pty_slave.ioctl(TIOCSPGRP, &fg_pgid as *const u32 as usize).unwrap(),
+        0
+    );
+    assert_eq!(pty_pair.lock().fg_pgid, 4200);
+
+    let mut readback_pgid = 0u32;
+    assert_eq!(
+        pty_slave.ioctl(TIOCGPGRP, &mut readback_pgid as *mut u32 as usize).unwrap(),
+        0
+    );
+    assert_eq!(readback_pgid, 4200);
+
+    // 6. Shell Job Manager
+    use crate::shell::job::{JobState, JOB_MANAGER};
+    let job_id = JOB_MANAGER.lock().add_job(mock_child_pid, 4200, "calc &", JobState::Stopped);
+    assert!(job_id > 0);
+    assert_eq!(JOB_MANAGER.lock().get_job(job_id).unwrap().state, JobState::Stopped);
+
+    JOB_MANAGER.lock().set_state(job_id, JobState::Running);
+    assert_eq!(JOB_MANAGER.lock().get_job(job_id).unwrap().state, JobState::Running);
+
+    JOB_MANAGER.lock().remove_job(job_id);
+    assert!(JOB_MANAGER.lock().get_job(job_id).is_none());
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_usb_hid_subsystem() {
+    print!("  [TEST] USB HID Keyboard & Mouse Input Subsystem ... ");
+
+    use crate::drivers::keyboard::read_char;
+    use crate::drivers::mouse::MOUSE;
+    use crate::drivers::usb::hid::{UsbHidDevice, UsbHidType, USB_HID};
+
+    // Drain any leftover keys in keyboard buffer
+    while read_char().is_some() {}
+
+    // 1. Test USB HID Keyboard Report Processing (Boot Protocol)
+    let mut kb_dev = UsbHidDevice::new("test_usb_kb", UsbHidType::Keyboard);
+
+    // Report: Left Shift (0x02) + Key 'A' (Usage 0x04)
+    let report_shift_a = [0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00];
+    kb_dev.process_keyboard_report(&report_shift_a);
+    let ch = read_char();
+    assert_eq!(ch, Some(b'A'));
+
+    // Release all keys
+    let report_release = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    kb_dev.process_keyboard_report(&report_release);
+
+    // Report: Number '1' (Usage 0x1E)
+    let report_1 = [0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00];
+    kb_dev.process_keyboard_report(&report_1);
+    assert_eq!(read_char(), Some(b'1'));
+    kb_dev.process_keyboard_report(&report_release);
+
+    // Report: Enter key (Usage 0x28)
+    let report_enter = [0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00];
+    kb_dev.process_keyboard_report(&report_enter);
+    assert_eq!(read_char(), Some(b'\n'));
+    kb_dev.process_keyboard_report(&report_release);
+
+    // Report: Backspace key (Usage 0x2A)
+    let report_bksp = [0x00, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x00, 0x00];
+    kb_dev.process_keyboard_report(&report_bksp);
+    assert_eq!(read_char(), Some(0x08));
+    kb_dev.process_keyboard_report(&report_release);
+
+    // 2. Test USB HID Mouse Report Processing (Boot Protocol)
+    let mut mouse_dev = UsbHidDevice::new("test_usb_mouse", UsbHidType::Mouse);
+
+    // Reset mouse to known position
+    {
+        let mut m = MOUSE.lock();
+        m.x = 200;
+        m.y = 200;
+        m.left_button = false;
+        m.right_button = false;
+        m.middle_button = false;
+    }
+
+    // Report: Left button pressed (0x01), dx = +25, dy = +30
+    let report_mouse_move = [0x01, 25, 30, 0];
+    mouse_dev.process_mouse_report(&report_mouse_move);
+
+    {
+        let m = MOUSE.lock();
+        assert_eq!(m.x, 225);
+        assert_eq!(m.y, 230);
+        assert!(m.left_button);
+        assert!(!m.right_button);
+    }
+
+    // Report: Left button released (0x00), dx = -10, dy = -15
+    let report_mouse_release = [0x00, (-10i8) as u8, (-15i8) as u8, 0];
+    mouse_dev.process_mouse_report(&report_mouse_release);
+
+    {
+        let m = MOUSE.lock();
+        assert_eq!(m.x, 215);
+        assert_eq!(m.y, 215);
+        assert!(!m.left_button);
+    }
+
+    // 3. Central USB HID Manager Registration
+    USB_HID.lock().register(kb_dev);
+    USB_HID.lock().register(mouse_dev);
+
+    assert!(USB_HID.lock().get_device("test_usb_kb").is_some());
+    assert!(USB_HID.lock().get_device("test_usb_mouse").is_some());
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

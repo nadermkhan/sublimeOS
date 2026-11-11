@@ -12,6 +12,8 @@ pub const TIOCGWINSZ: u32 = 0x5413;
 pub const TIOCSWINSZ: u32 = 0x5414;
 pub const TIOCGPTN: u32 = 0x80045430;
 pub const TIOCSPTLCK: u32 = 0x40045431;
+pub const TIOCGPGRP: u32 = 0x540F;
+pub const TIOCSPGRP: u32 = 0x5410;
 
 pub const ECHO: u32 = 0x0008;
 pub const ICANON: u32 = 0x0002;
@@ -137,11 +139,23 @@ impl InodeOperations for PtyMasterDev {
         for &byte in buf {
             // Check for Ctrl+C (ETX = 0x03) -> deliver SIGINT
             if byte == 0x03 {
-                let target_pid = if pty.fg_pgid > 0 { pty.fg_pgid as i32 } else { crate::task::process::get_current_pid() as i32 };
+                let target_pid = if pty.fg_pgid > 0 { -(pty.fg_pgid as i32) } else { -(crate::task::process::get_current_pid() as i32) };
                 crate::task::process::sys_kill(target_pid, 2); // SIGINT
                 if pty.echo {
                     pty.slave_to_master.push_back(b'^');
                     pty.slave_to_master.push_back(b'C');
+                    pty.slave_to_master.push_back(b'\n');
+                }
+                continue;
+            }
+
+            // Check for Ctrl+Z (SUB = 0x1A) -> deliver SIGTSTP
+            if byte == 0x1A {
+                let target_pid = if pty.fg_pgid > 0 { -(pty.fg_pgid as i32) } else { -(crate::task::process::get_current_pid() as i32) };
+                crate::task::process::sys_kill(target_pid, 20); // SIGTSTP
+                if pty.echo {
+                    pty.slave_to_master.push_back(b'^');
+                    pty.slave_to_master.push_back(b'Z');
                     pty.slave_to_master.push_back(b'\n');
                 }
                 continue;
@@ -208,6 +222,22 @@ impl InodeOperations for PtyMasterDev {
                 }
                 let ptr = arg as *const Winsize;
                 pty.winsize = unsafe { *ptr };
+                Ok(0)
+            }
+            TIOCGPGRP => {
+                if arg == 0 {
+                    return Err("Null pointer in TIOCGPGRP");
+                }
+                let ptr = arg as *mut u32;
+                unsafe { *ptr = pty.fg_pgid; }
+                Ok(0)
+            }
+            TIOCSPGRP => {
+                if arg == 0 {
+                    return Err("Null pointer in TIOCSPGRP");
+                }
+                let ptr = arg as *const u32;
+                pty.fg_pgid = unsafe { *ptr };
                 Ok(0)
             }
             TCGETS => {
@@ -297,6 +327,22 @@ impl InodeOperations for PtySlaveDev {
                 }
                 let ptr = arg as *const Winsize;
                 pty.winsize = unsafe { *ptr };
+                Ok(0)
+            }
+            TIOCGPGRP => {
+                if arg == 0 {
+                    return Err("Null pointer in TIOCGPGRP");
+                }
+                let ptr = arg as *mut u32;
+                unsafe { *ptr = pty.fg_pgid; }
+                Ok(0)
+            }
+            TIOCSPGRP => {
+                if arg == 0 {
+                    return Err("Null pointer in TIOCSPGRP");
+                }
+                let ptr = arg as *const u32;
+                pty.fg_pgid = unsafe { *ptr };
                 Ok(0)
             }
             _ => Err("Unsupported PTY slave ioctl"),

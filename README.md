@@ -28,8 +28,8 @@
    - [7. Intel High Definition Audio & Sound Subsystem](#7-intel-high-definition-audio--sound-subsystem)
    - [8. CosmicSH POSIX Shell & Terminal Text Editor](#8-cosmicsh-posix-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
-4. [Interactive Shell Command Reference (48 Commands)](#interactive-shell-command-reference-48-commands)
-5. [Automated Verification Suite (32 Self-Tests)](#automated-verification-suite-32-self-tests)
+4. [Interactive Shell Command Reference (51 Commands)](#interactive-shell-command-reference-51-commands)
+5. [Automated Verification Suite (34 Self-Tests)](#automated-verification-suite-34-self-tests)
 6. [Building and Running](#building-and-running)
    - [Prerequisites](#prerequisites)
    - [Compiling Kernel](#compiling-kernel)
@@ -148,9 +148,13 @@
 - **POSIX Process Fork & Lifecycle ([`process.rs`](src/task/process.rs), [`syscall/`](src/syscall/))**:
   - `sys_fork()` (Syscall 57): Clones parent address space via `clone_cow()`, marking all writable user pages as read-only with `PAGE_COW` (bit 9) and incrementing physical frame reference counts.
   - Page Fault CoW Engine (Exception 14): Transparently allocates a private 4096-byte frame, copies memory, remaps with `PAGE_WRITABLE`, or promotes permissions in-place if sole owner, immediately resuming user code via `iretq`.
-  - `sys_waitpid()` (Syscall 61): Blocks until target child or any child terminates, returning status code and reaping zombie process structures.
+  - `sys_waitpid()` (Syscall 61): Blocks until target child or any child terminates or changes state, supporting POSIX `WNOHANG`, `WUNTRACED`, and `WCONTINUED`.
   - `sys_execve()` (Syscall 59): Replaces current process image with a new ELF executable.
-- **POSIX Signals Subsystem ([`signal.rs`](src/ipc/signal.rs))**:
+- **POSIX Process Groups, Sessions & Job Control ([`process.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/task/process.rs), [`job.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/shell/job.rs))**:
+  - Process Groups (`pgid`) and Session IDs (`sid`): `sys_setpgid` (109), `sys_getpgrp` (111), `sys_getpgid` (121), `sys_setsid` (112), and `sys_getsid` (124).
+  - Terminal foreground process group management (`TIOCGPGRP` / `TIOCSPGRP`) over PTY master/slave devices.
+  - Signal broadcasting to process groups (`sys_kill(-pgid, sig)`), terminal `Ctrl+Z` interception sending `SIGTSTP` to suspend foreground jobs into `TaskState::Stopped`, and shell job commands (`jobs`, `fg`, `bg`).
+- **POSIX Signals Subsystem ([`signal.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/ipc/signal.rs))**:
   - Per-process signal action tables ([`SigAction`](src/ipc/signal.rs)), blocked signal bitmasks, pending signals delivery, asynchronous inter-process signaling ([`sys_kill`](src/task/process.rs)), child termination notification (`SIGCHLD` to parent), and unblockable signals (`SIGKILL`, `SIGSTOP`).
   - Syscalls: `sys_rt_sigaction` (13), `sys_rt_sigprocmask` (14), and `sys_kill` (62).
 
@@ -188,7 +192,8 @@
 - **exFAT ([`exfat.rs`](src/fs/exfat.rs))**: Sector-accurate exFAT parser supporting Main Boot Region, Volume Flags, Cluster Heap allocation, Stream Extension entries, and file traversal.
 - **ext4 R/W ([`ext4.rs`](src/fs/ext4.rs))**: Linux ext4 superblock parser, Block Group Descriptor Table lookup, block and inode bitmap allocation, extent tree mapping, direct write block updates, directory entry insertion, and file creation.
 - **NTFS ([`ntfs.rs`](src/fs/ntfs.rs))**: Windows NTFS VBR parsing, `$MFT` record decoding, and resident `$DATA` attribute extraction.
-- **USB Mass Storage ([`usb/msc.rs`](src/drivers/usb/msc.rs))**: Bulk-Only Transport (BOT) driver sending SCSI Command Descriptor Blocks (`INQUIRY`, `READ CAPACITY 10`, `READ 10`, `WRITE 10`) over xHCI and EHCI controllers.
+- **USB Mass Storage ([`usb/msc.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/usb/msc.rs))**: Bulk-Only Transport (BOT) driver sending SCSI Command Descriptor Blocks (`INQUIRY`, `READ CAPACITY 10`, `READ 10`, `WRITE 10`) over xHCI and EHCI controllers.
+- **USB HID Input Subsystem ([`usb/hid.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/usb/hid.rs))**: USB Human Interface Device driver supporting Boot Protocol keyboards and mice over xHCI and EHCI controllers. Parses 8-byte keyboard reports, maps USB HID Usage codes to PS/2 scancodes with modifier tracking, and translates 3/4-byte mouse packets into desktop coordinate updates.
 
 ### 6. Networking, 802.11 Wi-Fi & Sockets
 *Location: [`src/net/`](src/net/), [`src/drivers/net/`](src/drivers/net/)*
@@ -264,7 +269,7 @@
 
 ---
 
-## Interactive Shell Command Reference (48 Commands)
+## Interactive Shell Command Reference (51 Commands)
 
 CosmicOS features a native zsh-style shell available across all virtual consoles (`Alt+F1` through `Alt+F4`), COM1 serial, and the graphical desktop terminal:
 
@@ -279,6 +284,9 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 | | `whoami` / `hostname` | Print current user (`cosmos`) and host (`CosmicOS.local`) |
 | | `mem` | Detailed physical frame and expandable heap allocation metrics |
 | | `top` / `ps` | Display real-time active tasks, threads, and CPU/memory statistics |
+| | `jobs` | List active, suspended, and background jobs (`[1]+ Running cmd`) |
+| | `fg [%n]` | Bring background or stopped job to foreground with `SIGCONT` |
+| | `bg [%n]` | Resume suspended background job with `SIGCONT` |
 | **Filesystem & I/O** | `ls [path]` | List contents of a directory (default `/`) |
 | | `cat <path>` | Read file contents to terminal |
 | | `echo <text>` | Output text to console or pipeline |
@@ -320,7 +328,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (32 Self-Tests)
+## Automated Verification Suite (34 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, verifying all core subsystems before launching the interactive shell:
 
@@ -360,6 +368,8 @@ On startup, CosmicOS executes its automated self-test verification suite, verify
   [TEST] Pseudo-Terminal (PTY) Subsystem & Line Discipline ... [PASS]
   [TEST] TLS 1.3 Cryptography & Secure HTTPS Engine ... [PASS]
   [TEST] Realtek RTL8139/8169 & Qualcomm Atheros Drivers ... [PASS]
+  [TEST] POSIX Job Control, Process Groups & Sessions ... [PASS]
+  [TEST] USB HID Keyboard & Mouse Input Subsystem ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================
