@@ -17,9 +17,8 @@ use crate::kinfo;
 
 /// Full architecture initialization sequence for x86_64.
 pub fn init() {
-    // 1. Initialize COM1 Serial port for logging
-    serial::SERIAL1.lock().init();
-    kinfo!("Serial COM1 initialized at 38400 baud");
+    // 1. Initialize COM1 Serial port hardware early for low-level logging
+    serial::init_early();
 
     // 2. Initialize VGA text display
     vga::VGA_WRITER.lock().clear_screen();
@@ -41,10 +40,13 @@ pub fn init() {
     pit::init(1000);
     kinfo!("8254 PIT initialized at 1000 Hz");
 
-    // 7. Initialize AMD64 fast syscall (LSTAR/STAR)
+    // 7. Full UART subsystem initialization (IRQ 4 & 3 handlers, unmask PIC, detect COM1 & COM2)
+    serial::init();
+
+    // 8. Initialize AMD64 fast syscall (LSTAR/STAR)
     syscall::init();
     kinfo!("Fast syscall interface initialized");
 
-    // 8. Discover ACPI tables for power management
+    // 9. Discover ACPI tables for power management
     acpi::init();
 }

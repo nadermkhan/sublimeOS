@@ -15,12 +15,10 @@ fn get_next_input_char() -> Option<u8> {
         return Some(ch);
     }
 
-    // Drain available bytes from serial FIFO into in-memory queue
+    // Drain available bytes from serial RX ring buffer into in-memory queue
     {
-        let serial = crate::arch::x86_64::serial::SERIAL1.lock();
         let mut queue = INPUT_QUEUE.lock();
-        while serial.is_data_ready() {
-            let b = serial.read_byte();
+        while let Some(b) = crate::arch::x86_64::serial::read_rx_char() {
             if b == b'\r' {
                 queue.push_back(b'\n');
             } else if b == b'\n' {

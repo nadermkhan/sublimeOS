@@ -119,6 +119,10 @@ impl File {
         *off = new_offset;
         Ok(new_offset)
     }
+
+    pub fn stat(&self) -> Stat {
+        self.inode.lock().stat()
+    }
 }
 
 pub struct VfsManager {

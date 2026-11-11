@@ -16,6 +16,7 @@ pub fn run_all_tests() {
     test_vfs();
     test_pipes();
     test_multitasking();
+    test_uart();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -90,5 +91,20 @@ fn test_multitasking() {
     print!("  [TEST] Task Context Switch & Yield ... ");
     // Yielding should return back to current thread smoothly
     crate::task::scheduler::yield_now();
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_uart() {
+    print!("  [TEST] 16550A UART & /dev/ttyS0 ... ");
+    let com1 = crate::arch::x86_64::serial::COM1.lock();
+    assert!(com1.is_initialized, "COM1 should be initialized");
+    assert!(com1.chip_type != crate::arch::x86_64::serial::UartChipType::None, "COM1 should identify chip type");
+    drop(com1);
+
+    // Verify /dev/ttyS0 in DevFS
+    let vfs = VFS.lock();
+    let tty_node = vfs.open("/dev/ttyS0", 0).expect("Failed to open /dev/ttyS0");
+    let stat = tty_node.stat();
+    assert_eq!(stat.file_type, FileType::CharDevice, "/dev/ttyS0 should be CharDevice");
     println!("\x1b[32m[PASS]\x1b[0m");
 }
