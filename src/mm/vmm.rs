@@ -13,6 +13,7 @@ pub const PAGE_DIRTY: u64 = 1 << 6;
 pub const PAGE_HUGE: u64 = 1 << 7;
 pub const PAGE_GLOBAL: u64 = 1 << 8;
 pub const PAGE_COW: u64 = 1 << 9; // Copy-on-Write bit (AVL software flags)
+pub const PAGE_SWAPPED: u64 = 1 << 10; // Swapped out to disk/swap storage bit (AVL software flags)
 pub const PAGE_NO_EXECUTE: u64 = 1 << 63;
 
 pub const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -40,6 +41,10 @@ impl PageTableEntry {
 
     pub fn is_cow(&self) -> bool {
         (self.0 & PAGE_COW) != 0
+    }
+
+    pub fn is_swapped(&self) -> bool {
+        (self.0 & PAGE_SWAPPED) != 0
     }
 
     pub fn is_writable(&self) -> bool {
@@ -203,6 +208,30 @@ impl VirtualMemoryManager {
         unsafe {
             invlpg(virt);
         }
+    }
+
+    /// Retrieve a mutable reference to the lowest-level PageTableEntry for a virtual address.
+    pub fn get_pte_mut<'a>(&self, pml4: &'a mut PageTable, virt: u64) -> Option<&'a mut PageTableEntry> {
+        let pml4_idx = pml4_index(virt);
+        if !pml4.entries[pml4_idx].is_present() {
+            return None;
+        }
+
+        let pdpt = unsafe { &mut *(phys_to_virt(pml4.entries[pml4_idx].address()) as *mut PageTable) };
+        let pdpt_idx = pdpt_index(virt);
+        if !pdpt.entries[pdpt_idx].is_present() || pdpt.entries[pdpt_idx].is_huge() {
+            return None;
+        }
+
+        let pd = unsafe { &mut *(phys_to_virt(pdpt.entries[pdpt_idx].address()) as *mut PageTable) };
+        let pd_idx = pd_index(virt);
+        if !pd.entries[pd_idx].is_present() || pd.entries[pd_idx].is_huge() {
+            return None;
+        }
+
+        let pt = unsafe { &mut *(phys_to_virt(pd.entries[pd_idx].address()) as *mut PageTable) };
+        let pt_idx = pt_index(virt);
+        Some(&mut pt.entries[pt_idx])
     }
 
     /// Translate a virtual address to its corresponding physical address.

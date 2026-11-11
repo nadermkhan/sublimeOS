@@ -29,7 +29,7 @@
    - [8. CosmicSH POSIX Shell & Terminal Text Editor](#8-cosmicsh-posix-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
 4. [Interactive Shell Command Reference (53 Commands)](#interactive-shell-command-reference-53-commands)
-5. [Automated Verification Suite (41 Self-Tests)](#automated-verification-suite-41-self-tests)
+5. [Automated Verification Suite (45 Self-Tests)](#automated-verification-suite-45-self-tests)
 6. [Building and Running](#building-and-running)
    - [Prerequisites](#prerequisites)
    - [Compiling Kernel](#compiling-kernel)
@@ -140,6 +140,9 @@
   - `ftruncate()` (`sys_ftruncate` Syscall 77): Resizes shared memory objects, dynamically allocating or freeing 4 KiB physical frames.
   - `mmap()` (`sys_mmap` Syscall 9, `MAP_SHARED` / `MAP_PRIVATE` / `MAP_ANONYMOUS`) and `munmap()` (`sys_munmap` Syscall 11): Maps shared physical frames or anonymous memory directly into the process PML4 address space and records Virtual Memory Areas (`VirtualMemoryArea`). Enables zero-copy Inter-Process Communication (IPC) across independent address spaces.
   - `shm_unlink()`: Removes named objects from the global registry (`SHM_REGISTRY`) and `/dev/shm`.
+- **Demand Paging & Swap Subsystem ([`vma.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/mm/vma.rs), [`swap.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/mm/swap.rs))**:
+  - **Demand Paging**: Lazy physical frame allocation via CPU Page Fault (`#PF` Vector 14). Tracks virtual memory regions (`VmaRegion`, `VMA_MANAGER`), deferring physical allocation until memory is first accessed. The `#PF` handler automatically intercepts unmapped faults, allocates zeroed 4 KiB frames from PMM, maps them into PML4 with appropriate permissions (`PAGE_PRESENT`, `PAGE_USER`, `PAGE_WRITABLE`), invalidates TLB (`invlpg`), and seamlessly resumes execution.
+  - **Swap Subsystem**: In-kernel swap storage managing 4 KiB swap slots (`SWAP_MANAGER`). `swap_out()` copies active physical pages into swap storage, frees physical frames to PMM, and encodes the slot ID into the PTE with `PAGE_SWAPPED` (bit 10). When a swapped-out page is accessed, `#PF` transparently triggers `swap_in()`, allocating a fresh frame, restoring contents, remapping the page, and freeing the swap slot without process awareness.
 
 ### 3. Task Management, Process Control & POSIX Signals
 *Location: [`src/task/`](src/task/), [`src/ipc/`](src/ipc/)*
@@ -165,6 +168,9 @@
 - **POSIX Semaphores & Message Queues ([`semaphore.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/ipc/semaphore.rs), [`mqueue.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/ipc/mqueue.rs))**:
   - **Named Semaphores**: `sem_open` (240), `sem_close` (241), `sem_post` (242), `sem_wait` (243), `sem_trywait` (244), `sem_getvalue` (245), `sem_unlink` (246), and `/dev/sem/*` virtual VFS filesystem integration.
   - **POSIX Message Queues**: `mq_open` (247), `mq_send` (248), `mq_receive` (249), `mq_unlink` (250), `mq_getattr` (251), and `/dev/mqueue/*` VFS directory node. Supports priority-ordered message insertion (higher priority popped first) and configurable queue limits (`mq_maxmsg`, `mq_msgsize`).
+- **Kernel POSIX Threads & Futexes ([`process.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/task/process.rs), [`futex.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/ipc/futex.rs))**:
+  - `sys_clone()` (Syscall 56): Linux-compatible process and kernel thread cloning supporting `CLONE_VM` (shared PML4 address space), `CLONE_FILES` (shared file descriptor table), `CLONE_FS`, `CLONE_SIGHAND`, `CLONE_THREAD`, `CLONE_PARENT_SETTID`, and `CLONE_CHILD_SETTID`. Enables multi-threaded execution with shared VM.
+  - `sys_futex()` (Syscall 202): Fast userspace locking mechanism implementing `FUTEX_WAIT` (atomic value check and wait queue), `FUTEX_WAKE` (waking waiting threads), and `FUTEX_REQUEUE` (requeueing waiters across futex words for condition variables).
 
 ### 4. Userspace Runtime, Dynamic Linker & Standard Library
 *Location: [`src/user/`](src/user/)*
@@ -217,6 +223,13 @@
   - Full suite of BSD-compliant socket system calls: `sys_socket` (41), `sys_connect` (42), `sys_accept` (43), `sys_sendto` (44), `sys_recvfrom` (45), `sys_bind` (49), `sys_listen` (50).
   - VFS `SocketInode` integration enabling standard `read()` and `write()` calls directly on socket file descriptors (`fd > 2`).
   - RFC 793 incoming connection handling for listening sockets: child socket allocation, `SYN-ACK` replies, and queueing into listener's `pending_accept` backlog.
+- **Unix Domain Sockets & IPC Streams ([`unix.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/net/unix.rs))**:
+  - Standard `AF_UNIX` / `AF_LOCAL` local socket IPC (`SockAddrUn`, filesystem namespace path binding).
+  - Supports bidirectional in-memory byte streams (`SOCK_STREAM`) and datagram packets (`SOCK_DGRAM`) with full connection lifecycle (`bind`, `listen`, `connect`, `accept`, `send`, `recv`, `close`) and VFS `FileType::Socket` integration (`UnixSocketInode`).
+- **DNS Client Cache, Multi-Nameserver Failover & LLMNR ([`dns.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/net/dns.rs))**:
+  - **DNS Cache with TTL**: In-memory DNS cache (`DNS_CACHE`) storing resolved IPv4 records with real-time TTL expiration tied to kernel RTC timestamps.
+  - **Multi-Nameserver Failover**: Parses `/etc/resolv.conf` (`nameserver`, `search`), managing multi-server configurations (`DNS_CONFIG`) with failover support.
+  - **RFC 4795 LLMNR**: Link-Local Multicast Name Resolution listening on UDP port 5355 (`224.0.0.252` / MAC `01:00:5E:00:00:FC`), answering single-label queries (`cosmos`, `cosmoskernel`, `cosmos.local`).
 - **Network Socket Server Daemons**:
   - `/bin/telnetd`: Background server daemon listening on TCP port 23, spawning interactive sessions for incoming telnet clients.
   - `/bin/sshd`: Background server daemon listening on TCP port 22 with SSH-2.0 protocol identification and authentication handling.
@@ -355,7 +368,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (41 Self-Tests)
+## Automated Verification Suite (45 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, verifying all core subsystems before launching the interactive shell:
 
@@ -404,6 +417,10 @@ On startup, CosmicOS executes its automated self-test verification suite, verify
   [TEST] NTFS Non-Resident Data Runlist Decoder & Fragmented Extents ... [PASS]
   [TEST] ext4 Directory HTree (B-Tree) Indexing ... [PASS]
   [TEST] NTP Network Time Synchronization Daemon ... [PASS]
+  [TEST] Unix Domain Sockets (AF_UNIX IPC & Streams) ... [PASS]
+  [TEST] Kernel POSIX Threads (sys_clone) & Futexes ... [PASS]
+  [TEST] Demand Paging (#PF Lazy Allocation) & Swap Subsystem ... [PASS]
+  [TEST] DNS Client Cache with TTL & LLMNR (RFC 4795) ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

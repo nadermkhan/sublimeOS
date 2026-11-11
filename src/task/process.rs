@@ -1228,153 +1228,290 @@ pub struct SockAddrIn {
     pub sin_zero: [u8; 8],
 }
 
-pub fn sys_socket(domain: i32, _sock_type: i32, _protocol: i32) -> i64 {
-    if domain != 2 && domain != 1 {
-        return -97; // -EAFNOSUPPORT
-    }
-
-    let sock_id = match crate::net::socket::socket_open() {
-        Ok(id) => id,
-        Err(_) => return -24, // -EMFILE
-    };
-
-    let inode = Arc::new(IrqSafeSpinlock::new(crate::net::socket::SocketInode { sock_id }));
-    let file = Arc::new(crate::fs::vfs::File::new(inode, crate::user::libc::O_RDWR));
-
-    let current_pid = get_current_pid();
-    if let Some(proc) = get_process(current_pid) {
-        if let Some(fd) = proc.lock().alloc_fd(file) {
-            return fd as i64;
-        }
-    }
-
-    let _ = crate::net::socket::socket_close(sock_id);
-    -24 // -EMFILE
+pub enum GenericSocket {
+    Inet(usize),
+    Unix(usize),
 }
 
-fn get_sock_id(fd: usize) -> Option<usize> {
+fn get_sock_handle(fd: usize) -> Option<GenericSocket> {
     let current_pid = get_current_pid();
     let proc = get_process(current_pid)?;
     let p = proc.lock();
     if fd < p.fd_table.len() {
         if let Some(ref file) = p.fd_table[fd] {
             let stat = file.inode.lock().stat();
-            if stat.inode >= 200 {
-                return Some((stat.inode - 200) as usize);
+            if stat.file_type == crate::fs::vfs::FileType::Socket || stat.inode >= 5000 {
+                return Some(GenericSocket::Unix((stat.inode - 5000) as usize));
+            } else if stat.inode >= 200 {
+                return Some(GenericSocket::Inet((stat.inode - 200) as usize));
             }
         }
     }
     None
 }
 
-pub fn sys_bind(fd: usize, sockaddr_ptr: *const SockAddrIn, _addrlen: usize) -> i64 {
+pub fn sys_socket(domain: i32, sock_type: i32, _protocol: i32) -> i64 {
+    if domain == 1 {
+        // AF_UNIX / AF_LOCAL
+        let st = if sock_type == 2 { crate::net::unix::SOCK_DGRAM } else { crate::net::unix::SOCK_STREAM };
+        let sock_id = crate::net::unix::unix_socket_open(st);
+        let inode = Arc::new(IrqSafeSpinlock::new(crate::net::unix::UnixSocketInode { sock_id }));
+        let file = Arc::new(crate::fs::vfs::File::new(inode, crate::user::libc::O_RDWR));
+        let current_pid = get_current_pid();
+        if let Some(proc) = get_process(current_pid) {
+            if let Some(fd) = proc.lock().alloc_fd(file) {
+                return fd as i64;
+            }
+        }
+        let _ = crate::net::unix::unix_socket_close(sock_id);
+        -24
+    } else if domain == 2 {
+        // AF_INET
+        let sock_id = match crate::net::socket::socket_open() {
+            Ok(id) => id,
+            Err(_) => return -24, // -EMFILE
+        };
+        let inode = Arc::new(IrqSafeSpinlock::new(crate::net::socket::SocketInode { sock_id }));
+        let file = Arc::new(crate::fs::vfs::File::new(inode, crate::user::libc::O_RDWR));
+        let current_pid = get_current_pid();
+        if let Some(proc) = get_process(current_pid) {
+            if let Some(fd) = proc.lock().alloc_fd(file) {
+                return fd as i64;
+            }
+        }
+        let _ = crate::net::socket::socket_close(sock_id);
+        -24
+    } else {
+        -97 // -EAFNOSUPPORT
+    }
+}
+
+pub fn sys_bind(fd: usize, sockaddr_ptr: *const u8, _addrlen: usize) -> i64 {
     if sockaddr_ptr.is_null() {
         return -14; // -EFAULT
     }
-    let sock_id = match get_sock_id(fd) {
-        Some(id) => id,
+    let sock = match get_sock_handle(fd) {
+        Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
-    let addr = unsafe { *sockaddr_ptr };
-    let port = u16::from_be(addr.sin_port);
-    match crate::net::socket::socket_bind(sock_id, addr.sin_addr, port) {
-        Ok(()) => 0,
-        Err(_) => -98, // -EADDRINUSE
+    match sock {
+        GenericSocket::Unix(unix_id) => {
+            let sun = unsafe { &*(sockaddr_ptr as *const crate::net::unix::SockAddrUn) };
+            match crate::net::unix::unix_socket_bind(unix_id, sun.path_str()) {
+                Ok(()) => 0,
+                Err(_) => -98, // -EADDRINUSE
+            }
+        }
+        GenericSocket::Inet(inet_id) => {
+            let addr = unsafe { *(sockaddr_ptr as *const SockAddrIn) };
+            let port = u16::from_be(addr.sin_port);
+            match crate::net::socket::socket_bind(inet_id, addr.sin_addr, port) {
+                Ok(()) => 0,
+                Err(_) => -98,
+            }
+        }
     }
 }
 
 pub fn sys_listen(fd: usize, backlog: i32) -> i64 {
-    let sock_id = match get_sock_id(fd) {
-        Some(id) => id,
+    let sock = match get_sock_handle(fd) {
+        Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
     let bl = if backlog > 0 { backlog as usize } else { 5 };
-    match crate::net::socket::socket_listen(sock_id, bl) {
-        Ok(()) => 0,
-        Err(_) => -22, // -EINVAL
+    match sock {
+        GenericSocket::Unix(unix_id) => match crate::net::unix::unix_socket_listen(unix_id, bl) {
+            Ok(()) => 0,
+            Err(_) => -22,
+        },
+        GenericSocket::Inet(inet_id) => match crate::net::socket::socket_listen(inet_id, bl) {
+            Ok(()) => 0,
+            Err(_) => -22,
+        },
     }
 }
 
-pub fn sys_accept(fd: usize, sockaddr_out: *mut SockAddrIn, addrlen_out: *mut u32) -> i64 {
-    let sock_id = match get_sock_id(fd) {
-        Some(id) => id,
+pub fn sys_accept(fd: usize, sockaddr_out: *mut u8, addrlen_out: *mut u32) -> i64 {
+    let sock = match get_sock_handle(fd) {
+        Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
-
-    match crate::net::socket::socket_accept(sock_id, 3000) {
-        Ok((client_id, r_ip, r_port)) => {
-            if !sockaddr_out.is_null() {
-                let out = SockAddrIn {
-                    sin_family: 2,
-                    sin_port: r_port.to_be(),
-                    sin_addr: r_ip,
-                    sin_zero: [0; 8],
-                };
-                unsafe {
-                    *sockaddr_out = out;
-                    if !addrlen_out.is_null() {
-                        *addrlen_out = core::mem::size_of::<SockAddrIn>() as u32;
+    match sock {
+        GenericSocket::Unix(unix_id) => {
+            match crate::net::unix::unix_socket_accept(unix_id) {
+                Ok(child_id) => {
+                    let inode = Arc::new(IrqSafeSpinlock::new(crate::net::unix::UnixSocketInode { sock_id: child_id }));
+                    let file = Arc::new(crate::fs::vfs::File::new(inode, crate::user::libc::O_RDWR));
+                    let current_pid = get_current_pid();
+                    if let Some(proc) = get_process(current_pid) {
+                        if let Some(client_fd) = proc.lock().alloc_fd(file) {
+                            return client_fd as i64;
+                        }
                     }
+                    let _ = crate::net::unix::unix_socket_close(child_id);
+                    -24
                 }
+                Err(_) => -11, // -EAGAIN
             }
-
-            let inode = Arc::new(IrqSafeSpinlock::new(crate::net::socket::SocketInode { sock_id: client_id }));
-            let file = Arc::new(crate::fs::vfs::File::new(inode, crate::user::libc::O_RDWR));
-            let current_pid = get_current_pid();
-            if let Some(proc) = get_process(current_pid) {
-                if let Some(client_fd) = proc.lock().alloc_fd(file) {
-                    return client_fd as i64;
-                }
-            }
-            let _ = crate::net::socket::socket_close(client_id);
-            -24 // -EMFILE
         }
-        Err(_) => -11, // -EAGAIN / timed out
+        GenericSocket::Inet(inet_id) => {
+            match crate::net::socket::socket_accept(inet_id, 3000) {
+                Ok((client_id, r_ip, r_port)) => {
+                    if !sockaddr_out.is_null() {
+                        let out = SockAddrIn {
+                            sin_family: 2,
+                            sin_port: r_port.to_be(),
+                            sin_addr: r_ip,
+                            sin_zero: [0; 8],
+                        };
+                        unsafe {
+                            *(sockaddr_out as *mut SockAddrIn) = out;
+                            if !addrlen_out.is_null() {
+                                *addrlen_out = core::mem::size_of::<SockAddrIn>() as u32;
+                            }
+                        }
+                    }
+
+                    let inode = Arc::new(IrqSafeSpinlock::new(crate::net::socket::SocketInode { sock_id: client_id }));
+                    let file = Arc::new(crate::fs::vfs::File::new(inode, crate::user::libc::O_RDWR));
+                    let current_pid = get_current_pid();
+                    if let Some(proc) = get_process(current_pid) {
+                        if let Some(client_fd) = proc.lock().alloc_fd(file) {
+                            return client_fd as i64;
+                        }
+                    }
+                    let _ = crate::net::socket::socket_close(client_id);
+                    -24 // -EMFILE
+                }
+                Err(_) => -11, // -EAGAIN / timed out
+            }
+        }
     }
 }
 
-pub fn sys_connect(fd: usize, sockaddr_ptr: *const SockAddrIn, _addrlen: usize) -> i64 {
+pub fn sys_connect(fd: usize, sockaddr_ptr: *const u8, _addrlen: usize) -> i64 {
     if sockaddr_ptr.is_null() {
         return -14; // -EFAULT
     }
-    let sock_id = match get_sock_id(fd) {
-        Some(id) => id,
+    let sock = match get_sock_handle(fd) {
+        Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
-    let addr = unsafe { *sockaddr_ptr };
-    let port = u16::from_be(addr.sin_port);
-    match crate::net::socket::socket_connect(sock_id, addr.sin_addr, port) {
-        Ok(()) => 0,
-        Err(_) => -111, // -ECONNREFUSED
+    match sock {
+        GenericSocket::Unix(unix_id) => {
+            let sun = unsafe { &*(sockaddr_ptr as *const crate::net::unix::SockAddrUn) };
+            match crate::net::unix::unix_socket_connect(unix_id, sun.path_str()) {
+                Ok(()) => 0,
+                Err(_) => -111, // -ECONNREFUSED
+            }
+        }
+        GenericSocket::Inet(inet_id) => {
+            let addr = unsafe { *(sockaddr_ptr as *const SockAddrIn) };
+            let port = u16::from_be(addr.sin_port);
+            match crate::net::socket::socket_connect(inet_id, addr.sin_addr, port) {
+                Ok(()) => 0,
+                Err(_) => -111, // -ECONNREFUSED
+            }
+        }
     }
 }
 
-pub fn sys_sendto(fd: usize, buf: *const u8, len: usize, _flags: i32, _dest: *const SockAddrIn, _addrlen: usize) -> i64 {
+pub fn sys_sendto(fd: usize, buf: *const u8, len: usize, _flags: i32, _dest: *const u8, _addrlen: usize) -> i64 {
     if buf.is_null() {
         return -14; // -EFAULT
     }
-    let sock_id = match get_sock_id(fd) {
-        Some(id) => id,
+    let sock = match get_sock_handle(fd) {
+        Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
     let slice = unsafe { core::slice::from_raw_parts(buf, len) };
-    match crate::net::socket::socket_send(sock_id, slice) {
-        Ok(n) => n as i64,
-        Err(_) => -32, // -EPIPE
+    match sock {
+        GenericSocket::Unix(unix_id) => match crate::net::unix::unix_socket_send(unix_id, slice) {
+            Ok(n) => n as i64,
+            Err(_) => -32, // -EPIPE
+        },
+        GenericSocket::Inet(inet_id) => match crate::net::socket::socket_send(inet_id, slice) {
+            Ok(n) => n as i64,
+            Err(_) => -32, // -EPIPE
+        },
     }
 }
 
-pub fn sys_recvfrom(fd: usize, buf: *mut u8, len: usize, _flags: i32, _src: *mut SockAddrIn, _addrlen: *mut u32) -> i64 {
+pub fn sys_recvfrom(fd: usize, buf: *mut u8, len: usize, _flags: i32, _src: *mut u8, _addrlen: *mut u32) -> i64 {
     if buf.is_null() {
         return -14; // -EFAULT
     }
-    let sock_id = match get_sock_id(fd) {
-        Some(id) => id,
+    let sock = match get_sock_handle(fd) {
+        Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
     let slice = unsafe { core::slice::from_raw_parts_mut(buf, len) };
-    match crate::net::socket::socket_recv(sock_id, slice, 2000) {
-        Ok(n) => n as i64,
-        Err(_) => -11, // -EAGAIN
+    match sock {
+        GenericSocket::Unix(unix_id) => match crate::net::unix::unix_socket_recv(unix_id, slice) {
+            Ok(n) => n as i64,
+            Err(_) => -11, // -EAGAIN
+        },
+        GenericSocket::Inet(inet_id) => match crate::net::socket::socket_recv(inet_id, slice, 2000) {
+            Ok(n) => n as i64,
+            Err(_) => -11, // -EAGAIN
+        },
     }
+}
+
+pub const CLONE_VM: u64 = 0x00000100;
+pub const CLONE_FS: u64 = 0x00000200;
+pub const CLONE_FILES: u64 = 0x00000400;
+pub const CLONE_SIGHAND: u64 = 0x00000800;
+pub const CLONE_THREAD: u64 = 0x00010000;
+pub const CLONE_SETTLS: u64 = 0x00080000;
+pub const CLONE_PARENT_SETTID: u64 = 0x00100000;
+pub const CLONE_CHILD_CLEARTID: u64 = 0x00200000;
+pub const CLONE_CHILD_SETTID: u64 = 0x01000000;
+
+/// POSIX / Linux sys_clone implementation for process forking and kernel-level POSIX threads.
+pub fn sys_clone(flags: u64, _stack: *mut u8, ptid: *mut i32, ctid: *mut i32, _tls: u64) -> i64 {
+    let parent_pid = get_current_pid();
+    let parent_proc = match get_process(parent_pid) {
+        Some(p) => p,
+        None => return -3, // -ESRCH
+    };
+
+    let new_tid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let mut child_pcb = ProcessControlBlock::new(new_tid, parent_pid, "thread");
+
+    let p = parent_proc.lock();
+    child_pcb.pgid = p.pgid;
+    child_pcb.sid = p.sid;
+
+    // CLONE_VM: share address space
+    if (flags & CLONE_VM) != 0 {
+        child_pcb.address_space = p.address_space.clone();
+    } else {
+        let mut space_guard = crate::task::user::CURRENT_USER_ADDRESS_SPACE.lock();
+        if let Some(ref mut parent_space) = *space_guard {
+            child_pcb.address_space = parent_space.clone_cow();
+        }
+    }
+
+    // CLONE_FILES: share file descriptor table
+    if (flags & CLONE_FILES) != 0 {
+        child_pcb.fd_table = p.fd_table.clone();
+    }
+
+    // CLONE_SIGHAND: share signal actions
+    if (flags & CLONE_SIGHAND) != 0 {
+        child_pcb.sigactions = p.sigactions;
+        child_pcb.signal_state = p.signal_state.clone();
+    }
+    drop(p);
+
+    if (flags & CLONE_PARENT_SETTID) != 0 && !ptid.is_null() {
+        unsafe { *ptid = new_tid as i32; }
+    }
+    if (flags & CLONE_CHILD_SETTID) != 0 && !ctid.is_null() {
+        unsafe { *ctid = new_tid as i32; }
+    }
+
+    PROCESS_TABLE.lock().push(Arc::new(IrqSafeSpinlock::new(child_pcb)));
+    new_tid as i64
 }

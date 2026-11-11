@@ -91,6 +91,25 @@ pub unsafe fn syscall4(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     ret
 }
 
+/// Fast AMD64 Userspace System Call Gateway (5 arguments)
+#[inline(always)]
+pub unsafe fn syscall5(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "syscall",
+        inlateout("rax") num => ret,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        in("r10") a4,
+        in("r8") a5,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack, preserves_flags)
+    );
+    ret
+}
+
 /// Fast AMD64 Userspace System Call Gateway (6 arguments)
 #[inline(always)]
 pub unsafe fn syscall6(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
@@ -560,6 +579,20 @@ pub fn mq_unlink(name: &str) -> i32 {
     let mut null_terminated = alloc::string::String::from(name);
     null_terminated.push('\0');
     unsafe { syscall1(SYS_MQ_UNLINK, null_terminated.as_ptr() as u64) as i32 }
+}
+
+/// POSIX clone() system call wrapper
+pub fn clone(flags: u64, stack: *mut u8, ptid: *mut i32, ctid: *mut i32, tls: u64) -> i64 {
+    unsafe {
+        syscall5(SYS_CLONE, flags, stack as u64, ptid as u64, ctid as u64, tls)
+    }
+}
+
+/// Linux/POSIX futex() system call wrapper
+pub fn futex(uaddr: *mut u32, futex_op: i32, val: u32, timeout: *const u64, uaddr2: *mut u32, val3: u32) -> i64 {
+    unsafe {
+        syscall6(SYS_FUTEX, uaddr as u64, futex_op as u64, val as u64, timeout as u64, uaddr2 as u64, val3 as u64)
+    }
 }
 
 /// POSIX exit() system call wrapper

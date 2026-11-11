@@ -89,6 +89,7 @@ impl Signal {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct SignalState {
     pub pending: u64,
     pub blocked: u64,

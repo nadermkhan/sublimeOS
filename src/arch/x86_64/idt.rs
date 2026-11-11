@@ -192,17 +192,29 @@ pub extern "C" fn interrupt_dispatch(ctx: *mut InterruptContext) {
 }
 
 fn handle_exception(ctx: &InterruptContext) {
+    if ctx.vector == 14 {
+        let fault_addr = unsafe { read_cr2() };
+        let is_present = (ctx.error_code & 1) != 0;
+        let is_write = (ctx.error_code & 2) != 0;
+        let current_cr3 = unsafe { crate::arch::x86_64::registers::read_cr3() };
+
+        if is_present && is_write {
+            if crate::mm::vmm::VMM.lock().handle_cow_fault(current_cr3, fault_addr).is_ok() {
+                return; // CoW successfully handled: frame duplicated, permissions restored!
+            }
+        }
+
+        if !is_present {
+            if crate::mm::vma::handle_demand_fault(current_cr3, fault_addr, is_write).is_ok() {
+                return; // Demand paging or swap-in successfully allocated and mapped frame!
+            }
+        }
+    }
+
     let is_user_mode = (ctx.cs & 3) == 3 || (ctx.vector == 14 && (ctx.error_code & 4) != 0);
     if is_user_mode {
         if ctx.vector == 14 {
             let fault_addr = unsafe { read_cr2() };
-            let is_write = (ctx.error_code & 2) != 0;
-            if is_write {
-                let current_cr3 = unsafe { crate::arch::x86_64::registers::read_cr3() };
-                if crate::mm::vmm::VMM.lock().handle_cow_fault(current_cr3, fault_addr).is_ok() {
-                    return; // CoW successfully handled: frame duplicated, permissions restored!
-                }
-            }
             crate::kerror!("User Segmentation Fault (SIGSEGV) at 0x{:016X}! RIP: 0x{:016X}", fault_addr, ctx.rip);
             crate::task::user::handle_user_fault(139);
         } else if ctx.vector == 13 {

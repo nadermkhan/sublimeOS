@@ -52,6 +52,10 @@ pub fn run_all_tests() {
     test_ntfs_non_resident_runlist_decoder();
     test_ext4_htree_directory_indexing();
     test_ntp_time_synchronization();
+    test_unix_domain_sockets();
+    test_posix_threads_and_futexes();
+    test_demand_paging_and_swap();
+    test_dns_cache_and_llmnr();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -1464,7 +1468,7 @@ fn test_network_socket_server_and_daemons() {
         sin_addr: [0, 0, 0, 0],
         sin_zero: [0; 8],
     };
-    let bind_ret = crate::task::process::sys_bind(srv_fd as usize, &srv_addr, core::mem::size_of::<crate::task::process::SockAddrIn>());
+    let bind_ret = crate::task::process::sys_bind(srv_fd as usize, &srv_addr as *const _ as *const u8, core::mem::size_of::<crate::task::process::SockAddrIn>());
     assert_eq!(bind_ret, 0, "sys_bind failed");
 
     let listen_ret = crate::task::process::sys_listen(srv_fd as usize, 5);
@@ -1480,7 +1484,7 @@ fn test_network_socket_server_and_daemons() {
         sin_addr: [127, 0, 0, 1],
         sin_zero: [0; 8],
     };
-    let conn_ret = crate::task::process::sys_connect(cli_fd as usize, &cli_dest, core::mem::size_of::<crate::task::process::SockAddrIn>());
+    let conn_ret = crate::task::process::sys_connect(cli_fd as usize, &cli_dest as *const _ as *const u8, core::mem::size_of::<crate::task::process::SockAddrIn>());
     assert_eq!(conn_ret, 0, "sys_connect failed");
 
     // 4. Test server accepting incoming connection
@@ -1491,7 +1495,7 @@ fn test_network_socket_server_and_daemons() {
         sin_zero: [0; 8],
     };
     let mut addrlen: u32 = 0;
-    let acc_fd = crate::task::process::sys_accept(srv_fd as usize, &mut peer_addr, &mut addrlen);
+    let acc_fd = crate::task::process::sys_accept(srv_fd as usize, &mut peer_addr as *mut _ as *mut u8, &mut addrlen);
     assert!(acc_fd >= 0, "sys_accept failed");
 
     // 5. Test inter-socket data transfer (client -> server)
@@ -2740,6 +2744,276 @@ fn test_ntp_time_synchronization() {
     assert!(status_str.contains("Active NTP Anchor"), "Status missing active anchor");
     assert!(status_str.contains("Stratum:           2"), "Status missing stratum");
     assert!(status_str.contains("10.0.2.2"), "Status missing server IP");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_unix_domain_sockets() {
+    print!("  [TEST] Unix Domain Sockets (AF_UNIX IPC & Streams) ... ");
+
+    // 1. Stream Server socket creation, binding, and listening
+    let srv_id = crate::net::unix::unix_socket_open(crate::net::unix::SOCK_STREAM);
+    assert!(srv_id > 0, "Failed to open stream UNIX socket");
+
+    let bind_res = crate::net::unix::unix_socket_bind(srv_id, "/tmp/test_ipc.sock");
+    assert!(bind_res.is_ok(), "Failed to bind UNIX socket to /tmp/test_ipc.sock");
+
+    let listen_res = crate::net::unix::unix_socket_listen(srv_id, 4);
+    assert!(listen_res.is_ok(), "Failed to listen on UNIX socket");
+
+    // 2. Stream Client socket creation and connection
+    let cli_id = crate::net::unix::unix_socket_open(crate::net::unix::SOCK_STREAM);
+    assert!(cli_id > 0, "Failed to open client UNIX socket");
+
+    let conn_res = crate::net::unix::unix_socket_connect(cli_id, "/tmp/test_ipc.sock");
+    assert!(conn_res.is_ok(), "Failed to connect client to /tmp/test_ipc.sock");
+
+    // 3. Server accepts connection
+    let acc_id = crate::net::unix::unix_socket_accept(srv_id).expect("Failed to accept client connection");
+    assert!(acc_id > 0, "Accepted socket ID should be positive");
+
+    // 4. Bi-directional data transfer (Client -> Server)
+    let msg_client = b"HELLO_UNIX_SOCKET";
+    let sent_c = crate::net::unix::unix_socket_send(cli_id, msg_client).expect("Client send failed");
+    assert_eq!(sent_c, msg_client.len(), "Client sent bytes mismatch");
+
+    let mut srv_rx = [0u8; 32];
+    let recvd_s = crate::net::unix::unix_socket_recv(acc_id, &mut srv_rx).expect("Server recv failed");
+    assert_eq!(recvd_s, msg_client.len());
+    assert_eq!(&srv_rx[..recvd_s], msg_client);
+
+    // Bi-directional data transfer (Server -> Client)
+    let msg_server = b"REPLY_UNIX_SOCKET";
+    let sent_s = crate::net::unix::unix_socket_send(acc_id, msg_server).expect("Server send failed");
+    assert_eq!(sent_s, msg_server.len());
+
+    let mut cli_rx = [0u8; 32];
+    let recvd_c = crate::net::unix::unix_socket_recv(cli_id, &mut cli_rx).expect("Client recv failed");
+    assert_eq!(recvd_c, msg_server.len());
+    assert_eq!(&cli_rx[..recvd_c], msg_server);
+
+    // 5. Datagram UNIX domain sockets (SOCK_DGRAM)
+    let dgram_srv = crate::net::unix::unix_socket_open(crate::net::unix::SOCK_DGRAM);
+    assert!(crate::net::unix::unix_socket_bind(dgram_srv, "/tmp/test_dgram.sock").is_ok());
+
+    let dgram_cli = crate::net::unix::unix_socket_open(crate::net::unix::SOCK_DGRAM);
+    assert!(crate::net::unix::unix_socket_connect(dgram_cli, "/tmp/test_dgram.sock").is_ok());
+
+    let dgram_msg = b"COSMIC_DGRAM_PAYLOAD";
+    let sent_d = crate::net::unix::unix_socket_send(dgram_cli, dgram_msg).expect("Dgram send failed");
+    assert_eq!(sent_d, dgram_msg.len());
+
+    let mut dgram_rx = [0u8; 32];
+    let recvd_d = crate::net::unix::unix_socket_recv(dgram_srv, &mut dgram_rx).expect("Dgram recv failed");
+    assert_eq!(recvd_d, dgram_msg.len());
+    assert_eq!(&dgram_rx[..recvd_d], dgram_msg);
+
+    // 6. Cleanup
+    let _ = crate::net::unix::unix_socket_close(srv_id);
+    let _ = crate::net::unix::unix_socket_close(cli_id);
+    let _ = crate::net::unix::unix_socket_close(acc_id);
+    let _ = crate::net::unix::unix_socket_close(dgram_srv);
+    let _ = crate::net::unix::unix_socket_close(dgram_cli);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_posix_threads_and_futexes() {
+    print!("  [TEST] Kernel POSIX Threads (sys_clone) & Futexes ... ");
+
+    // 1. Test sys_clone with CLONE_VM | CLONE_FILES | CLONE_THREAD
+    let clone_flags = crate::task::process::CLONE_VM
+        | crate::task::process::CLONE_FILES
+        | crate::task::process::CLONE_FS
+        | crate::task::process::CLONE_THREAD
+        | crate::task::process::CLONE_PARENT_SETTID;
+
+    let mut parent_tid_out: i32 = 0;
+    let new_tid = crate::task::process::sys_clone(
+        clone_flags,
+        core::ptr::null_mut(),
+        &mut parent_tid_out as *mut i32,
+        core::ptr::null_mut(),
+        0,
+    );
+    assert!(new_tid > 0, "sys_clone returned invalid TID");
+    assert_eq!(parent_tid_out, new_tid as i32, "Parent TID output mismatch");
+
+    // Verify cloned thread shares AddressSpace PML4
+    let current_pid = crate::task::process::get_current_pid();
+    let parent_proc = crate::task::process::get_process(current_pid).expect("Parent process not found");
+    let thread_proc = crate::task::process::get_process(new_tid as u64).expect("Cloned thread process not found");
+
+    let parent_pml4 = parent_proc.lock().address_space.as_ref().map(|s| s.pml4_phys);
+    let thread_pml4 = thread_proc.lock().address_space.as_ref().map(|s| s.pml4_phys);
+    assert_eq!(parent_pml4, thread_pml4, "CLONE_VM thread must share parent PML4");
+
+    // 2. Test sys_futex FUTEX_WAIT with value mismatch
+    let mut futex_word: u32 = 42;
+    let wait_mismatch = crate::ipc::futex::sys_futex(
+        &mut futex_word as *mut u32,
+        crate::ipc::futex::FUTEX_WAIT,
+        100, // Expected 100, but value is 42
+        core::ptr::null(),
+        core::ptr::null_mut(),
+        0,
+    );
+    assert_eq!(wait_mismatch, -11, "Futex wait with mismatch value should return -EAGAIN (-11)");
+
+    // 3. Test sys_futex FUTEX_WAIT with value match (thread queued as waiter)
+    let wait_ok = crate::ipc::futex::sys_futex(
+        &mut futex_word as *mut u32,
+        crate::ipc::futex::FUTEX_WAIT,
+        42,
+        core::ptr::null(),
+        core::ptr::null_mut(),
+        0,
+    );
+    assert_eq!(wait_ok, 0, "Futex wait with matching value should return 0");
+    assert_eq!(crate::ipc::futex::waiter_count(&mut futex_word as *mut u32), 1, "Should have 1 futex waiter");
+
+    // 4. Test sys_futex FUTEX_WAKE
+    let woken = crate::ipc::futex::sys_futex(
+        &mut futex_word as *mut u32,
+        crate::ipc::futex::FUTEX_WAKE,
+        1,
+        core::ptr::null(),
+        core::ptr::null_mut(),
+        0,
+    );
+    assert_eq!(woken, 1, "Futex wake should have woken 1 waiter");
+    assert_eq!(crate::ipc::futex::waiter_count(&mut futex_word as *mut u32), 0, "Should have 0 futex waiters after wake");
+
+    // 5. Test sys_futex FUTEX_REQUEUE
+    let mut futex_target: u32 = 99;
+    // Add waiter back to futex_word
+    crate::ipc::futex::sys_futex(&mut futex_word as *mut u32, crate::ipc::futex::FUTEX_WAIT, 42, core::ptr::null(), core::ptr::null_mut(), 0);
+    assert_eq!(crate::ipc::futex::waiter_count(&mut futex_word as *mut u32), 1);
+
+    // Requeue to futex_target
+    let requeued = crate::ipc::futex::sys_futex(
+        &mut futex_word as *mut u32,
+        crate::ipc::futex::FUTEX_REQUEUE,
+        0, // wake 0
+        core::ptr::null(),
+        &mut futex_target as *mut u32,
+        1, // requeue up to 1
+    );
+    assert_eq!(requeued, 1, "Futex requeue should have moved 1 waiter");
+    assert_eq!(crate::ipc::futex::waiter_count(&mut futex_word as *mut u32), 0);
+    assert_eq!(crate::ipc::futex::waiter_count(&mut futex_target as *mut u32), 1);
+
+    // Clean up remaining waiter
+    crate::ipc::futex::sys_futex(&mut futex_target as *mut u32, crate::ipc::futex::FUTEX_WAKE, 1, core::ptr::null(), core::ptr::null_mut(), 0);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_demand_paging_and_swap() {
+    print!("  [TEST] Demand Paging (#PF Lazy Allocation) & Swap Subsystem ... ");
+
+    let cr3 = unsafe { crate::arch::x86_64::registers::read_cr3() };
+    let pml4 = unsafe { &mut *(crate::mm::phys_to_virt(cr3) as *mut crate::mm::vmm::PageTable) };
+    let test_vaddr: u64 = 0x0000_6500_0000;
+
+    // 1. Verify initially unmapped
+    let initial_pte = crate::mm::vmm::VMM.lock().get_pte_mut(pml4, test_vaddr);
+    assert!(initial_pte.is_none() || !initial_pte.unwrap().is_present(), "Page should not be present initially");
+
+    // 2. Register demand-paged VMA region (4096 bytes)
+    crate::mm::vma::VMA_MANAGER.lock().register_demand_region(cr3, test_vaddr, 4096, 3); // PROT_READ | PROT_WRITE
+
+    // 3. Simulate page fault handler resolving demand page
+    let pf_res = crate::mm::vma::handle_demand_fault(cr3, test_vaddr + 0x40, true);
+    assert!(pf_res.is_ok(), "Demand fault handler failed to lazily allocate frame");
+
+    // 4. Verify physical frame was mapped and zero-initialized
+    let pte = crate::mm::vmm::VMM.lock().get_pte_mut(pml4, test_vaddr).expect("PTE must exist after demand fault");
+    assert!(pte.is_present(), "PTE must be marked present");
+    assert!(pte.is_writable(), "PTE must be marked writable");
+
+    // Write a test value to the demand-mapped page
+    let test_ptr = test_vaddr as *mut u64;
+    unsafe {
+        core::ptr::write_volatile(test_ptr, 0x1234_5678_9ABC_DEF0);
+        let read_val = core::ptr::read_volatile(test_ptr);
+        assert_eq!(read_val, 0x1234_5678_9ABC_DEF0, "Memory read/write on demand-allocated page failed");
+    }
+
+    // 5. Test Swap Subsystem: swap out active page to swap storage
+    let slot_id = crate::mm::swap::SWAP_MANAGER.lock().swap_out(cr3, test_vaddr).expect("swap_out failed");
+    assert_eq!(slot_id, 0);
+    assert_eq!(crate::mm::swap::SWAP_MANAGER.lock().used_slots_count(), 1, "Swap manager should have 1 active slot");
+
+    // Verify page table entry is marked swapped and not present
+    let swapped_pte = crate::mm::vmm::VMM.lock().get_pte_mut(pml4, test_vaddr).unwrap();
+    assert!(!swapped_pte.is_present(), "Swapped PTE must not be present");
+    assert!(swapped_pte.is_swapped(), "Swapped PTE must have PAGE_SWAPPED bit set");
+
+    // 6. Test Swap In: demand fault handler transparently swaps the page back in
+    let swap_in_res = crate::mm::vma::handle_demand_fault(cr3, test_vaddr, false);
+    assert!(swap_in_res.is_ok(), "Demand fault handler failed to swap in page");
+    assert_eq!(crate::mm::swap::SWAP_MANAGER.lock().used_slots_count(), 0, "Swap manager should have 0 active slots after swap_in");
+
+    // Verify restored data integrity
+    unsafe {
+        let restored_val = core::ptr::read_volatile(test_ptr);
+        assert_eq!(restored_val, 0x1234_5678_9ABC_DEF0, "Data restored after swap-in does not match original");
+    }
+
+    // 7. Cleanup
+    crate::mm::vma::VMA_MANAGER.lock().unregister_demand_region(cr3, test_vaddr);
+    crate::mm::vmm::VMM.lock().unmap_page(pml4, test_vaddr);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_dns_cache_and_llmnr() {
+    print!("  [TEST] DNS Client Cache with TTL & LLMNR (RFC 4795) ... ");
+
+    // 1. Test DNS Client Cache with TTL
+    let base_time: u64 = 1773000000;
+    crate::net::dns::DNS_CACHE.lock().insert("cosmos.os", [192, 168, 88, 1], 60, base_time);
+
+    // Cache hit before TTL expires (at base_time + 30)
+    let hit = crate::net::dns::DNS_CACHE.lock().lookup("cosmos.os", base_time + 30);
+    assert_eq!(hit, Some([192, 168, 88, 1]), "DNS cache hit expected");
+
+    // Cache miss after TTL expiration (at base_time + 65)
+    let expired = crate::net::dns::DNS_CACHE.lock().lookup("cosmos.os", base_time + 65);
+    assert_eq!(expired, None, "DNS cache entry should be evicted after TTL expiration");
+
+    // 2. Test Multi-nameserver configuration (/etc/resolv.conf parser)
+    let resolv_sample = "# /etc/resolv.conf\nnameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 9.9.9.9\nsearch cosmos.internal\n";
+    crate::net::dns::DNS_CONFIG.lock().parse_resolv_conf(resolv_sample);
+
+    let ns_list = crate::net::dns::DNS_CONFIG.lock().get_nameservers().to_vec();
+    assert_eq!(ns_list.len(), 3, "Expected 3 nameservers in resolv.conf");
+    assert_eq!(ns_list[0], [1, 1, 1, 1]);
+    assert_eq!(ns_list[1], [8, 8, 8, 8]);
+    assert_eq!(ns_list[2], [9, 9, 9, 9]);
+
+    // 3. Test RFC 4795 LLMNR Query Packet Builder & Parser
+    let llmnr_q = crate::net::dns::build_llmnr_query("cosmos", 0x4321);
+    assert!(llmnr_q.len() >= 12, "LLMNR query too short");
+    assert_eq!(&llmnr_q[0..2], &0x4321u16.to_be_bytes(), "LLMNR TX ID mismatch");
+
+    let parsed_query = crate::net::dns::parse_llmnr_query(&llmnr_q).expect("Failed to parse LLMNR query");
+    assert_eq!(parsed_query.0, 0x4321);
+    assert_eq!(parsed_query.1, "cosmos");
+
+    // 4. Test LLMNR Response Packet Builder & Answer Parser
+    let my_ip = [10, 0, 2, 15];
+    let llmnr_resp = crate::net::dns::build_llmnr_response("cosmos", 0x4321, my_ip, 30);
+    assert_eq!(&llmnr_resp[2..4], &0x8000u16.to_be_bytes(), "LLMNR response flags mismatch");
+
+    let resolved_ip = crate::net::dns::parse_dns_response(&llmnr_resp, 0x4321).expect("Failed to parse LLMNR response IP");
+    assert_eq!(resolved_ip, my_ip, "LLMNR resolved IP mismatch");
+
+    // 5. Test handle_llmnr_packet handler generates valid frame for hostname query
+    let dummy_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+    let reply_frame = crate::net::dns::handle_llmnr_packet(&llmnr_q, [10, 0, 2, 2], 5355, my_ip, dummy_mac);
+    assert!(reply_frame.is_some(), "LLMNR packet handler should return reply frame for cosmos");
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

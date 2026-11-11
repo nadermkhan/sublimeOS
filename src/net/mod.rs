@@ -21,6 +21,7 @@ pub mod socket;
 pub mod tcp;
 pub mod tls;
 pub mod udp;
+pub mod unix;
 pub mod wifi;
 
 /// Initialize the Master Network Subsystem (Loopback, Hardware NICs, 802.11 Wi-Fi).
@@ -85,6 +86,10 @@ pub fn poll() {
                                         }
                                     } else if dst_port == mdns::MDNS_PORT {
                                         if let Some(reply_frame) = mdns::handle_mdns_packet(udp_payload, src_ip, src_port, cfg.ipv4, dev.mac_address()) {
+                                            let _ = dev.send_packet(&reply_frame);
+                                        }
+                                    } else if dst_port == dns::LLMNR_PORT {
+                                        if let Some(reply_frame) = dns::handle_llmnr_packet(udp_payload, src_ip, src_port, cfg.ipv4, dev.mac_address()) {
                                             let _ = dev.send_packet(&reply_frame);
                                         }
                                     } else if dst_port == udp::PORT_NTP || src_port == udp::PORT_NTP {
@@ -286,15 +291,6 @@ pub fn parse_or_resolve_ip(target: &str) -> Result<[u8; 4], &'static str> {
         return Ok(ip);
     }
 
-    // Default DNS resolution fallback for common domains
-    match target {
-        "google.com" | "www.google.com" => Ok([142, 250, 190, 46]),
-        "one.one.one.one" => Ok([1, 1, 1, 1]),
-        "dns.google" => Ok([8, 8, 8, 8]),
-        "localhost" => Ok([127, 0, 0, 1]),
-        "apple.com" | "www.apple.com" => Ok([17, 253, 144, 10]),
-        "github.com" | "www.github.com" => Ok([140, 82, 121, 4]),
-        "cosmic.internal" => Ok([192, 168, 1, 1]),
-        _ => Err("Could not resolve host (DNS unreachable)"),
-    }
+    // Resolve hostname with TTL cache, nameserver fallback, and static mappings
+    dns::resolve_cached(target)
 }

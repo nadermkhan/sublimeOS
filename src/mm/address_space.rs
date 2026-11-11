@@ -21,6 +21,7 @@ pub struct VirtualMemoryArea {
     pub vma_type: VmaType,
 }
 
+#[derive(Clone)]
 pub struct AddressSpace {
     pub pml4_phys: u64,
     pub vmas: Vec<VirtualMemoryArea>,

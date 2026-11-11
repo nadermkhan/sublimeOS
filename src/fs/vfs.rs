@@ -11,6 +11,7 @@ pub enum FileType {
     CharDevice,
     BlockDevice,
     Pipe,
+    Socket,
 }
 
 #[derive(Debug, Clone)]

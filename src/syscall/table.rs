@@ -29,6 +29,7 @@ pub const SYS_LISTEN: u64 = 50;
 pub const SYS_POSIX_OPENPT: u64 = 51;
 pub const SYS_PTSNAME: u64 = 52;
 pub const SYS_UNLOCKPT: u64 = 53;
+pub const SYS_CLONE: u64 = 56;
 pub const SYS_FORK: u64 = 57;
 pub const SYS_EXECVE: u64 = 59;
 pub const SYS_EXIT: u64 = 60;
@@ -45,6 +46,7 @@ pub const SYS_GETPGRP: u64 = 111;
 pub const SYS_SETSID: u64 = 112;
 pub const SYS_GETPGID: u64 = 121;
 pub const SYS_GETSID: u64 = 124;
+pub const SYS_FUTEX: u64 = 202;
 pub const SYS_SCHED_SETAFFINITY: u64 = 203;
 pub const SYS_SCHED_GETAFFINITY: u64 = 204;
 
