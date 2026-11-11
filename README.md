@@ -29,7 +29,7 @@
    - [8. CosmicSH POSIX Shell & Terminal Text Editor](#8-cosmicsh-posix-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
 4. [Interactive Shell Command Reference (48 Commands)](#interactive-shell-command-reference-48-commands)
-5. [Automated Verification Suite (31 Self-Tests)](#automated-verification-suite-31-self-tests)
+5. [Automated Verification Suite (32 Self-Tests)](#automated-verification-suite-32-self-tests)
 6. [Building and Running](#building-and-running)
    - [Prerequisites](#prerequisites)
    - [Compiling Kernel](#compiling-kernel)
@@ -213,7 +213,11 @@
   - SHA-256, HMAC-SHA256, and HKDF-Extract/Expand key schedule derivation.
   - Client: `curl [-i] <url>` fetching web pages and REST APIs over plain HTTP or secure HTTPS (`curl https://...`).
   - Server: Embedded `httpd` web server serving interactive status dashboards and JSON APIs (`/api/status`).
-- **POSIX Pseudo-Terminal Subsystem ([`pty.rs`](src/tty/pty.rs))**:
+- **Hardware Network Drivers ([`src/drivers/net/`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/))**:
+  - **Intel e1000 Gigabit NIC ([`e1000.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/e1000.rs))**: PCI controller (`en0`) with MMIO register control and hardware packet rings.
+  - **Realtek Fast & Gigabit Ethernet ([`realtek.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/realtek.rs))**: Support for RTL8139 (10/100M Fast Ethernet), RTL8168/RTL8169 (PCI/PCIe Gigabit), and RTL8125 (2.5GbE Gaming NIC) with auto-switching MMIO/I/O port dispatch, hardware reset (`CMD_RST`), MAC extraction (`IDR0`..`IDR5`), 18 KiB RX ring buffer with wrap margin, and 4-descriptor TX rings (`en1`).
+  - **Qualcomm Atheros & Killer Ethernet / Wi-Fi ([`qualcomm.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/drivers/net/qualcomm.rs))**: Support for Qualcomm Atheros AR8131/AR8151/AR8161, Killer E2200/E2400/E2500 Gigabit Gaming NICs (`en2`), and Qualcomm Atheros AR9285/AR9485/AR9565 (ath9k 802.11b/g/n wireless `wlan1`) with `ALX_MASTER` reset, station address parsing, and central `NET_MANAGER` registration.
+- **POSIX Pseudo-Terminal Subsystem ([`pty.rs`](file:///c:/Users/NiO/Desktop/cosmos/src/tty/pty.rs))**:
   - Master/slave pseudo-terminals (`/dev/ptmx`, `/dev/pts/*`), `sys_posix_openpt` (51), `sys_ptsname` (52), and `sys_unlockpt` (53).
   - Terminal line discipline with ICRNL newline translation, character echo toggling, window sizing ioctls (`TIOCGWINSZ`/`TIOCSWINSZ`), and foreground `SIGINT` signal forwarding on `Ctrl+C`.
 
@@ -316,7 +320,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (31 Self-Tests)
+## Automated Verification Suite (32 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, verifying all core subsystems before launching the interactive shell:
 
@@ -355,6 +359,7 @@ On startup, CosmicOS executes its automated self-test verification suite, verify
   [TEST] Network Socket Server Daemons (telnetd & sshd) ... [PASS]
   [TEST] Pseudo-Terminal (PTY) Subsystem & Line Discipline ... [PASS]
   [TEST] TLS 1.3 Cryptography & Secure HTTPS Engine ... [PASS]
+  [TEST] Realtek RTL8139/8169 & Qualcomm Atheros Drivers ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

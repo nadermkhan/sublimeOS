@@ -42,6 +42,7 @@ pub fn run_all_tests() {
     test_network_socket_server_and_daemons();
     test_pseudo_terminal_subsystem();
     test_tls_and_https_engine();
+    test_realtek_and_qualcomm_drivers();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -1645,6 +1646,119 @@ fn test_tls_and_https_engine() {
     let resp = crate::net::http::https_get("https://127.0.0.1/api/status").expect("https_get failed");
     assert_eq!(resp.status_code, 200);
     assert!(resp.body_as_str().contains("CosmicOS"));
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_realtek_and_qualcomm_drivers() {
+    print!("  [TEST] Realtek RTL8139/8169 & Qualcomm Atheros Drivers ... ");
+
+    use crate::net::device::{NetDevice, NetDeviceType, NET_MANAGER};
+
+    // 1. Test Realtek RTL8169 Gigabit Ethernet Driver
+    let pci_rtl = crate::drivers::pci::PciDevice {
+        bus: 0,
+        device: 4,
+        function: 0,
+        vendor_id: 0x10EC,
+        device_id: 0x8169,
+        class_code: 0x02,
+        subclass: 0x00,
+        prog_if: 0x00,
+        header_type: 0x00,
+        bar0: 0xC001,
+    };
+
+    let rtl_dev = crate::drivers::net::realtek::RealtekDevice::new(pci_rtl)
+        .expect("Realtek RTL8169 driver initialization failed");
+
+    assert_eq!(rtl_dev.name(), "en1");
+    assert_eq!(rtl_dev.device_type(), NetDeviceType::Ethernet);
+    assert!(rtl_dev.is_link_up());
+    let rtl_mac = rtl_dev.mac_address();
+    assert_ne!(rtl_mac, [0, 0, 0, 0, 0, 0]);
+
+    // Send packet through Realtek driver and verify loopback reception
+    let test_frame = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // Destination Broadcast
+        rtl_mac[0], rtl_mac[1], rtl_mac[2], rtl_mac[3], rtl_mac[4], rtl_mac[5], // Source
+        0x08, 0x00, // IPv4
+        0x45, 0x00, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x40, 0x11, 0x00, 0x00,
+        127, 0, 0, 1, 127, 0, 0, 1,
+    ];
+
+    rtl_dev.send_packet(&test_frame).expect("RTL8169 send_packet failed");
+    let mut rx_buf = [0u8; 128];
+    let n = rtl_dev.receive_packet(&mut rx_buf).expect("RTL8169 receive_packet failed");
+    assert_eq!(n, test_frame.len());
+    assert_eq!(&rx_buf[..n], &test_frame);
+
+    // 2. Test Qualcomm Killer E2200 Gigabit Gaming NIC Driver
+    let pci_qca = crate::drivers::pci::PciDevice {
+        bus: 0,
+        device: 5,
+        function: 0,
+        vendor_id: 0x1969,
+        device_id: 0xE091,
+        class_code: 0x02,
+        subclass: 0x00,
+        prog_if: 0x00,
+        header_type: 0x00,
+        bar0: 0,
+    };
+
+    let qca_dev = crate::drivers::net::qualcomm::QualcommDevice::new(pci_qca)
+        .expect("Qualcomm Killer E2200 driver initialization failed");
+
+    assert_eq!(qca_dev.name(), "en2");
+    assert_eq!(qca_dev.device_type(), NetDeviceType::Ethernet);
+    assert!(qca_dev.is_link_up());
+    let qca_mac = qca_dev.mac_address();
+    assert_eq!(&qca_mac[0..3], &[0x00, 0x03, 0x7F]); // Atheros Communications OUI
+
+    qca_dev.send_packet(&test_frame).expect("Qualcomm send_packet failed");
+    let mut rx_buf_qca = [0u8; 128];
+    let n_qca = qca_dev.receive_packet(&mut rx_buf_qca).expect("Qualcomm receive_packet failed");
+    assert_eq!(n_qca, test_frame.len());
+    assert_eq!(&rx_buf_qca[..n_qca], &test_frame);
+
+    // 3. Test Qualcomm Atheros AR9285 Wi-Fi (ath9k) Driver
+    let pci_ath = crate::drivers::pci::PciDevice {
+        bus: 0,
+        device: 6,
+        function: 0,
+        vendor_id: 0x168C,
+        device_id: 0x002B,
+        class_code: 0x02,
+        subclass: 0x80,
+        prog_if: 0x00,
+        header_type: 0x00,
+        bar0: 0,
+    };
+
+    let ath_dev = crate::drivers::net::qualcomm::QualcommDevice::new(pci_ath)
+        .expect("Qualcomm ath9k driver initialization failed");
+
+    assert_eq!(ath_dev.name(), "wlan1");
+    assert_eq!(ath_dev.device_type(), NetDeviceType::Wireless80211);
+    assert!(ath_dev.is_wireless);
+    assert!(ath_dev.is_link_up());
+
+    // 4. Test Registration into Central Network Manager
+    let prev_count = NET_MANAGER.lock().devices.len();
+    NET_MANAGER.lock().register(rtl_dev);
+    NET_MANAGER.lock().register(qca_dev);
+    NET_MANAGER.lock().register(ath_dev);
+    let new_count = NET_MANAGER.lock().devices.len();
+    assert_eq!(new_count, prev_count + 3);
+
+    // Verify lookup by interface name
+    let found_en1 = NET_MANAGER.lock().get_device("en1");
+    assert!(found_en1.is_some());
+    let found_en2 = NET_MANAGER.lock().get_device("en2");
+    assert!(found_en2.is_some());
+    let found_wlan1 = NET_MANAGER.lock().get_device("wlan1");
+    assert!(found_wlan1.is_some());
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
