@@ -117,45 +117,80 @@ pub fn init(width: u32, height: u32) -> Result<(), &'static str> {
     }
 
     // 2. Fallback to Bochs VBE display controller
-    if !is_available() {
-        return Err("No compatible display adapter detected (Bochs VBE or Multiboot GOP required)");
-    }
-
-    // Locate VGA display controller in PCI devices to get BAR0
-    let mut lfb_phys = 0xFD000000u64; // Default fallback in QEMU
-    {
-        let pci = PCI.lock();
-        for dev in pci.devices.iter() {
-            if (dev.vendor_id == 0x1234 && dev.device_id == 0x1111) || dev.class_code == 0x03 {
-                if dev.bar0 != 0 {
-                    lfb_phys = dev.bar0 as u64;
-                    break;
+    if is_available() {
+        // Locate VGA display controller in PCI devices to get BAR0
+        let mut lfb_phys = 0xFD000000u64; // Default fallback in QEMU
+        {
+            let pci = PCI.lock();
+            for dev in pci.devices.iter() {
+                if (dev.vendor_id == 0x1234 && dev.device_id == 0x1111) || dev.class_code == 0x03 {
+                    if dev.bar0 != 0 {
+                        lfb_phys = dev.bar0 as u64;
+                        break;
+                    }
                 }
             }
         }
+
+        // Set Bochs VBE mode
+        unsafe {
+            vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+            vbe_write(VBE_DISPI_INDEX_XRES, width as u16);
+            vbe_write(VBE_DISPI_INDEX_YRES, height as u16);
+            vbe_write(VBE_DISPI_INDEX_BPP, 32);
+            vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+        }
+
+        // Map physical framebuffer into virtual address space
+        let total_bytes = (width * height * 4) as usize;
+        let total_pages = (total_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        {
+            let vmm = VMM.lock();
+            let kernel_pml4 = vmm.get_kernel_pml4();
+            let flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_WRITE_THROUGH;
+
+            for page in 0..total_pages {
+                let virt = FRAMEBUFFER_VIRT_BASE + (page * PAGE_SIZE) as u64;
+                let phys = lfb_phys + (page * PAGE_SIZE) as u64;
+                vmm.map_page(kernel_pml4, virt, phys, flags)?;
+            }
+        }
+
+        {
+            let mut vbe = VBE.lock();
+            vbe.width = width;
+            vbe.height = height;
+            vbe.bpp = 32;
+            vbe.pitch = width * 4;
+            vbe.lfb_phys = lfb_phys;
+            vbe.framebuffer = FRAMEBUFFER_VIRT_BASE as *mut u32;
+        }
+
+        kinfo!(
+            "Bochs VBE initialized: {}x{}x32bpp, LFB: 0x{:08X} -> 0x{:016X}",
+            width,
+            height,
+            lfb_phys,
+            FRAMEBUFFER_VIRT_BASE
+        );
+
+        return Ok(());
     }
 
-    // Set Bochs VBE mode
-    unsafe {
-        vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
-        vbe_write(VBE_DISPI_INDEX_XRES, width as u16);
-        vbe_write(VBE_DISPI_INDEX_YRES, height as u16);
-        vbe_write(VBE_DISPI_INDEX_BPP, 32);
-        vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
-    }
-
-    // Map physical framebuffer into virtual address space
+    // 3. Fallback: virtual headless framebuffer allocated from PMM
     let total_bytes = (width * height * 4) as usize;
     let total_pages = (total_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
     {
         let vmm = VMM.lock();
         let kernel_pml4 = vmm.get_kernel_pml4();
-        let flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_WRITE_THROUGH;
+        let flags = PAGE_PRESENT | PAGE_WRITABLE;
+        let mut pmm = crate::mm::pmm::PMM.lock();
 
         for page in 0..total_pages {
             let virt = FRAMEBUFFER_VIRT_BASE + (page * PAGE_SIZE) as u64;
-            let phys = lfb_phys + (page * PAGE_SIZE) as u64;
+            let phys = pmm.alloc_frame().ok_or("Out of memory for headless framebuffer")?;
             vmm.map_page(kernel_pml4, virt, phys, flags)?;
         }
     }
@@ -166,15 +201,14 @@ pub fn init(width: u32, height: u32) -> Result<(), &'static str> {
         vbe.height = height;
         vbe.bpp = 32;
         vbe.pitch = width * 4;
-        vbe.lfb_phys = lfb_phys;
+        vbe.lfb_phys = 0;
         vbe.framebuffer = FRAMEBUFFER_VIRT_BASE as *mut u32;
     }
 
     kinfo!(
-        "Bochs VBE initialized: {}x{}x32bpp, LFB: 0x{:08X} -> 0x{:016X}",
+        "Headless Virtual Framebuffer initialized: {}x{}x32bpp at 0x{:016X}",
         width,
         height,
-        lfb_phys,
         FRAMEBUFFER_VIRT_BASE
     );
 

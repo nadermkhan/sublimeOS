@@ -99,7 +99,11 @@ pub fn init() {
         }
     }
 
+    let core_count = cores.len();
     let mut smp = SMP.lock();
     smp.cores = cores;
     smp.bsp_apic_id = bsp_apic_id;
+    drop(smp);
+
+    crate::task::scheduler::SCHEDULER.lock().ensure_cores(core_count);
 }

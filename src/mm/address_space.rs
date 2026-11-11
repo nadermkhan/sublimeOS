@@ -61,6 +61,35 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Map a physical memory region (e.g. MMIO framebuffer) into user space.
+    pub fn map_phys_region(
+        &mut self,
+        start: u64,
+        length: u64,
+        phys_start: u64,
+        flags: u64,
+        vma_type: VmaType,
+    ) -> Result<(), &'static str> {
+        let pages = align_up(length, PAGE_SIZE as u64) / (PAGE_SIZE as u64);
+        let vmm = VMM.lock();
+        let pml4 = unsafe { &mut *(crate::mm::phys_to_virt(self.pml4_phys) as *mut crate::mm::vmm::PageTable) };
+
+        for i in 0..pages {
+            let virt = start + i * (PAGE_SIZE as u64);
+            let phys = phys_start + i * (PAGE_SIZE as u64);
+            vmm.map_page(pml4, virt, phys, flags | PAGE_PRESENT | PAGE_USER)?;
+        }
+
+        self.vmas.push(VirtualMemoryArea {
+            start,
+            end: start + length,
+            flags,
+            vma_type,
+        });
+
+        Ok(())
+    }
+
     /// Implement the POSIX brk() system call.
     pub fn brk(&mut self, new_brk: u64) -> u64 {
         if new_brk == 0 || new_brk < self.brk_start {

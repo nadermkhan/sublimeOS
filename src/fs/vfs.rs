@@ -44,6 +44,10 @@ pub trait InodeOperations: Send + Sync {
         Err("Write not supported")
     }
 
+    fn ioctl(&mut self, _cmd: u32, _arg: usize) -> Result<isize, &'static str> {
+        Err("ioctl not supported")
+    }
+
     fn lookup(&self, _name: &str) -> Result<Arc<IrqSafeSpinlock<dyn InodeOperations>>, &'static str> {
         Err("Not a directory")
     }
@@ -94,6 +98,10 @@ impl File {
         let bytes_written = self.inode.lock().write(*off, buf)?;
         *off += bytes_written;
         Ok(bytes_written)
+    }
+
+    pub fn ioctl(&self, cmd: u32, arg: usize) -> Result<isize, &'static str> {
+        self.inode.lock().ioctl(cmd, arg)
     }
 
     pub fn seek(&self, whence: SeekWhence) -> Result<usize, &'static str> {

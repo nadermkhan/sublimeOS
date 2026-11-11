@@ -58,6 +58,7 @@ pub fn execute_command(line: &str) {
         "curl" | "http" => cmd_curl(args),
         "httpd" => cmd_httpd(args),
         "gui" => cmd_gui(),
+        "windowserver" => cmd_windowserver(),
         "test" => crate::tests::run_all_tests(),
         "reboot" => cmd_reboot(),
         "halt" => cmd_halt(),
@@ -381,6 +382,10 @@ fn cmd_help() {
 fn cmd_gui() {
     println!("\x1b[35m[LaunchServices] Starting CosmicOS Aqua Desktop...\x1b[0m");
     crate::gui::launch_desktop();
+}
+
+fn cmd_windowserver() {
+    cmd_exec(&["/bin/windowserver"]);
 }
 
 fn cmd_clear() {

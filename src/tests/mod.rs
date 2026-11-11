@@ -36,6 +36,9 @@ pub fn run_all_tests() {
     test_posix_signals();
     test_smp_and_apic_subsystem();
     test_storage_ahci_and_nvme();
+    test_userspace_windowserver_and_fb0();
+    test_multicore_scheduler_and_affinity();
+    test_partition_table_automounter();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -1187,6 +1190,225 @@ fn test_storage_ahci_and_nvme() {
     let mut read_buf = [0u8; 512];
     test_dev.read_sectors(42, 1, &mut read_buf).expect("Block read failed");
     assert_eq!(&read_buf[0..16], b"COSMIC_AHCI_NVME");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_userspace_windowserver_and_fb0() {
+    print!("  [TEST] Userspace Aqua WindowServer, /dev/fb0 & libgui ... ");
+
+    // 1. Verify /dev/fb0 exists and is a character device
+    let vfs = VFS.lock();
+    let fb_file = vfs.open("/dev/fb0", 0).expect("Failed to open /dev/fb0");
+    let fb_stat = fb_file.inode.lock().stat();
+    assert_eq!(fb_stat.file_type, FileType::CharDevice);
+    assert!(fb_stat.size >= 1024 * 768 * 4, "/dev/fb0 reported size too small");
+
+    // 2. Test ioctl FBIOGET_VSCREENINFO
+    let mut vscreen = crate::fs::devfs::FbVarScreenInfo {
+        xres: 0,
+        yres: 0,
+        bits_per_pixel: 0,
+        line_length: 0,
+        smem_start: 0,
+        smem_len: 0,
+    };
+    let ioctl_ret = fb_file.ioctl(
+        crate::fs::devfs::FBIOGET_VSCREENINFO,
+        &mut vscreen as *mut _ as usize,
+    ).expect("FBIOGET_VSCREENINFO failed");
+    assert_eq!(ioctl_ret, 0);
+    assert_eq!(vscreen.xres, 1024);
+    assert_eq!(vscreen.yres, 768);
+    assert_eq!(vscreen.bits_per_pixel, 32);
+    assert_eq!(vscreen.line_length, 4096);
+
+    // 3. Test ioctl FBIO_BLIT_RECT
+    let test_pixel: u32 = 0x00FF8800; // Aqua Orange
+    let blit = crate::fs::devfs::FbBlitRect {
+        x: 100,
+        y: 100,
+        width: 1,
+        height: 1,
+        data_ptr: &test_pixel as *const u32 as u64,
+    };
+    let blit_ret = fb_file.ioctl(
+        crate::fs::devfs::FBIO_BLIT_RECT,
+        &blit as *const _ as usize,
+    ).expect("FBIO_BLIT_RECT failed");
+    assert_eq!(blit_ret, 0);
+
+    // Read back pixel via /dev/fb0 read at byte offset (100 * 4096 + 100 * 4)
+    let byte_offset = (100 * 4096 + 100 * 4) as usize;
+    let mut read_pixel_bytes = [0u8; 4];
+    let n = fb_file.inode.lock().read(byte_offset, &mut read_pixel_bytes).expect("Read /dev/fb0 failed");
+    assert_eq!(n, 4);
+    let read_pixel = u32::from_le_bytes(read_pixel_bytes);
+    assert_eq!(read_pixel, test_pixel);
+
+    // 4. Verify /bin/windowserver and /lib/libgui.so exist
+    assert!(vfs.open("/bin/windowserver", 0).is_ok(), "/bin/windowserver missing");
+    assert!(vfs.open("/lib/libgui.so", 0).is_ok(), "/lib/libgui.so missing");
+    drop(vfs);
+
+    // 5. Execute /bin/windowserver in Ring 3
+    let vfs = VFS.lock();
+    let ws_file = vfs.open("/bin/windowserver", 0).expect("Open /bin/windowserver failed");
+    drop(vfs);
+    let mut elf_data = alloc::vec![0u8; 65536];
+    let bytes = ws_file.read(&mut elf_data).expect("Read /bin/windowserver failed");
+    let exit_code = crate::task::user::execute_user_binary(&elf_data[..bytes]);
+    assert_eq!(exit_code, Ok(0), "Userspace windowserver failed with non-zero exit");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_multicore_scheduler_and_affinity() {
+    print!("  [TEST] Multi-Core Scheduler, Work-Stealing & Core Affinity ... ");
+
+    // 1. Verify per-CPU runqueues are present
+    let mut sched = crate::task::scheduler::SCHEDULER.lock();
+    sched.ensure_cores(4); // Ensure at least 4 core runqueues for testing
+    assert!(sched.per_cpu.len() >= 4);
+    drop(sched);
+
+    // 2. Test core affinity setting and querying
+    let mut mask: u64 = 0;
+    // Set affinity to CPU 2 (bit 2)
+    let mask_val: u64 = 1 << 2;
+    let set_ret = crate::task::process::sys_sched_setaffinity(0, 8, &mask_val as *const u64);
+    assert_eq!(set_ret, 0);
+
+    let get_ret = crate::task::process::sys_sched_getaffinity(0, 8, &mut mask as *mut u64);
+    assert_eq!(get_ret, 0);
+    assert_eq!(mask, 1 << 2, "Affinity mask mismatch after set");
+
+    // Restore affinity to all cores
+    let _ = crate::task::process::sys_sched_setaffinity(0, 8, &(!0u64) as *const u64);
+    let _ = crate::task::process::sys_sched_getaffinity(0, 8, &mut mask as *mut u64);
+    assert_eq!(mask, !0u64);
+
+    // 3. Test multi-core load-balancing and thread placement
+    let mut sched = crate::task::scheduler::SCHEDULER.lock();
+    let t1 = Arc::new(IrqSafeSpinlock::new(crate::task::thread::ThreadControlBlock::new_kthread(
+        9901,
+        "test_affinity_core3",
+        || {},
+    )));
+    t1.lock().set_affinity(1 << 3); // Restricted to Core 3 only
+    sched.add_thread(t1.clone());
+
+    // Verify thread was placed on CPU 3 runqueue
+    assert_eq!(t1.lock().current_cpu, 3);
+    assert!(sched.per_cpu[3].ready_queue.iter().any(|t| t.lock().tid == 9901));
+    // Remove test thread
+    sched.per_cpu[3].ready_queue.retain(|t| t.lock().tid != 9901);
+
+    // 4. Test Work-Stealing:
+    // Place a thread on Core 1 that is allowed to run on Core 0
+    let t2 = Arc::new(IrqSafeSpinlock::new(crate::task::thread::ThreadControlBlock::new_kthread(
+        9902,
+        "test_stealable",
+        || {},
+    )));
+    t2.lock().set_affinity(!0); // Can run on any core
+    sched.per_cpu[1].ready_queue.push_back(t2.clone());
+    drop(sched);
+
+    let mut sched = crate::task::scheduler::SCHEDULER.lock();
+    let initial_cpu1_len = sched.per_cpu[1].queue_len();
+    assert!(initial_cpu1_len >= 1);
+    // Clean up test thread
+    sched.per_cpu[1].ready_queue.retain(|t| t.lock().tid != 9902);
+    drop(sched);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_partition_table_automounter() {
+    print!("  [TEST] Partition Table Auto-Mounter (GPT / MBR into /Volumes) ... ");
+
+    // 1. Create a simulated disk with an MBR partition table containing a FAT32 partition
+    let disk = MemBlockDevice::new("sim_mbr0", 8192);
+
+    // Construct MBR sector at LBA 0
+    let mut mbr = [0u8; 512];
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+
+    // Partition 1 at offset 446:
+    // Bootable: 0x80, Type: 0x0C (FAT32 LBA), Start LBA: 2048, Num sectors: 4096
+    mbr[446] = 0x80;
+    mbr[446 + 4] = 0x0C; // FAT32
+    let start_lba: u32 = 2048;
+    let num_sec: u32 = 4096;
+    mbr[446 + 8..446 + 12].copy_from_slice(&start_lba.to_le_bytes());
+    mbr[446 + 12..446 + 16].copy_from_slice(&num_sec.to_le_bytes());
+    disk.write_sectors(0, 1, &mbr).expect("Write MBR failed");
+
+    // 2. Format partition 1 (LBA 2048) with a valid FAT32 filesystem with volume label "VOL_TEST"
+    let mut vbr = [0u8; 512];
+    vbr[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+    vbr[3..11].copy_from_slice(b"MSWIN4.1");
+    vbr[11..13].copy_from_slice(&512u16.to_le_bytes()); // Bytes per sector
+    vbr[13] = 1; // Sectors per cluster
+    vbr[14..16].copy_from_slice(&32u16.to_le_bytes()); // Reserved sectors
+    vbr[16] = 2; // Number of FATs
+    vbr[32..36].copy_from_slice(&num_sec.to_le_bytes()); // Total sectors 32
+    vbr[36..40].copy_from_slice(&32u32.to_le_bytes()); // Sectors per FAT
+    vbr[44..48].copy_from_slice(&2u32.to_le_bytes()); // Root dir cluster 2
+    vbr[71..82].copy_from_slice(b"VOL_TEST   "); // Volume label
+    vbr[82..90].copy_from_slice(b"FAT32   ");
+    vbr[510] = 0x55;
+    vbr[511] = 0xAA;
+    disk.write_sectors(2048, 1, &vbr).expect("Write FAT32 VBR failed");
+
+    // 3. Scan partitions on simulated disk
+    let parts = crate::fs::partition::scan_device_partitions(disk.clone());
+    assert_eq!(parts.len(), 1, "Expected 1 MBR partition");
+    assert_eq!(parts[0].name(), "sim_mbr0p1");
+    assert_eq!(parts[0].total_sectors(), 4096);
+
+    // 4. Test auto-mounting into /Volumes/
+    let mounted_count = crate::fs::mount::mount_device(disk.clone());
+    assert_eq!(mounted_count, 1, "Failed to auto-mount partition");
+
+    // Verify /Volumes/VOL_TEST was mounted and can be resolved in VFS
+    let vfs = VFS.lock();
+    let vol_node = vfs.resolve_path("/Volumes/VOL_TEST").expect("Failed to resolve /Volumes/VOL_TEST");
+    assert_eq!(vol_node.lock().stat().file_type, FileType::Directory);
+
+    // 5. Verify GPT Partition scanning logic
+    let gpt_disk = MemBlockDevice::new("sim_gpt0", 8192);
+    let mut gpt_mbr = [0u8; 512];
+    gpt_mbr[510] = 0x55;
+    gpt_mbr[511] = 0xAA;
+    gpt_mbr[446 + 4] = 0xEE; // GPT Protective MBR
+    gpt_mbr[446 + 8..446 + 12].copy_from_slice(&1u32.to_le_bytes());
+    gpt_mbr[446 + 12..446 + 16].copy_from_slice(&8191u32.to_le_bytes());
+    gpt_disk.write_sectors(0, 1, &gpt_mbr).expect("Write GPT MBR failed");
+
+    // GPT Header at LBA 1
+    let mut gpt_hdr = [0u8; 512];
+    gpt_hdr[0..8].copy_from_slice(b"EFI PART");
+    gpt_hdr[72..80].copy_from_slice(&2u64.to_le_bytes()); // Part entries at LBA 2
+    gpt_hdr[80..84].copy_from_slice(&4u32.to_le_bytes()); // 4 entries
+    gpt_hdr[84..88].copy_from_slice(&128u32.to_le_bytes()); // 128 bytes per entry
+    gpt_disk.write_sectors(1, 1, &gpt_hdr).expect("Write GPT Header failed");
+
+    // Partition entry at LBA 2
+    let mut gpt_entry = [0u8; 512];
+    // Non-zero Type GUID (Microsoft Basic Data)
+    gpt_entry[0..16].copy_from_slice(&[0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7]);
+    // Start LBA: 2048, End LBA: 4095
+    gpt_entry[32..40].copy_from_slice(&2048u64.to_le_bytes());
+    gpt_entry[40..48].copy_from_slice(&4095u64.to_le_bytes());
+    gpt_disk.write_sectors(2, 1, &gpt_entry).expect("Write GPT Entry failed");
+
+    let gpt_parts = crate::fs::partition::scan_device_partitions(gpt_disk.clone());
+    assert_eq!(gpt_parts.len(), 1, "Expected 1 GPT partition");
+    assert_eq!(gpt_parts[0].name(), "sim_gpt0p1");
+    assert_eq!(gpt_parts[0].total_sectors(), 2048);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

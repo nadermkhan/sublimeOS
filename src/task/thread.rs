@@ -24,6 +24,8 @@ pub struct ThreadControlBlock {
     pub stack: Box<[u8]>,
     pub priority: u8,
     pub total_ticks: u64,
+    pub affinity: u64,
+    pub current_cpu: u32,
 }
 
 impl ThreadControlBlock {
@@ -80,7 +82,17 @@ impl ThreadControlBlock {
             stack,
             priority: 10,
             total_ticks: 0,
+            affinity: !0,
+            current_cpu: 0,
         }
+    }
+
+    pub fn set_affinity(&mut self, mask: u64) {
+        self.affinity = if mask == 0 { 1 } else { mask };
+    }
+
+    pub fn get_affinity(&self) -> u64 {
+        self.affinity
     }
 }
 

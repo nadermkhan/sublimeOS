@@ -37,6 +37,7 @@ impl DevFsDirectory {
         entries.insert(String::from("disk0"), Arc::new(IrqSafeSpinlock::new(NullDev)));
         entries.insert(String::from("disk0s1"), Arc::new(IrqSafeSpinlock::new(NullDev)));
         entries.insert(String::from("rtc"), Arc::new(IrqSafeSpinlock::new(RtcDev)));
+        entries.insert(String::from("fb0"), Arc::new(IrqSafeSpinlock::new(FbDev)));
         entries.insert(String::from("ttyS0"), Arc::new(IrqSafeSpinlock::new(crate::arch::x86_64::serial::UartDev(0))));
         entries.insert(String::from("ttyS1"), Arc::new(IrqSafeSpinlock::new(crate::arch::x86_64::serial::UartDev(1))));
 
@@ -159,5 +160,175 @@ impl InodeOperations for RtcDev {
 
     fn stat(&self) -> Stat {
         Stat { inode: 104, size: 24, file_type: FileType::CharDevice, mode: 0o444 }
+    }
+}
+
+pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
+pub const FBIO_BLIT_RECT: u32 = 0x4601;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FbVarScreenInfo {
+    pub xres: u32,
+    pub yres: u32,
+    pub bits_per_pixel: u32,
+    pub line_length: u32,
+    pub smem_start: u64,
+    pub smem_len: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FbBlitRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub data_ptr: u64,
+}
+
+pub struct FbDev;
+
+fn ensure_vbe() {
+    if crate::drivers::vbe::VBE.lock().framebuffer.is_null() {
+        let _ = crate::drivers::vbe::init(1024, 768);
+    }
+}
+
+impl InodeOperations for FbDev {
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+        ensure_vbe();
+        let vbe = crate::drivers::vbe::VBE.lock();
+        let total_size = if vbe.pitch > 0 && vbe.height > 0 {
+            (vbe.pitch * vbe.height) as usize
+        } else {
+            1024 * 768 * 4
+        };
+        let fb_ptr = if !vbe.framebuffer.is_null() {
+            vbe.framebuffer as *const u8
+        } else {
+            crate::drivers::vbe::FRAMEBUFFER_VIRT_BASE as *const u8
+        };
+        drop(vbe);
+
+        if offset >= total_size {
+            return Ok(0);
+        }
+        let avail = total_size - offset;
+        let count = avail.min(buf.len());
+        unsafe {
+            core::ptr::copy_nonoverlapping(fb_ptr.add(offset), buf.as_mut_ptr(), count);
+        }
+        Ok(count)
+    }
+
+    fn write(&mut self, offset: usize, buf: &[u8]) -> Result<usize, &'static str> {
+        ensure_vbe();
+        let vbe = crate::drivers::vbe::VBE.lock();
+        let total_size = if vbe.pitch > 0 && vbe.height > 0 {
+            (vbe.pitch * vbe.height) as usize
+        } else {
+            1024 * 768 * 4
+        };
+        let fb_ptr = if !vbe.framebuffer.is_null() {
+            vbe.framebuffer as *mut u8
+        } else {
+            crate::drivers::vbe::FRAMEBUFFER_VIRT_BASE as *mut u8
+        };
+        drop(vbe);
+
+        if offset >= total_size {
+            return Ok(0);
+        }
+        let avail = total_size - offset;
+        let count = avail.min(buf.len());
+        unsafe {
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), fb_ptr.add(offset), count);
+        }
+        Ok(count)
+    }
+
+    fn ioctl(&mut self, cmd: u32, arg: usize) -> Result<isize, &'static str> {
+        ensure_vbe();
+        match cmd {
+            FBIOGET_VSCREENINFO => {
+                if arg == 0 {
+                    return Err("Invalid user pointer for FBIOGET_VSCREENINFO");
+                }
+                let vbe = crate::drivers::vbe::VBE.lock();
+                let width = if vbe.width > 0 { vbe.width } else { 1024 };
+                let height = if vbe.height > 0 { vbe.height } else { 768 };
+                let bpp = if vbe.bpp > 0 { vbe.bpp } else { 32 };
+                let pitch = if vbe.pitch > 0 { vbe.pitch } else { width * 4 };
+                let phys = if vbe.lfb_phys > 0 { vbe.lfb_phys } else { 0xFD000000 };
+                let smem_len = pitch * height;
+                drop(vbe);
+
+                let info = FbVarScreenInfo {
+                    xres: width,
+                    yres: height,
+                    bits_per_pixel: bpp,
+                    line_length: pitch,
+                    smem_start: phys,
+                    smem_len,
+                };
+
+                unsafe {
+                    let ptr = arg as *mut FbVarScreenInfo;
+                    *ptr = info;
+                }
+                Ok(0)
+            }
+            FBIO_BLIT_RECT => {
+                if arg == 0 {
+                    return Err("Invalid user pointer for FBIO_BLIT_RECT");
+                }
+                let blit = unsafe { &*(arg as *const FbBlitRect) };
+                let vbe = crate::drivers::vbe::VBE.lock();
+                let screen_w = if vbe.width > 0 { vbe.width } else { 1024 };
+                let screen_h = if vbe.height > 0 { vbe.height } else { 768 };
+                let fb_ptr = if !vbe.framebuffer.is_null() {
+                    vbe.framebuffer
+                } else {
+                    crate::drivers::vbe::FRAMEBUFFER_VIRT_BASE as *mut u32
+                };
+                drop(vbe);
+
+                if blit.x + blit.width > screen_w || blit.y + blit.height > screen_h || blit.data_ptr == 0 {
+                    return Err("Blit rectangle out of bounds");
+                }
+
+                let src = blit.data_ptr as *const u32;
+                for row in 0..blit.height {
+                    let dst_row = (blit.y + row) * screen_w + blit.x;
+                    let src_row = row * blit.width;
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src.add(src_row as usize),
+                            fb_ptr.add(dst_row as usize),
+                            blit.width as usize,
+                        );
+                    }
+                }
+                Ok(0)
+            }
+            _ => Err("Unsupported ioctl command on /dev/fb0"),
+        }
+    }
+
+    fn stat(&self) -> Stat {
+        ensure_vbe();
+        let vbe = crate::drivers::vbe::VBE.lock();
+        let size = if vbe.pitch > 0 && vbe.height > 0 {
+            (vbe.pitch * vbe.height) as usize
+        } else {
+            1024 * 768 * 4
+        };
+        Stat {
+            inode: 105,
+            size,
+            file_type: FileType::CharDevice,
+            mode: 0o666,
+        }
     }
 }

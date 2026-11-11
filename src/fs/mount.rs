@@ -102,13 +102,66 @@ pub fn probe_filesystem(
     Err("Unknown or unsupported filesystem")
 }
 
+/// Mount a single partition device into /Volumes/ if it contains a recognizable filesystem.
+pub fn mount_partition_device(part: Arc<dyn BlockDevice>) -> Result<String, &'static str> {
+    let (root_inode, fs_type, volume_label) = probe_filesystem(part.clone())?;
+
+    let vfs = VFS.lock();
+    let vol_dir = vfs.resolve_path("/Volumes")?;
+    drop(vfs);
+
+    let base_name = if !volume_label.is_empty() && volume_label != "NO NAME" && volume_label != "exFAT Drive" {
+        volume_label.clone()
+    } else {
+        format!("{}_{}", fs_type.to_ascii_uppercase(), part.name())
+    };
+
+    // Ensure unique mount point name under /Volumes/
+    let mut mount_name = base_name.clone();
+    let mut suffix = 1;
+    while vol_dir.lock().lookup(&mount_name).is_ok() {
+        mount_name = format!("{} {}", base_name, suffix);
+        suffix += 1;
+    }
+
+    vol_dir.lock().add_child_node(&mount_name, root_inode)?;
+    let mount_path = format!("/Volumes/{}", mount_name);
+
+    MOUNT_TABLE.lock().add(
+        part.name(),
+        &mount_path,
+        fs_type,
+        if fs_type == "fat32" || fs_type == "exfat" { "rw" } else { "ro" },
+    );
+
+    kinfo!(
+        "Auto-Mounted {} ({}) at {} [{}]",
+        part.name(),
+        fs_type.to_ascii_uppercase(),
+        mount_path,
+        volume_label
+    );
+
+    Ok(mount_path)
+}
+
+/// Automatically detect and mount all partitions on a newly attached block device.
+pub fn mount_device(parent_dev: Arc<dyn BlockDevice>) -> usize {
+    let partitions = scan_device_partitions(parent_dev);
+    let mut mounted_count = 0;
+    for part in partitions {
+        if mount_partition_device(part).is_ok() {
+            mounted_count += 1;
+        }
+    }
+    mounted_count
+}
+
 /// Automatically detect and mount all physical and virtual storage partitions into /Volumes/
 pub fn mount_all_storage() {
     let storage = STORAGE_MANAGER.lock();
     let num_devices = storage.devices.len();
     drop(storage);
-
-    let mut vol_count = 1;
 
     for dev_idx in 0..num_devices {
         let dev = {
@@ -117,43 +170,7 @@ pub fn mount_all_storage() {
         };
 
         if let Some(parent_dev) = dev {
-            let partitions = scan_device_partitions(parent_dev.clone());
-            for part in partitions {
-                match probe_filesystem(part.clone()) {
-                    Ok((root_inode, fs_type, volume_label)) => {
-                        let mount_name = if !volume_label.is_empty() && volume_label != "NO NAME" && volume_label != "exFAT Drive" {
-                            volume_label.clone()
-                        } else {
-                            format!("{}_{}", fs_type.to_ascii_uppercase(), vol_count)
-                        };
-                        vol_count += 1;
-
-                        let vfs = VFS.lock();
-                        if let Ok(vol_dir) = vfs.resolve_path("/Volumes") {
-                            let _ = vol_dir.lock().add_child_node(&mount_name, root_inode);
-                            let mount_path = format!("/Volumes/{}", mount_name);
-
-                            MOUNT_TABLE.lock().add(
-                                part.name(),
-                                &mount_path,
-                                fs_type,
-                                if fs_type == "fat32" || fs_type == "exfat" { "rw" } else { "ro" },
-                            );
-
-                            kinfo!(
-                                "Mounted {} ({}) at {} [{}]",
-                                part.name(),
-                                fs_type.to_ascii_uppercase(),
-                                mount_path,
-                                volume_label
-                            );
-                        }
-                    }
-                    Err(_) => {
-                        // Unformatted or unrecognized partition
-                    }
-                }
-            }
+            mount_device(parent_dev);
         }
     }
 }

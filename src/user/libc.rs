@@ -73,6 +73,26 @@ pub unsafe fn syscall3(num: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
+/// Fast AMD64 Userspace System Call Gateway (6 arguments)
+#[inline(always)]
+pub unsafe fn syscall6(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+    let ret: i64;
+    asm!(
+        "syscall",
+        inlateout("rax") num => ret,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        in("r10") a4,
+        in("r8") a5,
+        in("r9") a6,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack, preserves_flags)
+    );
+    ret
+}
+
 /// POSIX write() system call wrapper
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     unsafe {
@@ -235,6 +255,55 @@ pub fn signal(sig: i32, handler: usize) -> usize {
         old_act.sa_handler
     } else {
         usize::MAX // SIG_ERR
+    }
+}
+
+/// POSIX open() system call wrapper
+pub fn open(path: &[u8], flags: u32, mode: u32) -> i32 {
+    unsafe {
+        syscall3(SYS_OPEN, path.as_ptr() as u64, flags as u64, mode as u64) as i32
+    }
+}
+
+/// POSIX close() system call wrapper
+pub fn close(fd: usize) -> i32 {
+    unsafe {
+        syscall1(SYS_CLOSE, fd as u64) as i32
+    }
+}
+
+/// POSIX ioctl() system call wrapper
+pub fn ioctl(fd: usize, cmd: u32, arg: usize) -> i32 {
+    unsafe {
+        syscall3(SYS_IOCTL, fd as u64, cmd as u64, arg as u64) as i32
+    }
+}
+
+/// POSIX mmap() system call wrapper
+pub fn mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: i64, offset: u64) -> *mut u8 {
+    unsafe {
+        syscall6(SYS_MMAP, addr, length, prot, flags, fd as u64, offset) as *mut u8
+    }
+}
+
+/// POSIX munmap() system call wrapper
+pub fn munmap(addr: u64, length: u64) -> i32 {
+    unsafe {
+        syscall2(SYS_MUNMAP, addr, length) as i32
+    }
+}
+
+/// POSIX sched_setaffinity() system call wrapper
+pub fn sched_setaffinity(pid: i32, mask: u64) -> i32 {
+    unsafe {
+        syscall3(SYS_SCHED_SETAFFINITY, pid as u64, 8, &mask as *const u64 as u64) as i32
+    }
+}
+
+/// POSIX sched_getaffinity() system call wrapper
+pub fn sched_getaffinity(pid: i32, mask_ptr: *mut u64) -> i32 {
+    unsafe {
+        syscall3(SYS_SCHED_GETAFFINITY, pid as u64, 8, mask_ptr as u64) as i32
     }
 }
 

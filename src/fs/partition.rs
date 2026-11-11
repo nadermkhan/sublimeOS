@@ -102,15 +102,65 @@ pub fn scan_device_partitions(device: Arc<dyn BlockDevice>) -> Vec<Arc<dyn Block
             | ((sector0[offset + 15] as u32) << 24);
 
         if part_type != 0 && start_lba > 0 && num_sectors > 0 {
-            let part_name = format!("{}p{}", device.name(), i + 1);
-            let part_dev = Arc::new(PartitionBlockDevice::new(
-                device.clone(),
-                start_lba as u64,
-                num_sectors as u64,
-                part_name,
-                part_type,
-            ));
-            partitions.push(part_dev);
+            if part_type == 0x05 || part_type == 0x0F {
+                // Extended partition container: scan EBR chain
+                let mut ebr_lba = start_lba as u64;
+                let ext_base = ebr_lba;
+                let mut ebr_buf = [0u8; 512];
+                let mut logical_idx = 5;
+
+                while ebr_lba > 0 && logical_idx <= 16 {
+                    if device.read_sectors(ebr_lba, 1, &mut ebr_buf).is_err() {
+                        break;
+                    }
+                    if ebr_buf[510] != 0x55 || ebr_buf[511] != 0xAA {
+                        break;
+                    }
+
+                    let log_type = ebr_buf[446 + 4];
+                    let log_start = (ebr_buf[446 + 8] as u32)
+                        | ((ebr_buf[446 + 9] as u32) << 8)
+                        | ((ebr_buf[446 + 10] as u32) << 16)
+                        | ((ebr_buf[446 + 11] as u32) << 24);
+                    let log_len = (ebr_buf[446 + 12] as u32)
+                        | ((ebr_buf[446 + 13] as u32) << 8)
+                        | ((ebr_buf[446 + 14] as u32) << 16)
+                        | ((ebr_buf[446 + 15] as u32) << 24);
+
+                    if log_type != 0 && log_len > 0 {
+                        let log_name = format!("{}p{}", device.name(), logical_idx);
+                        partitions.push(Arc::new(PartitionBlockDevice::new(
+                            device.clone(),
+                            ebr_lba + log_start as u64,
+                            log_len as u64,
+                            log_name,
+                            log_type,
+                        )));
+                        logical_idx += 1;
+                    }
+
+                    let next_rel = (ebr_buf[446 + 16 + 8] as u32)
+                        | ((ebr_buf[446 + 16 + 9] as u32) << 8)
+                        | ((ebr_buf[446 + 16 + 10] as u32) << 16)
+                        | ((ebr_buf[446 + 16 + 11] as u32) << 24);
+
+                    if next_rel > 0 {
+                        ebr_lba = ext_base + next_rel as u64;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                let part_name = format!("{}p{}", device.name(), i + 1);
+                let part_dev = Arc::new(PartitionBlockDevice::new(
+                    device.clone(),
+                    start_lba as u64,
+                    num_sectors as u64,
+                    part_name,
+                    part_type,
+                ));
+                partitions.push(part_dev);
+            }
         }
     }
 

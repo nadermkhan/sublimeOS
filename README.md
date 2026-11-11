@@ -28,8 +28,8 @@
    - [7. Intel High Definition Audio & Sound Subsystem](#7-intel-high-definition-audio--sound-subsystem)
    - [8. CosmicSH POSIX Shell & Terminal Text Editor](#8-cosmicsh-posix-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
-4. [Interactive Shell Command Reference (43 Commands)](#interactive-shell-command-reference-43-commands)
-5. [Automated Verification Suite (25 Self-Tests)](#automated-verification-suite-25-self-tests)
+4. [Interactive Shell Command Reference (44 Commands)](#interactive-shell-command-reference-44-commands)
+5. [Automated Verification Suite (28 Self-Tests)](#automated-verification-suite-28-self-tests)
 6. [Building and Running](#building-and-running)
    - [Prerequisites](#prerequisites)
    - [Compiling Kernel](#compiling-kernel)
@@ -43,9 +43,9 @@
 
 **CosmicOS** is a complete, monolithic, bare-metal 64-bit operating system developed in safe, idiomatic `#![no_std]` Rust with zero external runtime dependencies. Powered by the **Sublime Kernel**, CosmicOS boots natively via Multiboot 1/2, transitions into 64-bit Long Mode, maps kernel space to the higher half (`0xFFFFFFFF80000000+`), and initializes an enterprise-grade OS stack:
 
-- **Preemptive Multitasking & User Space**: Priority & round-robin scheduler, 64-bit ELF binary loader, hardware privilege level transition (`iretq`, `syscall`/`sysretq`), Copy-on-Write process fork (`fork`/`execve`/`waitpid`), POSIX signal delivery (`sigaction`, `sigprocmask`, `kill`), dynamic runtime linker (`ld-cosmic.so`), userspace C standard library (`cosmic-libc`), native user binaries in `/bin` (`init`, `calc`, `sh`, `snake`, `dyntest`), and shared libraries in `/lib` (`ld-cosmic.so`, `libc.so`, `libm.so`).
+- **Preemptive Multitasking & User Space**: Priority & round-robin scheduler with per-CPU runqueues and work-stealing load balancing across all online SMP cores, core affinity masks (`sched_setaffinity` / `sched_getaffinity`), 64-bit ELF binary loader, hardware privilege level transition (`iretq`, `syscall`/`sysretq`), Copy-on-Write process fork (`fork`/`execve`/`waitpid`), POSIX signal delivery (`sigaction`, `sigprocmask`, `kill`), dynamic runtime linker (`ld-cosmic.so`), userspace C standard library (`cosmic-libc`), native user binaries in `/bin` (`init`, `calc`, `sh`, `snake`, `dyntest`, `windowserver`), and shared libraries in `/lib` (`ld-cosmic.so`, `libc.so`, `libm.so`, `libgui.so`).
 - **SMP Multi-Core & APIC Architecture**: ACPI Multiple APIC Description Table (MADT) parser, Local APIC (LAPIC) high-speed timer, Inter-Processor Interrupt (IPI) dispatch, I/O APIC 64-bit redirection tables (cleanly disabling legacy 8259 PIC), and Application Processor (AP) core wakeup sequence (INIT-SIPI-SIPI).
-- **Advanced Block Storage**: PCIe NVMe controller driver with circular Admin/IO submission and completion queues, AHCI SATA controller driver with 32-slot command lists and PRDT DMA engines, ATA/IDE PIO LBA48, and USB Mass Storage (SCSI / Bulk-Only Transport over xHCI / EHCI).
+- **Advanced Block Storage & Partition Auto-Mounter**: PCIe NVMe controller driver with circular Admin/IO submission and completion queues, AHCI SATA controller driver with 32-slot command lists and PRDT DMA engines, ATA/IDE PIO LBA48, USB Mass Storage (SCSI / Bulk-Only Transport over xHCI / EHCI), and real partition table auto-mounter scanning MBR (primary and EBR chains) and GPT into `/Volumes/`.
 - **Filesystems & VFS**: Pluggable Virtual File System (`/System`, `/Library`, `/Applications`, `/Users`, `/Volumes`, `/dev`, `/proc`), read/write FAT32 with cluster allocation bitmap, exFAT parser, Linux ext4 superblock/extent-tree resolver, and Windows NTFS resident `$DATA` / `$MFT` record decoder.
 - **Network Protocol Stack**: Full TCP/IP stack (Ethernet II, ARP, IPv4, ICMP Ping, UDP, RFC 793 TCP state machine, BSD Socket API), IEEE 802.11 Wi-Fi subsystem (beacon frame parsing, 4-way handshake, WPA2-PSK with PBKDF2-SHA1), Intel e1000 Gigabit NIC driver, HTTP/1.1 client (`curl`), and embedded HTTP server (`httpd`).
 - **Intel HDA Audio Subsystem**: Intel High Definition Audio controller driver, pure integer quarter-wave sine synthesis, RIFF/WAVE PCM parser, PC speaker fallback, and the iconic CosmicOS startup chime.
@@ -297,7 +297,7 @@ CosmicOS features a native zsh-style shell available across all virtual consoles
 
 ---
 
-## Automated Verification Suite (25 Self-Tests)
+## Automated Verification Suite (28 Self-Tests)
 
 On startup, CosmicOS executes its automated self-test verification suite, verifying all core subsystems before launching the interactive shell:
 
@@ -330,6 +330,9 @@ On startup, CosmicOS executes its automated self-test verification suite, verify
   [TEST] POSIX Signals & Process Control ... [PASS]
   [TEST] SMP Multi-Core, ACPI MADT & APIC ... [PASS]
   [TEST] Storage Drivers (AHCI SATA & NVMe SSD) ... [INFO] Registered Block Device ... [PASS]
+  [TEST] Userspace Aqua WindowServer, /dev/fb0 & libgui ... [INFO] Aqua Window Server Online ... [PASS]
+  [TEST] Multi-Core Scheduler, Work-Stealing & Core Affinity ... [PASS]
+  [TEST] Partition Table Auto-Mounter (GPT / MBR into /Volumes) ... [INFO] Auto-Mounted ... [PASS]
 =======================================================
       All Kernel Self-Tests PASSED Successfully!       
 =======================================================

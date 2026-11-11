@@ -429,3 +429,176 @@ pub fn sys_rt_sigprocmask(
 
     0
 }
+
+pub fn sys_open(path_ptr: *const u8, flags: i32, _mode: i32) -> i64 {
+    if path_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *path_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let path_str = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(path_ptr, len) }) {
+        Ok(s) => s,
+        Err(_) => return -22, // -EINVAL
+    };
+
+    let vfs = crate::fs::vfs::VFS.lock();
+    let inode = match vfs.resolve_path(path_str) {
+        Ok(n) => n,
+        Err(_) => return -2, // -ENOENT
+    };
+    drop(vfs);
+
+    let file = Arc::new(crate::fs::vfs::File::new(inode, flags as u32));
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        if let Some(fd) = proc.lock().alloc_fd(file) {
+            return fd as i64;
+        }
+    }
+    -24 // -EMFILE
+}
+
+pub fn sys_close(fd: usize) -> i64 {
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let mut p = proc.lock();
+        if fd < p.fd_table.len() {
+            p.fd_table[fd] = None;
+            return 0;
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> i64 {
+    let current_pid = get_current_pid();
+    let file = if let Some(proc) = get_process(current_pid) {
+        let p = proc.lock();
+        if fd < p.fd_table.len() {
+            p.fd_table[fd].clone()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(f) = file {
+        match f.ioctl(cmd, arg) {
+            Ok(ret) => ret as i64,
+            Err(_) => -22, // -EINVAL
+        }
+    } else {
+        -9 // -EBADF
+    }
+}
+
+pub fn sys_mmap(
+    addr: u64,
+    length: u64,
+    _prot: u64,
+    _flags: u64,
+    fd: i64,
+    _offset: u64,
+) -> i64 {
+    if length == 0 {
+        return -22; // -EINVAL
+    }
+
+    let current_pid = get_current_pid();
+    let proc = match get_process(current_pid) {
+        Some(p) => p,
+        None => return -3, // -ESRCH
+    };
+
+    let mut p = proc.lock();
+    let target_addr = if addr != 0 { addr } else { 0x6000_0000 };
+
+    if fd >= 0 {
+        let fd_idx = fd as usize;
+        let is_fb = if fd_idx < p.fd_table.len() {
+            if let Some(ref file) = p.fd_table[fd_idx] {
+                file.inode.lock().stat().inode == 105
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if is_fb {
+            let vbe = crate::drivers::vbe::VBE.lock();
+            let phys = if vbe.lfb_phys > 0 { vbe.lfb_phys } else { 0xFD000000 };
+            drop(vbe);
+
+            if let Some(ref mut aspace) = p.address_space {
+                if aspace.map_phys_region(
+                    target_addr,
+                    length,
+                    phys,
+                    crate::mm::vmm::PAGE_WRITABLE,
+                    crate::mm::address_space::VmaType::Mmap,
+                ).is_ok() {
+                    return target_addr as i64;
+                }
+            }
+            return -12; // -ENOMEM
+        }
+    }
+
+    if let Some(ref mut aspace) = p.address_space {
+        if aspace.map_region(
+            target_addr,
+            length,
+            crate::mm::vmm::PAGE_WRITABLE,
+            crate::mm::address_space::VmaType::Mmap,
+        ).is_ok() {
+            return target_addr as i64;
+        }
+    }
+
+    -12 // -ENOMEM
+}
+
+pub fn sys_munmap(_addr: u64, _length: u64) -> i64 {
+    0
+}
+
+pub fn sys_sched_setaffinity(pid: i32, _len: usize, mask_ptr: *const u64) -> i32 {
+    if mask_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mask = unsafe { *mask_ptr };
+    if mask == 0 {
+        return -22; // -EINVAL
+    }
+
+    let target_id = if pid <= 0 {
+        0
+    } else {
+        pid as u64
+    };
+
+    let _ = crate::task::scheduler::set_affinity(target_id, mask);
+    0
+}
+
+pub fn sys_sched_getaffinity(pid: i32, _len: usize, mask_ptr: *mut u64) -> i32 {
+    if mask_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+
+    let target_id = if pid <= 0 {
+        0
+    } else {
+        pid as u64
+    };
+
+    let mask = crate::task::scheduler::get_affinity(target_id);
+    unsafe {
+        *mask_ptr = mask;
+    }
+    0
+}
