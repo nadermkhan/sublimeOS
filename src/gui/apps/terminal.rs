@@ -40,7 +40,7 @@ impl TerminalApp {
         match ch {
             '\n' | '\r' => {
                 let cmd = core::mem::take(&mut self.input_buffer);
-                let mut prompt_line = String::from("cosmos@CosmicOS ~ % ");
+                let mut prompt_line = String::from("sublime@SublimeOS ~ % ");
                 prompt_line.push_str(&cmd);
                 self.lines.push((prompt_line, Color::TEXT_PRIMARY));
 
@@ -68,7 +68,7 @@ impl TerminalApp {
 
         match cmd {
             "help" => {
-                self.lines.push((String::from("Available CosmosSH commands:"), Color::ACCENT_YELLOW));
+                self.lines.push((String::from("Available SublimeOS commands:"), Color::ACCENT_YELLOW));
                 self.lines.push((String::from("  help      - Display this help message"), Color::TEXT_PRIMARY));
                 self.lines.push((String::from("  clear     - Clear terminal screen"), Color::TEXT_PRIMARY));
                 self.lines.push((String::from("  uname     - Print system and kernel information"), Color::TEXT_PRIMARY));
@@ -167,7 +167,7 @@ impl TerminalApp {
                 self.lines.push((String::from("PID  TID  STATUS   NAME"), Color::ACCENT_YELLOW));
                 self.lines.push((String::from("  0    0  RUNNING  [kernel_idle]"), Color::TEXT_PRIMARY));
                 self.lines.push((String::from("  1    1  READY    [kmain_worker]"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  2    2  RUNNING  [cosmos_gui]"), Color::ACCENT_GREEN));
+                self.lines.push((String::from("  2    2  RUNNING  [sublime_gui]"), Color::ACCENT_GREEN));
             }
             "ls" => {
                 let path = if arg.is_empty() { "/" } else { arg };
@@ -240,7 +240,7 @@ impl TerminalApp {
                 }
             }
             _ => {
-                let mut err = String::from("cosmos: command not found: ");
+                let mut err = String::from("sublime: command not found: ");
                 err.push_str(cmd);
                 self.lines.push((err, Color::ACCENT_RED));
             }
@@ -270,7 +270,7 @@ impl TerminalApp {
 
         // Draw current prompt & input line
         if draw_y + FONT_HEIGHT <= y + h {
-            draw_string(canvas, x + 6, draw_y, "cosmos@CosmicOS ~ % ", Color::ACCENT_GREEN);
+            draw_string(canvas, x + 6, draw_y, "sublime@SublimeOS ~ % ", Color::ACCENT_GREEN);
             let prompt_w = 20 * FONT_WIDTH;
             draw_string(canvas, x + 6 + prompt_w, draw_y, &self.input_buffer, Color::TEXT_PRIMARY);
 

@@ -1,6 +1,6 @@
-//! CosmicOS Pure-Rust UEFI -> Multiboot2 Bootloader (`BOOTX64.EFI`).
+//! SublimeOS Pure-Rust UEFI -> Multiboot2 Bootloader (`BOOTX64.EFI`).
 //!
-//! Loads `\boot\cosmoskernel32.elf` (or `\cosmoskernel32.elf`) via UEFI SimpleFileSystem,
+//! Loads `\boot\sublimekernel32.elf` (or `\sublimekernel32.elf`) via UEFI SimpleFileSystem,
 //! gathers UEFI GOP framebuffer, ACPI 2.0/1.0 RSDP, and coalesced E820 memory map tags,
 //! exits UEFI Boot Services cleanly, transitions from 64-bit Long Mode down to 32-bit
 //! non-paged Protected Mode inside a low `< 1 MiB` trampoline page, copies ELF `PT_LOAD`
@@ -275,14 +275,26 @@ unsafe fn load_kernel_elf(
         return None;
     }
 
-    // Try `\boot\cosmoskernel32.elf`, then `\cosmoskernel32.elf`.
-    let path1: [u16; 25] = [
+    // Try `\boot\sublimekernel32.elf`, `\sublimekernel32.elf`, `\boot\cosmoskernel32.elf`, `\cosmoskernel32.elf`.
+    let path_sublime_boot: [u16; 26] = [
+        '\\' as u16, 'b' as u16, 'o' as u16, 'o' as u16, 't' as u16, '\\' as u16,
+        's' as u16, 'u' as u16, 'b' as u16, 'l' as u16, 'i' as u16, 'm' as u16, 'e' as u16,
+        'k' as u16, 'e' as u16, 'r' as u16, 'n' as u16, 'e' as u16, 'l' as u16,
+        '3' as u16, '2' as u16, '.' as u16, 'e' as u16, 'l' as u16, 'f' as u16, 0,
+    ];
+    let path_sublime_root: [u16; 21] = [
+        '\\' as u16,
+        's' as u16, 'u' as u16, 'b' as u16, 'l' as u16, 'i' as u16, 'm' as u16, 'e' as u16,
+        'k' as u16, 'e' as u16, 'r' as u16, 'n' as u16, 'e' as u16, 'l' as u16,
+        '3' as u16, '2' as u16, '.' as u16, 'e' as u16, 'l' as u16, 'f' as u16, 0,
+    ];
+    let path_cosmos_boot: [u16; 25] = [
         '\\' as u16, 'b' as u16, 'o' as u16, 'o' as u16, 't' as u16, '\\' as u16,
         'c' as u16, 'o' as u16, 's' as u16, 'm' as u16, 'o' as u16, 's' as u16,
         'k' as u16, 'e' as u16, 'r' as u16, 'n' as u16, 'e' as u16, 'l' as u16,
         '3' as u16, '2' as u16, '.' as u16, 'e' as u16, 'l' as u16, 'f' as u16, 0,
     ];
-    let path2: [u16; 20] = [
+    let path_cosmos_root: [u16; 20] = [
         '\\' as u16,
         'c' as u16, 'o' as u16, 's' as u16, 'm' as u16, 'o' as u16, 's' as u16,
         'k' as u16, 'e' as u16, 'r' as u16, 'n' as u16, 'e' as u16, 'l' as u16,
@@ -290,16 +302,26 @@ unsafe fn load_kernel_elf(
     ];
 
     let mut file: *mut efi::FileProtocol = null_mut();
-    if ((*root).open)(root, &mut file, path1.as_ptr(), efi::EFI_FILE_MODE_READ, 0) != efi::EFI_SUCCESS
-        || file.is_null()
-    {
-        if ((*root).open)(root, &mut file, path2.as_ptr(), efi::EFI_FILE_MODE_READ, 0)
-            != efi::EFI_SUCCESS
-            || file.is_null()
+    let paths: [&[u16]; 4] = [
+        &path_sublime_boot,
+        &path_sublime_root,
+        &path_cosmos_boot,
+        &path_cosmos_root,
+    ];
+
+    let mut opened = false;
+    for p in paths.iter() {
+        if ((*root).open)(root, &mut file, p.as_ptr(), efi::EFI_FILE_MODE_READ, 0) == efi::EFI_SUCCESS
+            && !file.is_null()
         {
-            ((*root).close)(root);
-            return None;
+            opened = true;
+            break;
         }
+    }
+
+    if !opened {
+        ((*root).close)(root);
+        return None;
     }
 
     let mut info_buf = [0u8; 256];
@@ -799,7 +821,7 @@ pub extern "efiapi" fn efi_main(image_handle: efi::Handle, st: *mut efi::SystemT
         let (file_phys, file_size) = match load_kernel_elf(bs, image_handle) {
             Some(v) => v,
             None => {
-                efi::print_ascii(con, "FATAL: cosmoskernel32.elf not found on ESP\n");
+                efi::print_ascii(con, "FATAL: sublimekernel32.elf not found on ESP\n");
                 return 1;
             }
         };

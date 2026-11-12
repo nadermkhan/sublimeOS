@@ -1,5 +1,5 @@
 /*
- * CosmosKernel - AMD64 fast syscall / sysret assembly entry
+ * KiteKernel - AMD64 fast syscall / sysret assembly entry
  */
 
 .code64

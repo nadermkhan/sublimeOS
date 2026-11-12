@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use cosmic_rt::println;
+use sublime_rt::println;
 
 #[no_mangle]
 pub fn main() -> i32 {

@@ -96,8 +96,8 @@ fn test_heap() {
     assert_eq!(v.len(), 1000);
     assert_eq!(v[999], 999);
 
-    let s = String::from("CosmosKernel Heap Allocation Works!");
-    assert_eq!(s.len(), 35);
+    let s = String::from("KiteKernel Heap Allocation Works!");
+    assert_eq!(s.len(), 33);
     println!("\x1b[32m[PASS]\x1b[0m");
 }
 

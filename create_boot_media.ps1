@@ -10,7 +10,7 @@ Write-Host "         Copyright (c) 2026 Nader Mahbub Khan          " -Foreground
 Write-Host "=======================================================" -ForegroundColor Cyan
 
 # 1. Check and build kernel if necessary
-if (!(Test-Path "cosmoskernel32.elf")) {
+if (!(Test-Path "sublimekernel32.elf") -and !(Test-Path "cosmoskernel32.elf")) {
     Write-Host "[1/3] Building kernel binary first..." -ForegroundColor Yellow
     & .\build.ps1
     if ($LASTEXITCODE -ne 0) {
@@ -30,8 +30,12 @@ New-Item -ItemType Directory -Path "$payloadDir\boot\grub" -Force | Out-Null
 New-Item -ItemType Directory -Path "$payloadDir\EFI\BOOT" -Force | Out-Null
 
 # Copy kernel & pure-Rust UEFI Multiboot2 bootloader
-Copy-Item "cosmoskernel32.elf" -Destination "$payloadDir\cosmoskernel32.elf" -Force
-Copy-Item "cosmoskernel32.elf" -Destination "$payloadDir\boot\cosmoskernel32.elf" -Force
+$kernelSource = if (Test-Path "sublimekernel32.elf") { "sublimekernel32.elf" } else { "cosmoskernel32.elf" }
+Copy-Item $kernelSource -Destination "$payloadDir\sublimekernel32.elf" -Force
+Copy-Item $kernelSource -Destination "$payloadDir\boot\sublimekernel32.elf" -Force
+Copy-Item $kernelSource -Destination "$payloadDir\cosmoskernel32.elf" -Force
+Copy-Item $kernelSource -Destination "$payloadDir\boot\cosmoskernel32.elf" -Force
+
 if (!(Test-Path "BOOTX64.EFI")) {
     Write-Host "Error: BOOTX64.EFI not found! Run .\build.ps1 first." -ForegroundColor Red
     exit 1
@@ -51,31 +55,29 @@ set gfxmode=auto
 set gfxpayload=keep
 
 menuentry "SublimeOS 1.0 (KiteKernel x86_64) - by Nader Mahbub Khan" {
-    multiboot2 /boot/cosmoskernel32.elf
+    multiboot2 /boot/sublimekernel32.elf
     boot
 }
 
 menuentry "SublimeOS (Verbose / Safe Boot -v)" {
-    multiboot2 /boot/cosmoskernel32.elf -v
+    multiboot2 /boot/sublimekernel32.elf -v
     boot
 }
 
-menuentry "SublimeOS (KiteKernel Console Mode -s)" {
-    multiboot2 /boot/cosmoskernel32.elf -s
+menuentry "SublimeOS (Console Mode -s)" {
+    multiboot2 /boot/sublimekernel32.elf -s
     boot
 }
 "@
 
 [System.IO.File]::WriteAllText("$payloadDir\boot\grub\grub.cfg", $grubCfg)
 
-# Pre-allocate 64KB PANIC.LOG file for safe bare-metal polled crash dumps
+# Copy Persistent Panic Log buffer
 $panicLogPath = "$payloadDir\PANIC.LOG"
-$zeroBytes = New-Object byte[] (64 * 1024)
-# Initialize with a helpful placeholder header
-$initHeader = "SublimeOS (KiteKernel) Pre-Allocated Crash Dump Area`r`nCopyright (c) 2026 Nader Mahbub Khan`r`nNo kernel panic recorded yet.`r`n"
-$headerBytes = [System.Text.Encoding]::ASCII.GetBytes($initHeader)
-[System.Array]::Copy($headerBytes, $zeroBytes, [Math]::Min($headerBytes.Length, $zeroBytes.Length))
-[System.IO.File]::WriteAllBytes($panicLogPath, $zeroBytes)
+if (!(Test-Path $panicLogPath)) {
+    $zeroBytes = New-Object byte[] 65536
+    [System.IO.File]::WriteAllBytes($panicLogPath, $zeroBytes)
+}
 
 Write-Host "  [OK] Payload ready at $payloadDir" -ForegroundColor Green
 
@@ -99,11 +101,11 @@ if ($DriveLetter -ne "") {
     Write-Host "  3. Insert USB into target machine and boot:"
     Write-Host "     - Late 2011 MacBook Pro (or Mac): Hold Option (Alt) at boot chime, choose 'EFI Boot'."
     Write-Host "     - Standard Intel/AMD PC: Press F12/F11/F8 for UEFI Boot Menu, select USB drive."
-    Write-Host "  The pure-Rust BOOTX64.EFI loader initializes UEFI GOP graphics, exits BootServices, and starts CosmicOS."
+    Write-Host "  The pure-Rust BOOTX64.EFI loader initializes UEFI GOP graphics, exits BootServices, and starts SublimeOS."
     Write-Host ""
     Write-Host "METHOD 2 (Ventoy - Multiboot ELF):" -ForegroundColor Green
     Write-Host "  1. Format your USB drive once with Ventoy (https://www.ventoy.net)."
-    Write-Host "  2. Drag and drop 'cosmoskernel32.elf' into the Ventoy USB drive."
+    Write-Host "  2. Drag and drop 'sublimekernel32.elf' into the Ventoy USB drive."
     Write-Host "  3. Boot via Ventoy Multiboot menu on any PC."
     Write-Host ""
     Write-Host "METHOD 3 (Legacy BIOS / GRUB2):" -ForegroundColor Green

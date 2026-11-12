@@ -10,17 +10,19 @@ if (!(Test-Path $qemu)) {
 }
 
 # Ensure binary is built
-if (!(Test-Path "cosmoskernel32.elf")) {
+$kernelElf = if (Test-Path "sublimekernel32.elf") { "sublimekernel32.elf" } else { "cosmoskernel32.elf" }
+if (!(Test-Path $kernelElf)) {
     Write-Host "Kernel binary not found. Building first..." -ForegroundColor Yellow
     & .\build.ps1
     if ($LASTEXITCODE -ne 0) { exit 1 }
+    $kernelElf = if (Test-Path "sublimekernel32.elf") { "sublimekernel32.elf" } else { "cosmoskernel32.elf" }
 }
 
 Write-Host "==============================================" -ForegroundColor Cyan
-Write-Host "        Launching CosmosKernel in QEMU        " -ForegroundColor Cyan
+Write-Host "        Launching SublimeOS in QEMU           " -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-$qemuArgs = @("-kernel", "cosmoskernel32.elf", "-m", "128M", "-audiodev", "none,id=snd0", "-device", "intel-hda", "-device", "hda-duplex,audiodev=snd0")
+$qemuArgs = @("-kernel", $kernelElf, "-m", "128M", "-audiodev", "none,id=snd0", "-device", "intel-hda", "-device", "hda-duplex,audiodev=snd0")
 
 if ($Headless) {
     Write-Host "Starting QEMU in headless terminal mode (COM1 serial stdio)..." -ForegroundColor Green

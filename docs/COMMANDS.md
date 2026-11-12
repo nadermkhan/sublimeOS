@@ -1,14 +1,14 @@
-# CosmicSH Command Reference & Shell Manual
+# SublimeSH Command Reference & Shell Manual
 
-`CosmicSH` is the native interactive shell for CosmicOS. Departing from archaic, cryptic 1970s Unix abbreviations (`cat`, `wc`, `ps`, `df`, `rm`), CosmicSH introduces a **modern, understandable, domain-oriented command architecture** while maintaining full backwards compatibility with classic Unix utilities.
+`SublimeSH` is the native interactive shell for SublimeOS. Departing from archaic, cryptic 1970s Unix abbreviations (`cat`, `wc`, `ps`, `df`, `rm`), SublimeSH introduces a **modern, understandable, domain-oriented command architecture** while maintaining full backwards compatibility with classic Unix utilities.
 
-CosmicSH is accessible across all virtual consoles (`Alt+F1` through `Alt+F4`), COM1 serial (`115200 8-N-1`), and the graphical desktop terminal emulator (`Terminal.app`).
+SublimeSH is accessible across all virtual consoles (`Alt+F1` through `Alt+F4`), COM1 serial (`115200 8-N-1`), and the graphical desktop terminal emulator (`Terminal.app`).
 
 ---
 
 ## 1. Shell Design & Modern Philosophy
 
-Modern systems should be self-descriptive and intuitive. CosmicSH structures commands around clear **Domains** (`system`, `tasks`, `storage`, `network`, `audio`) and **Action Verbs** (`list`, `view`, `edit`, `create`, `delete`, `find`, `count`):
+Modern systems should be self-descriptive and intuitive. SublimeSH structures commands around clear **Domains** (`system`, `tasks`, `storage`, `network`, `audio`) and **Action Verbs** (`list`, `view`, `edit`, `create`, `delete`, `find`, `count`):
 
 - **Self-Explanatory Verbs**: Instead of guessing what `cat` or `rm` or `wc` mean, use `view`, `delete`, `count`, and `list`.
 - **Hierarchical Domain Namespaces**: Manage network interfaces, Wi-Fi, DNS, and server daemons consistently under `network` (or shortcut `net`), processes under `tasks`, storage devices under `storage`, and system telemetry under `system`.
@@ -28,7 +28,7 @@ Modern systems should be self-descriptive and intuitive. CosmicSH structures com
 | `system version` | `sys vers` | Print product name, version, and build identifier | `sw_vers` |
 | `system uptime` | `uptime` | Display elapsed system uptime and timer ticks | `uptime` |
 | `system date` | `date` | Output current UTC date and time synchronized via RTC / NTP | `date` |
-| `system memory` | `mem` | Physical frame allocator stats and Sublime Kernel heap metrics | `mem` |
+| `system memory` | `mem` | Physical frame allocator stats and KiteKernel heap metrics | `mem` |
 | `system restart` | `reboot` | Perform ACPI hardware power reset | `reboot` |
 | `system shutdown` | `halt` | Cleanly halt and power down system | `halt` |
 
@@ -73,7 +73,7 @@ Modern systems should be self-descriptive and intuitive. CosmicSH structures com
 ### Audio & Sound Subsystem (`audio`, `sound`)
 | Modern Command | Description | Classic Alias |
 | :--- | :--- | :--- |
-| `audio chime` | Play iconic CosmicOS Sublime startup chime (harmonic F-Major chord) | `chime` |
+| `audio chime` | Play iconic SublimeOS Sublime startup chime (harmonic F-Major chord) | `chime` |
 | `audio tone [freq] [ms]` | Play pure sine wave audio tone via Intel HDA / PC Speaker | `beep` |
 | `audio play <file.wav>` | Stream uncompressed RIFF/WAVE PCM audio file via DMA | `play` |
 | `audio speak <text>` | Phonetic speech synthesizer simulated voice audio | `say` |
@@ -130,7 +130,7 @@ system restart
 
 For users accustomed to standard Unix or macOS commands, every familiar utility continues to function as an alias:
 
-| Classic Unix Command | Modern CosmicOS Equivalent | Primary Function |
+| Classic Unix Command | Modern SublimeOS Equivalent | Primary Function |
 | :--- | :--- | :--- |
 | `ls` | `list` | Directory listing |
 | `cat` | `view` | File content inspection |

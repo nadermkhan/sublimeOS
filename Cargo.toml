@@ -1,9 +1,9 @@
 [package]
-name = "cosmoskernel"
-version = "0.1.0"
+name = "kitekernel"
+version = "1.0.0"
 edition = "2021"
-authors = ["Cosmos Kernel Team"]
-description = "A clean, mature, monolithic Rust-based 64-bit operating system kernel"
+authors = ["Nader Mahbub Khan <muhammadnadermahbubkhan@gmail.com>"]
+description = "SublimeOS — KiteKernel: A clean, mature, monolithic Rust-based 64-bit operating system kernel"
 
 [dependencies]
 

@@ -122,16 +122,16 @@ pub fn init() {
     let vga_ptr = VGA_BUFFER_ADDR as *mut ScreenChar;
 
     // Initialize ttys001 with a secondary shell banner
-    tty.consoles[1].write_string("\x1b[36m=== CosmicOS Virtual Console [ttys001] ===\x1b[0m\n");
-    tty.consoles[1].write_string("Secondary cosmicsh session ready.\n\n");
+    tty.consoles[1].write_string("\x1b[36m=== SublimeOS Virtual Console [ttys001] ===\x1b[0m\n");
+    tty.consoles[1].write_string("Secondary sublimesh session ready.\n\n");
 
     // Initialize ttys002 as Console.app / dmesg
-    tty.consoles[2].write_string("\x1b[33m=== CosmicOS Console [ttys002 - log stream] ===\x1b[0m\n");
-    tty.consoles[2].write_string("Streaming live Sublime Kernel diagnostics and hardware IRQ logs...\n\n");
+    tty.consoles[2].write_string("\x1b[33m=== SublimeOS Console [ttys002 - log stream] ===\x1b[0m\n");
+    tty.consoles[2].write_string("Streaming live KiteKernel diagnostics and hardware IRQ logs...\n\n");
 
     // Initialize ttys003 as Activity Monitor / top
-    tty.consoles[3].write_string("\x1b[35m=== CosmicOS Activity Monitor [ttys003 - top] ===\x1b[0m\n");
-    tty.consoles[3].write_string("Sublime tasks and CPU thread telemetry active.\n\n");
+    tty.consoles[3].write_string("\x1b[35m=== SublimeOS Activity Monitor [ttys003 - top] ===\x1b[0m\n");
+    tty.consoles[3].write_string("KiteKernel tasks and CPU thread telemetry active.\n\n");
 
     // TTY 1 is active by default
     tty.consoles[0].flush_to_vga(vga_ptr);

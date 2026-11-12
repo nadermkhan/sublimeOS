@@ -3,7 +3,7 @@
 
 extern crate alloc;
 
-use cosmic_rt::{print, println, read, sched_yield, spawn, sync, syscommand, write};
+use sublime_rt::{print, println, read, sched_yield, spawn, sync, syscommand, write};
 
 fn read_line(buf: &mut [u8]) -> usize {
     let mut len = 0;

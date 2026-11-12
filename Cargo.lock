@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "cosmoskernel"
-version = "0.1.0"
+name = "kitekernel"
+version = "1.0.0"

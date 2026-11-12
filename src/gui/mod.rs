@@ -65,7 +65,7 @@ impl DesktopManager {
         let win = match app_id {
             DesktopAppId::Terminal => Window::new(
                 id,
-                "Terminal — -cosmicsh — 80x24",
+                "Terminal — sublime — 80x24",
                 90,
                 45,
                 580,
@@ -92,7 +92,7 @@ impl DesktopManager {
             ),
             DesktopAppId::About => Window::new(
                 id,
-                "About CosmicOS",
+                "About SublimeOS",
                 260,
                 90,
                 480,
@@ -338,7 +338,7 @@ impl DesktopManager {
     }
 }
 
-/// Launch the Cosmos Desktop GUI environment.
+/// Launch the Sublime Desktop GUI environment.
 pub fn launch_desktop() {
     kinfo!("Initializing UEFI GOP / Multiboot Linear Framebuffer for Aqua Desktop...");
 
@@ -355,8 +355,8 @@ pub fn launch_desktop() {
     desktop_mgr.open_app(DesktopAppId::Terminal);
     desktop_mgr.open_app(DesktopAppId::Sysmon);
 
-    serial_println!("[INFO] Cosmos Graphical Desktop is now running!");
-    serial_println!("[INFO] Type in serial terminal or graphical window to interact with CosmosSH.");
+    serial_println!("[INFO] Sublime Graphical Desktop is now running!");
+    serial_println!("[INFO] Type in serial terminal or graphical window to interact with SublimeSH.");
     serial_println!("[INFO] Press F12 or click 'Exit to Shell' in Start Menu to return to text console.");
 
     let mut running = true;
@@ -408,5 +408,5 @@ pub fn launch_desktop() {
     }
 
     crate::drivers::gop_console::set_gui_active(false);
-    kinfo!("Exited Cosmos Desktop GUI. Returning to CosmosSH text shell...");
+    kinfo!("Exited Sublime Desktop GUI. Returning to SublimeSH text shell...");
 }

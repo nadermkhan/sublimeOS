@@ -1,5 +1,5 @@
 /*
- * CosmosKernel - AMD64 Ring 3 User Transition and Return
+ * KiteKernel - AMD64 Ring 3 User Transition and Return
  */
 
 .code64

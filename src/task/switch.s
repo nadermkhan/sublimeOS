@@ -1,7 +1,7 @@
 /*
- * CosmosKernel - Cooperative & Preemptive Context Switch Routine
+ * KiteKernel - Cooperative & Preemptive Context Switch Routine
  *
- * void cosmos_context_switch(uint64_t *prev_rsp, uint64_t next_rsp);
+ * void sublime_context_switch(uint64_t *prev_rsp, uint64_t next_rsp);
  * System V AMD64 ABI:
  *   RDI: prev_rsp (pointer to store current thread's RSP)
  *   RSI: next_rsp (new thread's RSP to switch to)
@@ -9,9 +9,12 @@
 
 .code64
 .section .text
+.global sublime_context_switch
 .global cosmos_context_switch
+.type sublime_context_switch, @function
 .type cosmos_context_switch, @function
 
+sublime_context_switch:
 cosmos_context_switch:
     /* Save callee-saved registers of previous task */
     push rbx

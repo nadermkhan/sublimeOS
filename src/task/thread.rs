@@ -34,8 +34,8 @@ impl ThreadControlBlock {
         let mut stack = alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
         let stack_top = stack.as_mut_ptr() as u64 + KERNEL_STACK_SIZE as u64;
 
-        // Set up initial stack frame for cosmos_context_switch
-        // cosmos_context_switch will pop:
+        // Set up initial stack frame for sublime_context_switch
+        // sublime_context_switch will pop:
         // rbx, rbp, r12, r13, r14, r15, rflags, and ret to entry!
         let mut sp = stack_top;
 

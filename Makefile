@@ -1,12 +1,12 @@
-# CosmosKernel Makefile
+# SublimeOS (KiteKernel) Makefile
 
 TARGET ?= x86_64-unknown-none
 CARGO ?= cargo
 OBJCOPY ?= $(USERPROFILE)/.rustup/toolchains/nightly-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/rust-objcopy.exe
 QEMU ?= C:/msys64/mingw64/bin/qemu-system-x86_64.exe
 
-KERNEL_ELF = target/$(TARGET)/release/cosmoskernel
-MULTIBOOT_ELF = cosmoskernel32.elf
+KERNEL_ELF = target/$(TARGET)/release/kitekernel
+MULTIBOOT_ELF = sublimekernel32.elf
 
 .PHONY: all build run run-graphic run-gui clean test
 
@@ -19,6 +19,7 @@ $(KERNEL_ELF):
 
 $(MULTIBOOT_ELF): $(KERNEL_ELF)
 	$(OBJCOPY) -O elf32-i386 $< $@
+	cp $@ cosmoskernel32.elf
 
 run: $(MULTIBOOT_ELF)
 	$(QEMU) -kernel $< -m 128M -serial stdio -display none
@@ -33,4 +34,4 @@ test: build
 
 clean:
 	$(CARGO) clean
-	rm -f $(MULTIBOOT_ELF) serial.log qemu.log
+	rm -f $(MULTIBOOT_ELF) cosmoskernel32.elf serial.log qemu.log

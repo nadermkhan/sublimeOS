@@ -267,8 +267,9 @@ pub fn resolve_cached(hostname: &str) -> Result<[u8; 4], &'static str> {
         "localhost" => Some(([127, 0, 0, 1], 86400)),
         "apple.com" | "www.apple.com" => Some(([17, 253, 144, 10], 300)),
         "github.com" | "www.github.com" => Some(([140, 82, 121, 4], 300)),
+        "sublimeos.local" | "sublime.local" | "sublime" | "sublimekernel" | "sublimeos" |
         "cosmos.local" | "cosmos" | "cosmoskernel" => Some(([10, 0, 2, 15], 120)),
-        "cosmic.internal" => Some(([192, 168, 1, 1], 600)),
+        "sublime.internal" | "cosmic.internal" => Some(([192, 168, 1, 1], 600)),
         _ => None,
     };
 
@@ -405,7 +406,11 @@ pub fn handle_llmnr_packet(
     my_mac: [u8; 6],
 ) -> Option<Vec<u8>> {
     if let Some((tx_id, query_name)) = parse_llmnr_query(payload) {
-        if query_name.eq_ignore_ascii_case("cosmos")
+        if query_name.eq_ignore_ascii_case("sublime")
+            || query_name.eq_ignore_ascii_case("sublimekernel")
+            || query_name.eq_ignore_ascii_case("sublimeos")
+            || query_name.eq_ignore_ascii_case("sublimeos.local")
+            || query_name.eq_ignore_ascii_case("cosmos")
             || query_name.eq_ignore_ascii_case("cosmoskernel")
             || query_name.eq_ignore_ascii_case("cosmos.local")
         {

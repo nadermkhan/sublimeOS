@@ -192,7 +192,7 @@ impl Taskbar {
         canvas.draw_rounded_rect(menu_x, menu_y, menu_w, menu_h, 8, Color::argb(80, 255, 255, 255));
 
         let items = [
-            "About CosmicOS",
+            "About SublimeOS",
             "System Settings...",
             "Activity Monitor",
             "Terminal",

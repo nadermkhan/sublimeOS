@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use cosmic_rt::{getpid, println};
+use sublime_rt::{getpid, println};
 
 #[no_mangle]
 pub fn main() -> i32 {

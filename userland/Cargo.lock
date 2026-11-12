@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "cosmic-userland"
-version = "0.1.0"
+name = "sublime-userland"
+version = "1.0.0"

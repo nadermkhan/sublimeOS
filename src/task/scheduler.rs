@@ -11,7 +11,7 @@ use crate::task::thread::{ThreadControlBlock, ThreadId, ThreadState};
 use crate::kinfo;
 
 extern "C" {
-    fn cosmos_context_switch(prev_rsp: *mut u64, next_rsp: u64);
+    fn sublime_context_switch(prev_rsp: *mut u64, next_rsp: u64);
 }
 
 static NEXT_TID: AtomicU64 = AtomicU64::new(1);
@@ -325,7 +325,7 @@ pub fn schedule() {
     drop(sched);
 
     unsafe {
-        cosmos_context_switch(prev_rsp_ptr, next_rsp);
+        sublime_context_switch(prev_rsp_ptr, next_rsp);
     }
 }
 

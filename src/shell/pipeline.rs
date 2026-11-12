@@ -334,7 +334,7 @@ pub fn try_execute_pipeline(line: &str) -> bool {
         match read_file_from_vfs(file_name) {
             Ok(content) => (cmd_part, content),
             Err(e) => {
-                println!("\x1b[31mcosmos: {}: {}\x1b[0m", file_name, e);
+                println!("\x1b[31msublime: {}: {}\x1b[0m", file_name, e);
                 return true;
             }
         }
@@ -397,7 +397,7 @@ pub fn try_execute_pipeline(line: &str) -> bool {
             if let Some(target) = redirect_target {
                 match write_file_to_vfs(target, current_input.as_bytes(), append_mode) {
                     Ok(()) => {}
-                    Err(e) => println!("\x1b[31mcosmos: failed to redirect to '{}': {}\x1b[0m", target, e),
+                    Err(e) => println!("\x1b[31msublime: failed to redirect to '{}': {}\x1b[0m", target, e),
                 }
             } else {
                 print!("{}", current_input);

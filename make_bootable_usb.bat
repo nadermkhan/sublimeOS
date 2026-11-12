@@ -32,11 +32,11 @@ if %errorlevel% neq 0 (
 
 timeout /t 3 /nobreak >nul
 
-:: Discover assigned drive letter for SUBLIMEOS or COSMICOS
+:: Discover assigned drive letter for SUBLIMEOS or SublimeOS
 echo [3/3] Copying SublimeOS bootloader and KiteKernel payload...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$vol = Get-Volume -FileSystemLabel 'SUBLIMEOS' -ErrorAction SilentlyContinue; " ^
-    "if (!$vol -or !$vol.DriveLetter) { $vol = Get-Volume -FileSystemLabel 'COSMICOS' -ErrorAction SilentlyContinue }; " ^
+    "if (!$vol -or !$vol.DriveLetter) { $vol = Get-Volume -FileSystemLabel 'SublimeOS' -ErrorAction SilentlyContinue }; " ^
     "if (!$vol -or !$vol.DriveLetter) { Update-HostStorageCache; Start-Sleep -Seconds 2; $vol = Get-Volume -FileSystemLabel 'SUBLIMEOS' -ErrorAction SilentlyContinue }; " ^
     "if ($vol -and $vol.DriveLetter) { " ^
     "    $dl = $vol.DriveLetter + ':'; " ^
@@ -69,3 +69,4 @@ echo       then select your USB Flash Drive.
 echo.
 echo Press any key to finish...
 pause >nul
+

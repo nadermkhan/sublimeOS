@@ -360,15 +360,15 @@ fn cmd_diskutil(args: &[&str]) {
             println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
             println!("   0:      GUID_partition_scheme                        *128.0 MB   disk0");
             println!("   1:                        EFI EFI                     100.0 MB   disk0s1");
-            println!("   2:                  Cosmic_FS Container disk1         *28.0 MB   disk0s2\n");
+            println!("   2:                  Sublime_FS Container disk1         *28.0 MB   disk0s2\n");
         }
 
         println!("/dev/disk1 (synthesized):");
         println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
-        println!("   0:    CosmicFS Container Scheme -                      +28.0 MB    disk1");
+        println!("   0:    SublimeFS Container Scheme -                      +28.0 MB    disk1");
         println!("                                 Physical Store disk0s2");
-        println!("   1:              Cosmic Volume Cosmic HD               12.4 MB    disk1s1");
-        println!("   2:              Cosmic Volume Cosmic USB              15.6 MB    disk1s2");
+        println!("   1:              Cosmic Volume Sublime HD               12.4 MB    disk1s1");
+        println!("   2:              Cosmic Volume Sublime USB              15.6 MB    disk1s2");
     } else {
         println!("Usage: diskutil list");
     }
@@ -388,20 +388,20 @@ fn cmd_open(args: &[&str]) {
     }
     let target = args[0];
     if target.contains("Finder.app") || target == "gui" || target == "." {
-        println!("\x1b[35m[Cosmic LaunchServices] Launching Finder.app...\x1b[0m");
+        println!("\x1b[35m[Sublime LaunchServices] Launching Finder.app...\x1b[0m");
         crate::gui::launch_desktop();
     } else {
-        println!("[Cosmic LaunchServices] Opening '{}'...", target);
+        println!("[Sublime LaunchServices] Opening '{}'...", target);
         cmd_cat(args);
     }
 }
 
 fn cmd_say(args: &[&str]) {
-    let text = if args.is_empty() { "Hello, I am CosmicOS." } else {
+    let text = if args.is_empty() { "Hello, I am SublimeOS." } else {
         // print all args
         &args.join(" ")
     };
-    println!("\x1b[35m[SpeechSynthesis (Cosmic Voice)]\x1b[0m \"{}\"", text);
+    println!("\x1b[35m[SpeechSynthesis (Sublime Voice)]\x1b[0m \"{}\"", text);
     crate::drivers::audio::play_speech(text);
 }
 
@@ -413,8 +413,8 @@ fn cmd_beep(args: &[&str]) {
 }
 
 fn cmd_chime() {
-    println!("\x1b[35m[CosmicOS Audio] Playing Sublime Startup Chime (F-Major Harmonic Chord)...\x1b[0m");
-    crate::drivers::audio::play_cosmic_chime();
+    println!("\x1b[35m[SublimeOS Audio] Playing Sublime Startup Chime (F-Major Harmonic Chord)...\x1b[0m");
+    crate::drivers::audio::play_sublime_chime();
 }
 
 fn cmd_play(args: &[&str]) {
@@ -509,7 +509,7 @@ fn cmd_uniq(args: &[&str]) {
 fn cmd_defaults(args: &[&str]) {
     let action = args.first().copied().unwrap_or("read");
     if action == "read" {
-        println!("{{\n    CosmicInterfaceStyle = Dark;\n    CosmicFontSmoothing = 2;\n    CosmicKeyboardLayout = US;\n    CosmicMetricUnits = 1;\n    CosmicTemperatureUnit = Celsius;\n}}");
+        println!("{{\n    SublimeInterfaceStyle = Dark;\n    SublimeFontSmoothing = 2;\n    SublimeKeyboardLayout = US;\n    SublimeMetricUnits = 1;\n    SublimeTemperatureUnit = Celsius;\n}}");
     } else {
         println!("Usage: defaults read");
     }
@@ -567,7 +567,7 @@ fn cmd_help() {
 }
 
 fn cmd_gui() {
-    println!("\x1b[35m[LaunchServices] Starting CosmicOS Aqua Desktop...\x1b[0m");
+    println!("\x1b[35m[LaunchServices] Starting SublimeOS Aqua Desktop...\x1b[0m");
     crate::gui::launch_desktop();
 }
 
@@ -688,7 +688,7 @@ fn cmd_ps() {
     } else {
         println!("    0  Running        10  kernel_idle");
         println!("    1  Ready          25  launchd");
-        println!("    2  Running        45  cosmicsh");
+        println!("    2  Running        45  sublimesh");
     }
 }
 
@@ -704,7 +704,7 @@ fn cmd_lspci() {
 }
 
 fn cmd_usb() {
-    println!("\x1b[1;36mCosmicOS USB Subsystem & Device Topology\x1b[0m\n");
+    println!("\x1b[1;36mSublimeOS USB Subsystem & Device Topology\x1b[0m\n");
 
     let usb = crate::drivers::usb::USB.lock();
 
@@ -1074,7 +1074,7 @@ fn cmd_dhcp(args: &[&str]) {
     match subcmd {
         "status" => {
             let client = crate::net::dhcp::DHCP_CLIENT.lock();
-            println!("CosmicOS DHCP Client Status:");
+            println!("SublimeOS DHCP Client Status:");
             println!("  State:     {:?}", client.state);
             println!("  Interface: {}", if client.interface_name.is_empty() { "none" } else { &client.interface_name });
             if let Some(ref lease) = client.active_lease {
@@ -1319,7 +1319,7 @@ fn cmd_httpd(args: &[&str]) {
     let sub = args.first().copied().unwrap_or("status");
     match sub {
         "status" => {
-            println!("CosmicOS Embedded Web Server (httpd):");
+            println!("SublimeOS Embedded Web Server (httpd):");
             println!("  Port:       8080 / 80 (TCP)");
             println!("  Status:     \x1b[32mActive (Listening on all interfaces)\x1b[0m");
             println!("  Endpoints:  /");

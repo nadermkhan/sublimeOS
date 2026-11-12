@@ -122,13 +122,17 @@ fn encode_dns_name(name: &str, buf: &mut Vec<u8>) {
 
 /// Build an mDNS response packet for questions matching CosmicOS services.
 pub fn build_mdns_response(query: &MdnsQueryPacket, local_ip: [u8; 4]) -> Option<Vec<u8>> {
-    let hostname = "cosmicos.local";
+    let hostname = if query.questions.iter().any(|q| q.name.eq_ignore_ascii_case("sublimeos.local") || q.name.eq_ignore_ascii_case("sublimeos")) {
+        "sublimeos.local"
+    } else {
+        "cosmicos.local"
+    };
     let mut answers: Vec<Vec<u8>> = Vec::new();
 
     for q in &query.questions {
         let name_lower = q.name.to_ascii_lowercase();
 
-        if name_lower == "cosmicos.local" || name_lower == "cosmicos" {
+        if name_lower == "sublimeos.local" || name_lower == "sublimeos" || name_lower == "cosmicos.local" || name_lower == "cosmicos" {
             // Type A (IPv4 Address)
             if q.qtype == DNS_TYPE_A || q.qtype == DNS_TYPE_ANY {
                 let mut record = Vec::with_capacity(32);

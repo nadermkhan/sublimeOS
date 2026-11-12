@@ -114,7 +114,7 @@ impl InodeOperations for ProcMeminfo {
 pub struct ProcCpuinfo;
 impl InodeOperations for ProcCpuinfo {
     fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
-        let s = "processor       : 0\nvendor_id       : GenuineCosmos\nmodel name      : x86_64 Monolithic Core\ncpu MHz         : 2400.000\nflags           : fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall nx lm\n";
+        let s = "processor       : 0\nvendor_id       : GenuineIntel\nmodel name      : x86_64 Monolithic Core\ncpu MHz         : 2400.000\nflags           : fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 syscall nx lm\n";
         read_dynamic_string(s, offset, buf)
     }
     fn stat(&self) -> Stat {

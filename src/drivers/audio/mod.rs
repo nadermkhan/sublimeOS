@@ -98,8 +98,8 @@ pub fn play_tone(freq_hz: u32, duration_ms: u32) {
     }
 }
 
-/// Play the iconic CosmicOS Sublime startup chime.
-pub fn play_cosmic_chime() {
+/// Play the iconic SublimeOS startup chime.
+pub fn play_sublime_chime() {
     let mgr = AUDIO_MANAGER.lock();
     if let Some(ref hda) = mgr.hda_controller {
         let chime_samples = pcm::generate_cosmic_chime(44100);
@@ -112,6 +112,11 @@ pub fn play_cosmic_chime() {
             pc_speaker_beep(note, 120);
         }
     }
+}
+
+/// Backwards compatibility alias
+pub fn play_cosmic_chime() {
+    play_sublime_chime();
 }
 
 /// Synthesize speech audio from text through the audio subsystem.

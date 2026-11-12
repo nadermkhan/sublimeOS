@@ -4,7 +4,7 @@
 extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use cosmic_rt::{args, print, println, read, read_to_string, sched_yield, write, write_file};
+use sublime_rt::{args, print, println, read, read_to_string, sched_yield, write, write_file};
 
 #[no_mangle]
 pub fn main() -> i32 {

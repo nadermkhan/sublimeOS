@@ -1,5 +1,5 @@
 /*
- * CosmosKernel - 16-bit Real Mode to 64-bit Long Mode AP Bootstrap Trampoline
+ * KiteKernel - 16-bit Real Mode to 64-bit Long Mode AP Bootstrap Trampoline
  * Copied to physical address 0x8000 before SIPI vector 0x08 is dispatched.
  *
  * Fixed layout within page 0x8000 (runtime-asserted in smp::install_trampoline_page):

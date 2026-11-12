@@ -166,7 +166,7 @@ impl TextEditor {
 
         // 1. Header Bar
         let mod_tag = if self.modified { " [Modified]" } else { "" };
-        print!("\x1b[7m CosmicOS Nano 1.0  File: {}{} \x1b[0m\r\n", self.file_path, mod_tag);
+        print!("\x1b[7m SublimeOS Nano 1.0  File: {}{} \x1b[0m\r\n", self.file_path, mod_tag);
 
         // 2. Text Area (up to 20 visible lines)
         let visible_lines = 20;

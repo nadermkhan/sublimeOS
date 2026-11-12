@@ -1,4 +1,4 @@
-# CosmicOS — Sublime Kernel (x86_64)
+﻿# SublimeOS � KiteKernel (x86_64)
 
 > **An Advanced, Pure-Rust 64-bit Monolithic Research Operating System for x86_64 Hardware & Emulation.**
 
@@ -12,7 +12,7 @@
 [![Filesystems](https://img.shields.io/badge/filesystems-FAT32%20%7C%20exFAT%20%7C%20ext4%20%7C%20NTFS-brightgreen.svg)](#5-filesystems--real-block-storage)
 [![Network](https://img.shields.io/badge/network-TCP%2FIP%20%7C%20Broadcom%20Wi--Fi%20%7C%20TLS%201.3-cyan.svg)](#6-networking-80211-wi-fi--sockets)
 [![Audio](https://img.shields.io/badge/audio-Intel%20HDA%20%7C%20PCM%20%7C%20WAV-magenta.svg)](#7-intel-high-definition-audio--sound-subsystem)
-[![UserSpace](https://img.shields.io/badge/userspace-ELF64%20%7C%20CoW%20Fork%20%7C%20ld--cosmic.so-yellow.svg)](#4-userspace-runtime-dynamic-linker--standard-library)
+[![UserSpace](https://img.shields.io/badge/userspace-ELF64%20%7C%20CoW%20Fork%20%7C%20ld--sublime.so-yellow.svg)](#4-userspace-runtime-dynamic-linker--standard-library)
 
 ---
 
@@ -28,7 +28,7 @@
    - [5. Filesystems & Real Block Storage](#5-filesystems--real-block-storage)
    - [6. Networking, 802.11 Wi-Fi & Sockets](#6-networking-80211-wi-fi--sockets)
    - [7. Intel High Definition Audio & Sound Subsystem](#7-intel-high-definition-audio--sound-subsystem)
-   - [8. CosmicSH Modern Shell & Terminal Text Editor](#8-cosmicsh-modern-shell--terminal-text-editor)
+   - [8. SublimeSH Modern Shell & Terminal Text Editor](#8-SublimeSH-modern-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
    - [10. Apple Unibody & Broadcom Hardware Support](#10-apple-unibody--broadcom-hardware-support)
 5. [Interactive Shell Command Reference](#interactive-shell-command-reference)
@@ -44,18 +44,18 @@
 
 ## Overview
 
-**CosmicOS** is an advanced, monolithic, bare-metal 64-bit research operating system developed in idiomatic `#![no_std]` Rust with zero external runtime dependencies. Built on memory-safe abstractions wrapping minimal, audited `unsafe` hardware primitives (MMIO, DMA rings, assembly trampolines, and page tables), CosmicOS is powered by the **Sublime Kernel**. CosmicOS boots either via native UEFI (using its standalone pure-Rust `BOOTX64.EFI` loader) or standard Multiboot 1/2, transitions into 64-bit Long Mode, maps kernel space to the higher half (`0xFFFFFFFF80000000+`), and initializes a comprehensive operating system stack:
+**SublimeOS** is an advanced, monolithic, bare-metal 64-bit research operating system developed in idiomatic `#![no_std]` Rust with zero external runtime dependencies. Built on memory-safe abstractions wrapping minimal, audited `unsafe` hardware primitives (MMIO, DMA rings, assembly trampolines, and page tables), SublimeOS is powered by the **KiteKernel**. SublimeOS boots either via native UEFI (using its standalone pure-Rust `BOOTX64.EFI` loader) or standard Multiboot 1/2, transitions into 64-bit Long Mode, maps kernel space to the higher half (`0xFFFFFFFF80000000+`), and initializes a comprehensive operating system stack:
 
 - **Native UEFI Bootloader & GOP Linear Framebuffer**: Standalone pure-Rust `#![no_std]` UEFI loader (`BOOTX64.EFI`) built directly from `uefi-boot/`. Configures UEFI Graphics Output Protocol (GOP) linear framebuffer (`1024x768x32bpp`), parses ACPI 2.0 XSDT / 1.0 RSDT tables, extracts and coalesces E820 physical memory regions, exits UEFI BootServices cleanly, transitions the CPU from 64-bit Long Mode down to 32-bit Protected Mode via a low `< 1 MiB` trampoline page, and enters the kernel via Multiboot2 (`0x36D76289`). This 64-to-32-to-64 bounce intentionally unifies the entry path between legacy BIOS Multiboot/Multiboot2 and modern UEFI, allowing the kernel bootstrap assembly (`boot.s`) to initialize page tables and Long Mode transitions identically regardless of host firmware.
 - **Early GOP Framebuffer Console**: Mirrors kernel logs (`kinfo!`, `kwarn!`), panics, and the interactive shell onto the linear framebuffer using an 8x16 font with UTF-8 box-drawing/block element decoding and ANSI color sequences, providing immediate visual feedback on modern EFI machines without legacy VGA `0xB8000`.
-- **Preemptive Multitasking & User Space**: Priority & round-robin scheduler with per-CPU runqueues and work-stealing load balancing across all online SMP cores, core affinity masks (`sched_setaffinity` / `sched_getaffinity`), 64-bit ELF binary loader, hardware privilege level transitions (`iretq`, `syscall`/`sysretq`), Copy-on-Write process fork (`fork`/`execve`/`waitpid`), POSIX signal delivery (`sigaction`, `sigprocmask`, `kill`), dynamic runtime linker (`ld-cosmic.so`), userspace C standard library (`cosmic-libc`), standalone `userland/` toolchain crate compiling genuine `#![no_std]` 64-bit ELF user binaries in `/bin` (`init`, `calc`, `hello`, `sh`, `snake`) with `cosmic_rt` runtime, dynamic user heap allocation (`sys_brk`), full AMD64 SSE/SIMD hardware enablement (CR0.MP=1, CR4.OSFXSR=1), full register preservation across `syscall`/`sysretq`, and a 16-level nested user-mode execution frame stack. Boots directly into PID 1 (`/bin/init`) as the userspace supervisor, which spawns the interactive shell (`/bin/sh`) in Ring 3 (CPL 3).
+- **Preemptive Multitasking & User Space**: Priority & round-robin scheduler with per-CPU runqueues and work-stealing load balancing across all online SMP cores, core affinity masks (`sched_setaffinity` / `sched_getaffinity`), 64-bit ELF binary loader, hardware privilege level transitions (`iretq`, `syscall`/`sysretq`), Copy-on-Write process fork (`fork`/`execve`/`waitpid`), POSIX signal delivery (`sigaction`, `sigprocmask`, `kill`), dynamic runtime linker (`ld-sublime.so`), userspace C standard library (`sublime-libc`), standalone `userland/` toolchain crate compiling genuine `#![no_std]` 64-bit ELF user binaries in `/bin` (`init`, `calc`, `hello`, `sh`, `snake`) with `sublime_rt` runtime, dynamic user heap allocation (`sys_brk`), full AMD64 SSE/SIMD hardware enablement (CR0.MP=1, CR4.OSFXSR=1), full register preservation across `syscall`/`sysretq`, and a 16-level nested user-mode execution frame stack. Boots directly into PID 1 (`/bin/init`) as the userspace supervisor, which spawns the interactive shell (`/bin/sh`) in Ring 3 (CPL 3).
 - **SMP Multi-Core & APIC Architecture**: ACPI Multiple APIC Description Table (MADT) parser, Local APIC (LAPIC) high-speed timer, Inter-Processor Interrupt (IPI) dispatch, I/O APIC 64-bit redirection tables (cleanly disabling legacy 8259 PIC), and Application Processor (AP) core wakeup sequence (INIT-SIPI-SIPI).
 - **Advanced Block Storage, Persistence & Partition Auto-Mounter**: Unified 512 KiB LRU Block Cache (`bcache.rs`) with dirty sector tracking, `sys_sync` (162), `sys_fsync` (74), and transparent partition device caching; PCIe NVMe controller driver with circular Admin/IO submission and completion queues, AHCI SATA controller driver with 32-slot command lists and PRDT DMA engines, ATA/IDE PIO LBA48, USB Mass Storage (SCSI / Bulk-Only Transport over xHCI / EHCI), and real partition table auto-mounter scanning MBR (primary and EBR chains) and GPT into `/Volumes/`.
 - **Filesystems & VFS**: Pluggable Virtual File System (`/System`, `/Library`, `/Applications`, `/Users`, `/Volumes`, `/dev`, `/proc`), read/write FAT32 with cluster allocation bitmap, exFAT parser, Linux ext4 superblock/extent-tree resolver with HTree indexing, and Windows NTFS decoding supporting both resident `$DATA` records and non-resident variable-length runlist decoding (`decode_runlist`) for multi-extent fragmented files.
 - **Network Protocol Stack & Broadcom Silicon**: Full TCP/IP stack (Ethernet II, ARP, IPv4, ICMP Ping, UDP, RFC 793 TCP state machine, BSD Socket API), IEEE 802.11 Wi-Fi subsystem (beacon frame parsing, 4-way handshake, WPA2-PSK with PBKDF2-SHA1), Intel e1000 Gigabit NIC, Broadcom NetXtreme BCM57765 Gigabit Ethernet (`tg3`), Broadcom BCM4331 802.11n Wi-Fi (`b43` with in-tree compile-time `ucode16_mimo.fw` ingestion and PSM SHM upload), Realtek, Qualcomm Atheros, HTTP/1.1 client (`curl`), embedded HTTP server (`httpd`), and TLS 1.3 client engine (X25519 ECDH, ChaCha20-Poly1305) operating in opportunistic encryption mode without X.509 PKI certificate chain or root CA verification.
 - **USB 2.0 EHCI, Hub Class Driver & Apple Input Hardware**: EHCI Periodic/Async DMA engines, comprehensive USB 2.0 Hub Class driver (Class `0x09`) supporting downstream multi-port hubs (such as Intel 6/7-series Rate Matching Hubs `0x8087:0x0024`), `DeviceRemovable` port bitmasks, power-on-to-power-good stabilization delay, port reset debouncing and 10 ms recovery (`TRSTRCY`), multi-tier Split Transaction Translator (TT) inheritance, depth recursion bounds, automatic physical Queue Head programming (Mult=1, C-Mask=0x1C, S-Mask=0x01, TT HubAddr/PortNum), USB HID Boot Protocol keyboard, Apple multi-touch trackpad decoding with boot mouse emulation, Apple System Management Controller (SMC) keyboard backlight control (`/dev/backlight`), and complete device tree topology diagnostics via `system usb` and `lsusb`.
-- **Intel HDA Audio Subsystem**: Intel High Definition Audio controller driver, pure integer quarter-wave sine synthesis, RIFF/WAVE PCM parser, PC speaker fallback, and the iconic CosmicOS startup chime.
-- **POSIX Shell & Editor**: CosmicSH terminal shell (Unix/POSIX-style shell with zsh-inspired syntax and keybindings) with multi-stage pipelines (`|`), file redirection (`>`, `>>`, `<`), Unix filters (`grep`, `wc`, `head`, `tail`, `sort`, `uniq`), and full-screen in-terminal text editor (`nano` / `edit`).
+- **Intel HDA Audio Subsystem**: Intel High Definition Audio controller driver, pure integer quarter-wave sine synthesis, RIFF/WAVE PCM parser, PC speaker fallback, and the iconic SublimeOS startup chime.
+- **POSIX Shell & Editor**: SublimeSH terminal shell (Unix/POSIX-style shell with zsh-inspired syntax and keybindings) with multi-stage pipelines (`|`), file redirection (`>`, `>>`, `<`), Unix filters (`grep`, `wc`, `head`, `tail`, `sort`, `uniq`), and full-screen in-terminal text editor (`nano` / `edit`).
 - **Aqua Graphical Desktop**: 1024x768x32bpp double-buffered compositor, glass dock, top global menu bar, window manager with traffic light controls, Finder, Terminal, and Activity Monitor.
 
 ---
@@ -64,13 +64,13 @@
 
 ```text
                     +-------------------------------------------------------------+
-                    |                CosmicOS Aqua Desktop Compositor             |
+                    |                SublimeOS Aqua Desktop Compositor             |
                     |        (1024x768x32bpp TrueColor Double-Buffered Canvas)     |
                     |        - Top Menu Bar, Glass Dock, Window Manager, Finder   |
                     +------------------------------+------------------------------+
                                                    |
                     +------------------------------+------------------------------+
-                    |              CosmicSH Interactive Diagnostic Shell          |
+                    |              SublimeSH Interactive Diagnostic Shell          |
                     |   - Pipelines (|), File Redirection (>, >>, <), Nano Editor |
                     |   - UNIX Filters: grep, wc, head, tail, sort, uniq          |
                     +------------------------------+------------------------------+
@@ -122,7 +122,7 @@
 
 ## Hardware Support Matrix
 
-To provide an accurate technical assessment of driver readiness, CosmicOS categorizes hardware drivers by verified operational tier across physical x86_64 silicon and virtualized environments:
+To provide an accurate technical assessment of driver readiness, SublimeOS categorizes hardware drivers by verified operational tier across physical x86_64 silicon and virtualized environments:
 
 | Subsystem / Controller | Hardware / Target | Verification Tier | Operational Status & Capabilities |
 | :--- | :--- | :--- | :--- |
@@ -206,7 +206,7 @@ To provide an accurate technical assessment of driver readiness, CosmicOS catego
 ### 4. Userspace Runtime, Dynamic Linker & Standard Library
 *Location: [`src/user/`](src/user/), [`userland/`](userland/)*
 
-- **Standalone Userland Toolchain & Runtime (`userland/`, `cosmic_rt`)**: Standalone `#![no_std]` Rust crate compiling genuine 64-bit ELF executables targeting `x86_64-unknown-linux-none` linked with `user.ld` (`0x00400000` base). The `cosmic_rt` minimal runtime provides standard SysV AMD64 CRT entry (`_start`), command-line argument extraction (`args()`), directory iteration (`read_dir()`), file I/O helpers (`read_to_string()`, `write_file()`), `print!`/`println!` macros, POSIX syscall wrappers (`read`, `write`, `open`, `close`, `exit`, `brk`, `fork`, `waitpid`, `getpid`, `sched_yield`, `sleep_ms`, `sync`, `spawn`, `syscommand`, `shutdown`), and a `GlobalAlloc` user bump allocator backed by `sys_brk`.
+- **Standalone Userland Toolchain & Runtime (`userland/`, `sublime_rt`)**: Standalone `#![no_std]` Rust crate compiling genuine 64-bit ELF executables targeting `x86_64-unknown-linux-none` linked with `user.ld` (`0x00400000` base). The `sublime_rt` minimal runtime provides standard SysV AMD64 CRT entry (`_start`), command-line argument extraction (`args()`), directory iteration (`read_dir()`), file I/O helpers (`read_to_string()`, `write_file()`), `print!`/`println!` macros, POSIX syscall wrappers (`read`, `write`, `open`, `close`, `exit`, `brk`, `fork`, `waitpid`, `getpid`, `sched_yield`, `sleep_ms`, `sync`, `spawn`, `syscommand`, `shutdown`), and a `GlobalAlloc` user bump allocator backed by `sys_brk`.
 - **System V AMD64 ABI Initial User Stack Setup & Strict Alignment**: When loading 64-bit ELF user processes, the kernel initializes the user stack in compliance with the AMD64 ABI: `[argc, argv[0]..argv[N], NULL, envp NULL, string data]`. The stack pointer is aligned such that `rsp % 16 == 8` upon entry to `_start`, ensuring that `pop rdi` aligns `rsp` to 16 bytes prior to function calls (`call cosmic_entry`), completely eliminating `#GP(0)` faults on 16-byte aligned vector instructions (`movaps`, `movups`).
 - **Linux-Compatible Directory Enumeration (`SYS_GETDENTS64`)**: Implements POSIX/Linux Syscall 217 (`sys_getdents64`), packing dynamic 64-bit dirent records (`d_ino`, `d_off`, `d_reclen`, `d_type`, `d_name[]`) directly from underlying VFS inode traversal (`InodeOperations::readdir()`) into userspace memory buffers.
 - **Filesystem Creation & Truncation (`O_CREAT` / `O_TRUNC`)**: `sys_open` supports standard POSIX flags `O_CREAT` (0x40) to dynamically create regular files within parent directory inodes and `O_TRUNC` (0x200) to reset existing file contents to zero length.
@@ -214,7 +214,7 @@ To provide an accurate technical assessment of driver readiness, CosmicOS catego
 - **Hardware SIMD & Syscall ABI Hardening**: Kernel architecture initialization enables SSE / SIMD instructions across all BSP and AP cores (CR0.MP=1, CR0.EM=0, CR4.OSFXSR=1, CR4.OSXMMEXCPT=1), allowing userspace binaries to execute 128-bit vector instructions (`movups`, `movaps`) without `#UD` exceptions. Full general-purpose register preservation (`rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, `r12..r15`, `rbx`, `rbp`) across `syscall_entry.s` and `sysretq` guarantees compliance with standard compiler code generation, while a 16-level nested execution stack in `user_switch.s` enables nested process execution without clobbering parent states.
 - **Blocking Standard Input (`sys_read`)**: TTY console read calls (`read(0, buf, count)`) block cleanly until incoming keyboard or serial input is available, yielding the CPU to the multitasking scheduler and ensuring low CPU utilization when awaiting input.
 - **Dynamic Linker & Shared Libraries ([`linker.rs`](src/user/linker.rs))**: Dynamic runtime linker resolving shared library dependencies from `/lib`, parsing export symbols, and applying AMD64 relocations (`R_X86_64_JUMP_SLOT`, `R_X86_64_GLOB_DAT`, `R_X86_64_64`, `R_X86_64_RELATIVE`) by patching Global Offset Table (GOT) slots in user memory.
-- **Userspace C Standard Library (`cosmic-libc`, [`libc.rs`](src/user/libc.rs))**: Standard userspace runtime implementing POSIX syscall wrappers (`syscall0`..`syscall3`):
+- **Userspace C Standard Library (`sublime-libc`, [`libc.rs`](src/user/libc.rs))**: Standard userspace runtime implementing POSIX syscall wrappers (`syscall0`..`syscall3`):
   - File I/O: `write()`, `read()`, `open()`, `close()`.
   - Memory Management: `brk()` and `malloc()` / `free()` heap allocator.
   - Process Credentials & Control: `fork()`, `waitpid()`, `execve()`, `kill()`, `sigaction()`, `sigprocmask()`, `signal()`, `getpid()`, `uname()`, `nanosleep()`, and `exit()`.
@@ -231,12 +231,12 @@ To provide an accurate technical assessment of driver readiness, CosmicOS catego
   - `/bin/edit`: Standalone compiled modal in-terminal text editor supporting interactive line input, document viewing (`:p`), and file saving (`:w`, `:wq`) via `O_CREAT` / `O_TRUNC`.
   - `/bin/sh`: Isolated interactive user shell executing in Ring 3 with terminal prompts, POSIX argument parsing, and standard I/O bridging.
   - `/bin/snake`: Full-screen ASCII arcade game running in Ring 3 utilizing ANSI escape codes and PIT sleep timers.
-  - `/bin/dyntest`: Dynamically linked executable requesting `/lib/ld-cosmic.so` interpreter, dynamically importing and linking `cosmic_puts`, `cosmic_pow`, and `cosmic_exit` across shared libraries.
+  - `/bin/dyntest`: Dynamically linked executable requesting `/lib/ld-sublime.so` interpreter, dynamically importing and linking `cosmic_puts`, `cosmic_pow`, and `cosmic_exit` across shared libraries.
   - `/bin/windowserver`: Aqua display server daemon opening `/dev/fb0`, configuring double-buffered video via `ioctl`, and compositing desktop UI elements via `/lib/libgui.so`.
   - `/bin/telnetd`: Ring 3 Telnet daemon creating TCP server sockets, binding to port 23, and servicing remote terminal shell sessions over standard VFS file descriptors.
   - `/bin/sshd`: Ring 3 Secure Shell daemon binding to TCP port 22, exchanging `SSH-2.0-CosmicSSH_1.0` protocol banners, and validating remote client authentication.
 - **Shared Libraries (`/lib`)**:
-  - `/lib/ld-cosmic.so`: Dynamic linker runtime image.
+  - `/lib/ld-sublime.so`: Dynamic linker runtime image.
   - `/lib/libc.so`: Shared C standard library exporting `cosmic_puts` and `cosmic_exit`.
   - `/lib/libm.so`: Shared math library exporting `cosmic_pow` (integer exponentiation).
 
@@ -274,11 +274,11 @@ To provide an accurate technical assessment of driver readiness, CosmicOS catego
 - **DNS Client Cache, Multi-Nameserver Failover & LLMNR ([`dns.rs`](src/net/dns.rs))**:
   - **DNS Cache with TTL**: In-memory DNS cache (`DNS_CACHE`) storing resolved IPv4 records with real-time TTL expiration tied to kernel RTC timestamps.
   - **Multi-Nameserver Failover**: Parses `/etc/resolv.conf` (`nameserver`, `search`), managing multi-server configurations (`DNS_CONFIG`) with failover support.
-  - **RFC 4795 LLMNR**: Link-Local Multicast Name Resolution listening on UDP port 5355 (`224.0.0.252` / MAC `01:00:5E:00:00:FC`), answering single-label queries (`cosmos`, `cosmoskernel`, `cosmos.local`).
+  - **RFC 4795 LLMNR**: Link-Local Multicast Name Resolution listening on UDP port 5355 (`224.0.0.252` / MAC `01:00:5E:00:00:FC`), answering single-label queries (`cosmos`, `KiteKernel`, `cosmos.local`).
 - **Network Socket Server Daemons**:
   - `/bin/telnetd`: Background server daemon listening on TCP port 23, spawning interactive sessions for incoming telnet clients.
   - `/bin/sshd`: Background server daemon listening on TCP port 22 with SSH-2.0 protocol identification and authentication handling.
-  - Shell `telnet` client command enabling remote terminal connections from CosmicSH.
+  - Shell `telnet` client command enabling remote terminal connections from SublimeSH.
 - **HTTP/1.1 & TLS 1.3 HTTPS Engine ([`http.rs`](src/net/http.rs), [`tls.rs`](src/net/tls.rs))**:
   - Pure `#![no_std]` TLS 1.3 client stack implementing RFC 8446 handshake with X25519 ECDH key agreement and ChaCha20-Poly1305 AEAD record encryption/decryption.
   - SHA-256, HMAC-SHA256, and HKDF-Extract/Expand key schedule derivation.
@@ -287,7 +287,7 @@ To provide an accurate technical assessment of driver readiness, CosmicOS catego
   - Server: Embedded `httpd` web server serving interactive status dashboards and JSON APIs (`/api/status`).
 - **mDNS & Apple Bonjour ZeroConf Responder ([`mdns.rs`](src/net/mdns.rs))**:
   - RFC 6762 / RFC 6763 compliant Multicast DNS responder listening on UDP port 5353 (`224.0.0.251` / MAC `01:00:5E:00:00:FB`).
-  - Resolves `cosmicos.local` to the system's IPv4 address (`A` record).
+  - Resolves `SublimeOS.local` to the system's IPv4 address (`A` record).
   - DNS Service Discovery (DNS-SD) advertising running system daemons: HTTP Web Server (`_http._tcp.local`, port 80), SSH Remote Shell (`_ssh._tcp.local`, port 22), and Telnet Server (`_telnet._tcp.local`, port 23), along with service enumeration (`_services._dns-sd._udp.local`).
   - Generates authoritative answer frames with PTR, SRV, TXT, and A resource records.
 - **DHCP Client Daemon ([`dhcp.rs`](src/net/dhcp.rs))**:
@@ -320,14 +320,14 @@ To provide an accurate technical assessment of driver readiness, CosmicOS catego
   - Quarter-wave integer sine lookup table (`integer_sin()`), avoiding floating point instructions in kernel space.
   - RIFF/WAVE parser supporting uncompressed 8-bit and 16-bit PCM WAV audio.
   - Tone generator (`generate_sine_wave()`) with smooth anti-pop envelopes.
-  - CosmicOS Startup Chime (`generate_cosmic_chime()`): 4-note resonant harmonic F-Major chord (F3, C4, F4, A4) with natural acoustic decay.
+  - SublimeOS Startup Chime (`generate_cosmic_chime()`): 4-note resonant harmonic F-Major chord (F3, C4, F4, A4) with natural acoustic decay.
   - Phonetic formant synthesis for text-to-speech audio.
 - **PC Speaker Fallback ([`mod.rs`](src/drivers/audio/mod.rs))**: 8254 PIT Timer 2 square-wave hardware tone generation via I/O ports `0x42`, `0x43`, and `0x61`.
 
-### 8. CosmicSH Modern Shell & Terminal Text Editor
+### 8. SublimeSH Modern Shell & Terminal Text Editor
 *Location: [`src/shell/`](src/shell/)*
 
-CosmicSH departs from cryptic 1970s Unix abbreviations (`cat`, `wc`, `ps`, `df`, `rm`), introducing a **modern, understandable, domain-oriented command architecture** (`system`, `tasks`, `storage`, `network`, `audio`, `list`, `view`, `create`, `delete`, `find`, `count`) while preserving 100% backwards compatibility with classic Unix utilities.
+SublimeSH departs from cryptic 1970s Unix abbreviations (`cat`, `wc`, `ps`, `df`, `rm`), introducing a **modern, understandable, domain-oriented command architecture** (`system`, `tasks`, `storage`, `network`, `audio`, `list`, `view`, `create`, `delete`, `find`, `count`) while preserving 100% backwards compatibility with classic Unix utilities.
 
 - **Modern Domain Commands & Stream Filters**:
   - `system [info|hardware|config|restart|shutdown]`: Visual telemetry dashboard, hardware profiler, kernel variables, and ACPI power management.
@@ -349,26 +349,26 @@ CosmicSH departs from cryptic 1970s Unix abbreviations (`cat`, `wc`, `ps`, `df`,
 - **Window Management**: Window chrome with titlebar dragging, active/inactive focus states, and traffic light buttons (🔴 Close, 🟡 Minimize, 🟢 Zoom).
 - **Top Global Menu Bar & Bottom Glass Dock**: Application menus, live RAM status gauge, translucent dock tiles, and running app indicator dots.
 - **Built-in Desktop Apps**:
-  - **Terminal (`Terminal.app`)**: Graphical CosmicSH shell session backed by pseudo-terminals (`/dev/pts/*`).
+  - **Terminal (`Terminal.app`)**: Graphical SublimeSH shell session backed by pseudo-terminals (`/dev/pts/*`).
   - **Activity Monitor (`Activity Monitor.app`)**: Live CPU load, threads, memory pressure meter, and kernel subsystem health.
   - **Finder (`Finder.app`)**: Two-pane file manager with quick volume navigation (`Cosmic HD`, `Cosmic USB`).
-  - **About CosmicOS**: Hardware specs and memory counters.
+  - **About SublimeOS**: Hardware specs and memory counters.
 
 ### 10. Apple Unibody & Broadcom Hardware Support
 *Location: [`src/drivers/platform/apple.rs`](src/drivers/platform/apple.rs), [`src/drivers/usb/`](src/drivers/usb/), [`src/drivers/net/broadcom/`](src/drivers/net/broadcom/)*
 
-CosmicOS provides targeted bare-metal driver support for the x86_64 architecture of the Late 2011 15-inch Apple MacBook Pro (MacBookPro8,2) equipped with an Intel Core i7-2760QM processor and companion Broadcom/Intel silicon (not ARM64 Apple Silicon):
+SublimeOS provides targeted bare-metal driver support for the x86_64 architecture of the Late 2011 15-inch Apple MacBook Pro (MacBookPro8,2) equipped with an Intel Core i7-2760QM processor and companion Broadcom/Intel silicon (not ARM64 Apple Silicon):
 
 - **Apple SMC & gmux Backlight Driver ([`platform/apple.rs`](src/drivers/platform/apple.rs))**: Native driver for Apple System Management Controller (SMC) and `gmux` hardware on Late 2011 MacBook Pro unibody laptops (MacBookPro8,2). Exposes `/dev/backlight` for reading and adjusting keyboard backlight LEDs via direct I/O port command/data handshakes (`0x300`/`0x304`).
 - **USB 2.0 EHCI Periodic & Async DMA Engines ([`usb/ehci.rs`](src/drivers/usb/ehci.rs))**: Full EHCI Periodic Frame List and Interrupt Queue Head scheduling for 1ms/7ms/8ms HID polling without CPU busy-waiting. Implements USB 2.0 Hub split-transactions (SSPLIT/CSPLIT) and full standard composite configuration descriptor decoding (>64 bytes).
-- **USB HID Keyboard & Multi-Touch Trackpad ([`usb/hid/`](src/drivers/usb/hid/))**: Native driver for Apple internal USB keyboards and multi-touch trackpads wired to the Intel 6-series EHCI controller. Automatically converts HID reports to standard CosmicOS input events with hardware modifier tracking.
+- **USB HID Keyboard & Multi-Touch Trackpad ([`usb/hid/`](src/drivers/usb/hid/))**: Native driver for Apple internal USB keyboards and multi-touch trackpads wired to the Intel 6-series EHCI controller. Automatically converts HID reports to standard SublimeOS input events with hardware modifier tracking.
 - **Bare-Metal Apple Hardware Hardening**: Complete 8259 legacy PIC blinding, Local APIC EOI acknowledge on IRQs 32..47, and physical memory scrubbing to safeguard firmware-reserved gaps against triple faults.
 
 ---
 
 ## Interactive Shell Command Reference
 
-CosmicOS provides **CosmicSH**, a modern, domain-oriented command shell featuring structured namespaces and intuitive verbs. Departing from cryptic 1970s Unix abbreviations, CosmicSH organizes commands around clear domains while maintaining 100% backwards compatibility with classic utilities across all virtual consoles (`Alt+F1` through `Alt+F4`), COM1 serial, and `Terminal.app`:
+SublimeOS provides **SublimeSH**, a modern, domain-oriented command shell featuring structured namespaces and intuitive verbs. Departing from cryptic 1970s Unix abbreviations, SublimeSH organizes commands around clear domains while maintaining 100% backwards compatibility with classic utilities across all virtual consoles (`Alt+F1` through `Alt+F4`), COM1 serial, and `Terminal.app`:
 
 | Domain Namespace | Primary Modern Commands | Key Capabilities | Classic Aliases |
 | :--- | :--- | :--- | :--- |
@@ -385,11 +385,11 @@ CosmicOS provides **CosmicSH**, a modern, domain-oriented command shell featurin
 
 ## Automated Verification Suite
 
-On boot, CosmicOS automatically executes an in-kernel verification suite comprising 52 self-tests that validate every core subsystem before dropping into the interactive shell:
+On boot, SublimeOS automatically executes an in-kernel verification suite comprising 52 self-tests that validate every core subsystem before dropping into the interactive shell:
 
 ```text
 =======================================================
-             CosmosKernel Verification Suite           
+             KiteKernel Verification Suite           
 =======================================================
   [TEST 01..10] Memory, VFS, Scheduler & Storage Filesystems   ... [PASS 10/10]
   [TEST 11..20] Networking, Crypto, Wi-Fi & Userspace Runtime   ... [PASS 10/10]
@@ -433,8 +433,8 @@ Compile the release kernel binary, standalone UEFI bootloader, and convert to Mu
 .\build.ps1
 ```
 *Outputs:*
-- `target/x86_64-unknown-none/release/cosmoskernel` (64-bit Kernel ELF)
-- `cosmoskernel32.elf` (Multiboot bootable container)
+- `target/x86_64-unknown-none/release/KiteKernel` (64-bit Kernel ELF)
+- `KiteKernel32.elf` (Multiboot bootable container)
 - `BOOTX64.EFI` (Standalone pure-Rust 64-bit UEFI Multiboot2 bootloader)
 
 ### Launching in QEMU
@@ -451,7 +451,7 @@ Compile the release kernel binary, standalone UEFI bootloader, and convert to Mu
 
 ### Booting on Bare-Metal Hardware
 
-CosmicOS is tested and verified on physical Intel/AMD hardware and Apple MacBook Pro (Late 2011, MacBookPro8,2):
+SublimeOS is tested and verified on physical Intel/AMD hardware and Apple MacBook Pro (Late 2011, MacBookPro8,2):
 
 1. **Native UEFI USB (Recommended for MacBook Pro & Modern PCs)**:
    - Format a USB drive as standard **FAT32** (GPT or MBR).
@@ -467,7 +467,7 @@ CosmicOS is tested and verified on physical Intel/AMD hardware and Apple MacBook
 
 2. **Ventoy (Multiboot ELF)**:
    - Install [Ventoy](https://www.ventoy.net) on a USB flash drive.
-   - Copy `cosmoskernel32.elf` directly onto the Ventoy USB drive.
+   - Copy `KiteKernel32.elf` directly onto the Ventoy USB drive.
    - Boot via Ventoy Multiboot menu on any PC.
 
 3. **Legacy BIOS / GRUB2**:
@@ -478,4 +478,5 @@ CosmicOS is tested and verified on physical Intel/AMD hardware and Apple MacBook
 
 ## License
 
-CosmicOS is dual-licensed under the MIT and Apache-2.0 open-source licenses.
+SublimeOS is dual-licensed under the MIT and Apache-2.0 open-source licenses.
+

@@ -1,5 +1,5 @@
 /*
- * CosmosKernel - 32-bit Multiboot to 64-bit Higher-Half Trampoline
+ * KiteKernel - 32-bit Multiboot to 64-bit Higher-Half Trampoline
  */
 
 .code32

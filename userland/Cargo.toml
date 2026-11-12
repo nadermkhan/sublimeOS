@@ -1,10 +1,10 @@
 [package]
-name = "cosmic-userland"
-version = "0.1.0"
+name = "sublime-userland"
+version = "1.0.0"
 edition = "2021"
 
 [lib]
-name = "cosmic_rt"
+name = "sublime_rt"
 path = "src/lib.rs"
 
 [[bin]]

@@ -2,7 +2,7 @@
 #![no_main]
 
 extern crate alloc;
-use cosmic_rt::{args, println, read_to_string};
+use sublime_rt::{args, println, read_to_string};
 
 #[no_mangle]
 pub fn main() -> i32 {

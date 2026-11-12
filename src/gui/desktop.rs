@@ -47,7 +47,7 @@ impl Desktop {
         let icons = [
             DesktopIcon {
                 id: DesktopAppId::FileManager,
-                title: "Cosmic HD",
+                title: "Sublime HD",
                 x: 930,
                 y: 42,
                 icon_char: '@',
@@ -55,7 +55,7 @@ impl Desktop {
             },
             DesktopIcon {
                 id: DesktopAppId::FileManager,
-                title: "Cosmic USB",
+                title: "Sublime USB",
                 x: 930,
                 y: 136,
                 icon_char: '#',
@@ -71,7 +71,7 @@ impl Desktop {
             },
             DesktopIcon {
                 id: DesktopAppId::About,
-                title: "About Cosmic",
+                title: "About Sublime",
                 x: 930,
                 y: 324,
                 icon_char: '✦',
@@ -100,8 +100,8 @@ impl Desktop {
         }
 
         // 3. Central Glowing Watermark Banner
-        let logo_text = "✦ CosmicOS";
-        let sub_text = "Sublime Kernel Version 1.0.0 (x86_64)";
+        let logo_text = "✦ SublimeOS";
+        let sub_text = "KiteKernel Version 1.0.0 (x86_64)";
         let logo_w = measure_string(logo_text) * 2;
         let logo_x = (w - logo_w) / 2;
         let logo_y = (h - 36) / 2 - 40;

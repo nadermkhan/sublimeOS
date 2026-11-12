@@ -1,6 +1,6 @@
-# CosmicOS Automated Verification Suite & Testing Guide
+# SublimeOS Automated Verification Suite & Testing Guide
 
-CosmicOS contains a comprehensive, in-kernel automated self-test verification suite ([`src/tests/mod.rs`](../src/tests/mod.rs)) executed during kernel boot (or on demand via the `test` shell command).
+SublimeOS contains a comprehensive, in-kernel automated self-test verification suite ([`src/tests/mod.rs`](../src/tests/mod.rs)) executed during kernel boot (or on demand via the `test` shell command).
 
 The suite verifies low-level architectural invariants, hardware drivers, memory management, filesystem integrity, network protocols, and userspace isolation with **52 tests** passing across both UEFI and legacy BIOS boots.
 
@@ -24,7 +24,7 @@ Testing is conducted against multiple hardware configurations using both QEMU si
 
 ```text
 =======================================================
-             CosmosKernel Verification Suite           
+             KiteKernel Verification Suite           
 =======================================================
   [TEST] Physical Frame Allocator ... [PASS]
   [TEST] Dynamic Heap & Alloc Crate ... [PASS]
@@ -60,7 +60,7 @@ Testing is conducted against multiple hardware configurations using both QEMU si
   [TEST] Realtek RTL8139/8169 & Qualcomm Atheros Drivers ... [PASS]
   [TEST] POSIX Job Control, Process Groups & Sessions ... [PASS]
   [TEST] USB HID Keyboard & Mouse Input Subsystem ... [PASS]
-  [TEST] mDNS / Bonjour ZeroConf Responder (cosmicos.local & DNS-SD) ... [PASS]
+  [TEST] mDNS / Bonjour ZeroConf Responder (SublimeOS.local & DNS-SD) ... [PASS]
   [TEST] POSIX Shared Memory (shm_open, ftruncate, /dev/shm, mmap MAP_SHARED) ... [PASS]
   [TEST] POSIX Semaphores & Message Queues (sem_*, mq_*) ... [PASS]
   [TEST] DHCP Client Daemon (RFC 2131/2132 Discovery, Offer, Request, Lease) ... [PASS]
@@ -106,7 +106,7 @@ Testing is conducted against multiple hardware configurations using both QEMU si
 - **Unified Storage Block Cache (Test 52)**: Exercises the 1024-sector (512 KiB) LRU buffer cache (`bcache.rs`), verifying sector cache hits, dirty tracking, cache write-through/write-back persistence, and atomic cache flushing via `sys_sync` (Syscall 162) and `sys_fsync` (Syscall 74).
 
 ### Userspace Toolchain & Runtime (Tests 18, 20, 22)
-- **Standalone Userland Binaries (`/bin`)**: Executes genuine `#![no_std]` compiled 64-bit ELF binaries (`/bin/init`, `/bin/calc`, `/bin/hello`, `/bin/echo`, `/bin/cat`, `/bin/ls`, `/bin/grep`, `/bin/wc`, `/bin/edit`, `/bin/sh`, `/bin/snake`) built with the isolated `userland/` crate and `cosmic_rt` runtime targeting `x86_64-unknown-linux-none` linked with `user.ld`.
+- **Standalone Userland Binaries (`/bin`)**: Executes genuine `#![no_std]` compiled 64-bit ELF binaries (`/bin/init`, `/bin/calc`, `/bin/hello`, `/bin/echo`, `/bin/cat`, `/bin/ls`, `/bin/grep`, `/bin/wc`, `/bin/edit`, `/bin/sh`, `/bin/snake`) built with the isolated `userland/` crate and `sublime_rt` runtime targeting `x86_64-unknown-linux-none` linked with `user.ld`.
 - **System V AMD64 ABI Initial User Stack Setup & 16-Byte Alignment**: Kernel ELF loader initializes the initial user stack with `argc`, `argv[0]..argv[N]`, `NULL` argv sentinel, `NULL` envp sentinel, and string buffer data. Ensures `user_rsp % 16 == 8` so that entry `pop rdi` leaves `rsp` 16-byte aligned before function calls, ensuring zero `#GP(0)` faults on 16-byte aligned SSE vector instructions (`movaps`).
 - **Linux-Compatible Directory Enumeration (`SYS_GETDENTS64`)**: Implements Syscall 217 (`sys_getdents64`) packing 64-bit `LinuxDirent64Hdr` records (`d_ino`, `d_off`, `d_reclen`, `d_type`, `d_name[]`) from `InodeOperations::readdir()` directly into userland memory.
 - **Dynamic File Creation & Truncation (`O_CREAT` / `O_TRUNC`)**: `sys_open` supports POSIX `O_CREAT` (0x40) file creation within directory inodes and `O_TRUNC` (0x200) content truncation.
@@ -125,9 +125,9 @@ Testing is conducted against multiple hardware configurations using both QEMU si
 
 ## 4. Running the Tests
 
-### From Within CosmicOS Shell
+### From Within SublimeOS Shell
 ```sh
-cosmos@CosmicOS / % test
+cosmos@SublimeOS / % test
 ```
 
 ### From Host Automated Python Harness

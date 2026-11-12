@@ -1,5 +1,5 @@
 /*
- * CosmosKernel - 64-bit Interrupt Assembly Stubs
+ * KiteKernel - 64-bit Interrupt Assembly Stubs
  */
 
 .code64

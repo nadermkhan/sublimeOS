@@ -131,7 +131,12 @@ pub fn generate_sine_wave(freq_hz: u32, duration_ms: u32, sample_rate: u32) -> V
     buffer
 }
 
-/// Synthesize the iconic CosmicOS Sublime startup chime (F-Major Harmonic Chord: F3, C4, F4, A4).
+/// Synthesize the iconic SublimeOS startup chime (F-Major Harmonic Chord: F3, C4, F4, A4).
+pub fn generate_sublime_chime(sample_rate: u32) -> Vec<i16> {
+    generate_cosmic_chime(sample_rate)
+}
+
+/// Synthesize the iconic SublimeOS startup chime.
 pub fn generate_cosmic_chime(sample_rate: u32) -> Vec<i16> {
     let duration_ms = 2200; // 2.2 seconds resonant decay
     let total_samples = ((sample_rate as u64 * duration_ms as u64) / 1000) as usize;

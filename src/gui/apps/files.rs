@@ -102,9 +102,9 @@ impl FileManagerApp {
             let mut dy = inner_y + 24; // start below Favorites label
             let favorites = [
                 "/Applications",
-                "/Users/cosmos/Desktop",
-                "/Users/cosmos/Documents",
-                "/Users/cosmos/Downloads",
+                "/Users/sublime/Desktop",
+                "/Users/sublime/Documents",
+                "/Users/sublime/Downloads",
             ];
 
             for path in favorites.iter() {
@@ -164,9 +164,9 @@ impl FileManagerApp {
 
         let favorites = [
             ("Applications", "/Applications", 'A'),
-            ("Desktop", "/Users/cosmos/Desktop", 'D'),
-            ("Documents", "/Users/cosmos/Documents", 'F'),
-            ("Downloads", "/Users/cosmos/Downloads", 'v'),
+            ("Desktop", "/Users/sublime/Desktop", 'D'),
+            ("Documents", "/Users/sublime/Documents", 'F'),
+            ("Downloads", "/Users/sublime/Downloads", 'v'),
         ];
 
         for (name, path, icon) in favorites.iter() {

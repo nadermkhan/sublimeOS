@@ -81,11 +81,12 @@ pub fn run_shell() -> ! {
     ");
     println!("\x1b[0m");
     println!("Last login: Wed Nov 11 09:18:21 on ttys000");
-    println!("CosmicOS (Sublime Kernel Version 1.0.0 x86_64)");
+    println!("SublimeOS 1.0 (x86_64) — KiteKernel");
+    println!("Developer: Nader Mahbub Khan | Copyright (c) 2026");
     println!("Consoles: Alt+F1 (ttys000) | Alt+F2 (ttys001) | Alt+F3 (Console) | Alt+F4 (Activity)");
     println!("Type 'system' or 'help' to explore commands. Use TAB for completion.\n");
 
-    let prompt = "\x1b[36mcosmic\x1b[0m \x1b[34m/\x1b[0m > ";
+    let prompt = "\x1b[36msublime\x1b[0m \x1b[34m/\x1b[0m > ";
     print!("{}", prompt);
 
     let mut line_buffer: Vec<char> = Vec::with_capacity(256);

@@ -67,15 +67,16 @@ pub fn init() {
     applications.lock().add_child("Finder.app", RamInode::new_file(b"Sublime 64-bit executable Finder\n"));
     applications.lock().add_child("System Settings.app", RamInode::new_file(b"Sublime 64-bit executable SystemSettings\n"));
 
-    // /Users/cosmos/
-    let user_cosmos = RamInode::new_dir();
-    user_cosmos.lock().add_child("Desktop", RamInode::new_dir());
-    user_cosmos.lock().add_child("Documents", RamInode::new_dir());
-    user_cosmos.lock().add_child("Downloads", RamInode::new_dir());
-    let cosmicshrc = b"# SublimeOS shell configuration\nexport PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\nalias ll=\"list\"\n";
-    user_cosmos.lock().add_child(".sublimerc", RamInode::new_file(cosmicshrc));
-    user_cosmos.lock().add_child(".zshrc", RamInode::new_file(cosmicshrc));
-    users.lock().add_child("sublime", user_cosmos);
+    // /Users/sublime/
+    let user_sublime = RamInode::new_dir();
+    user_sublime.lock().add_child("Desktop", RamInode::new_dir());
+    user_sublime.lock().add_child("Documents", RamInode::new_dir());
+    user_sublime.lock().add_child("Downloads", RamInode::new_dir());
+    let sublimerc = b"# SublimeOS shell configuration\nexport PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\nalias ll=\"list\"\n";
+    user_sublime.lock().add_child(".sublimerc", RamInode::new_file(sublimerc));
+    user_sublime.lock().add_child(".zshrc", RamInode::new_file(sublimerc));
+    users.lock().add_child("sublime", user_sublime.clone());
+    users.lock().add_child("cosmos", user_sublime);
 
     // /Volumes/
     let cosmic_hd = RamInode::new_dir();
