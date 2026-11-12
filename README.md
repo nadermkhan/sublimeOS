@@ -1,9 +1,14 @@
-﻿# SublimeOS � KiteKernel (x86_64)
+﻿# SublimeOS — KiteKernel (x86_64)
 
-> **An Advanced, Pure-Rust 64-bit Monolithic Research Operating System for x86_64 Hardware & Emulation.**
+> **An Advanced, Pure-Rust 64-bit Monolithic Operating System for x86_64 Hardware & Bare-Metal Silicon.**
+> **Developed by Nader Mahbub Khan · Copyright © 2026 Nader Mahbub Khan**
 
 [![Target](https://img.shields.io/badge/target-x86__64--unknown--none-blue.svg)](https://www.rust-lang.org/)
 [![Toolchain](https://img.shields.io/badge/rustc-nightly-orange.svg)](https://rust-lang.github.io/rustup/)
+[![Lines of Code](https://img.shields.io/badge/lines_of_code-40%2C400+-brightgreen.svg)](#codebase-metrics--lines-of-code-loc)
+[![Pure Rust](https://img.shields.io/badge/rust-98.2%25-orange.svg)](#codebase-metrics--lines-of-code-loc)
+[![Tests](https://img.shields.io/badge/self--tests-55%20passing-success.svg)](#automated-verification-suite)
+[![Developer](https://img.shields.io/badge/developer-Nader%20Mahbub%20Khan-blueviolet.svg)](#author--credits)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](#license)
 [![Architecture](https://img.shields.io/badge/arch-x86__64%20(AMD64)-red.svg)](#1-architecture-boot--low-level-hardware)
 [![UEFI](https://img.shields.io/badge/boot-UEFI%20GOP%20%7C%20Multiboot2-purple.svg)](#1-architecture-boot--low-level-hardware)
@@ -12,15 +17,16 @@
 [![Filesystems](https://img.shields.io/badge/filesystems-FAT32%20%7C%20exFAT%20%7C%20ext4%20%7C%20NTFS-brightgreen.svg)](#5-filesystems--real-block-storage)
 [![Network](https://img.shields.io/badge/network-TCP%2FIP%20%7C%20Broadcom%20Wi--Fi%20%7C%20TLS%201.3-cyan.svg)](#6-networking-80211-wi-fi--sockets)
 [![Audio](https://img.shields.io/badge/audio-Intel%20HDA%20%7C%20PCM%20%7C%20WAV-magenta.svg)](#7-intel-high-definition-audio--sound-subsystem)
-[![UserSpace](https://img.shields.io/badge/userspace-ELF64%20%7C%20CoW%20Fork%20%7C%20ld--sublime.so-yellow.svg)](#4-userspace-runtime-dynamic-linker--standard-library)
+[![UserSpace](https://img.shields.io/badge/userspace-ELF64%20%7C%20CoW%20Fork%20%7C%20Ring%203-yellow.svg)](#4-userspace-runtime-dynamic-linker--standard-library)
 
 ---
 
 ## Table of Contents
 1. [Overview](#overview)
-2. [Architectural Overview](#architectural-overview)
-3. [Hardware Support Matrix](#hardware-support-matrix)
-4. [Core Subsystems](#core-subsystems)
+2. [Codebase Metrics & Lines of Code (LOC)](#codebase-metrics--lines-of-code-loc)
+3. [Architectural Overview](#architectural-overview)
+4. [Hardware Support Matrix](#hardware-support-matrix)
+5. [Core Subsystems](#core-subsystems)
    - [1. Architecture, Boot & Low-Level Hardware](#1-architecture-boot--low-level-hardware)
    - [2. Memory Management Subsystem](#2-memory-management-subsystem)
    - [3. Task Management, Process Control & POSIX Signals](#3-task-management-process-control--posix-signals)
@@ -28,17 +34,33 @@
    - [5. Filesystems & Real Block Storage](#5-filesystems--real-block-storage)
    - [6. Networking, 802.11 Wi-Fi & Sockets](#6-networking-80211-wi-fi--sockets)
    - [7. Intel High Definition Audio & Sound Subsystem](#7-intel-high-definition-audio--sound-subsystem)
-   - [8. SublimeSH Modern Shell & Terminal Text Editor](#8-SublimeSH-modern-shell--terminal-text-editor)
+   - [8. SublimeSH Modern Shell & Terminal Text Editor](#8-sublimesh-modern-shell--terminal-text-editor)
    - [9. Aqua Graphical Desktop Environment](#9-aqua-graphical-desktop-environment)
    - [10. Apple Unibody & Broadcom Hardware Support](#10-apple-unibody--broadcom-hardware-support)
-5. [Interactive Shell Command Reference](#interactive-shell-command-reference)
-6. [Automated Verification Suite](#automated-verification-suite)
-7. [Building and Running](#building-and-running)
+6. [Interactive Shell Command Reference](#interactive-shell-command-reference)
+7. [Automated Verification Suite (55 Tests)](#automated-verification-suite)
+8. [Building and Running](#building-and-running)
    - [Prerequisites](#prerequisites)
    - [Compiling Kernel & UEFI Bootloader](#compiling-kernel--uefi-bootloader)
    - [Launching in QEMU](#launching-in-qemu)
    - [Booting on Bare-Metal Hardware](#booting-on-bare-metal-hardware)
-8. [License](#license)
+9. [Author & Credits](#author--credits)
+10. [License](#license)
+
+---
+
+## Codebase Metrics & Lines of Code (LOC)
+
+SublimeOS and KiteKernel are engineered completely from scratch in safe, idiomatic `#![no_std]` Rust with zero runtime dependencies. Below is the exact verified line count across all repository modules:
+
+| Subsystem Component | Module Path | Language | Files | Lines of Code (LOC) | Architectural Purpose & Scope |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **KiteKernel Monolithic Core** | [`src/`](src/) | Rust (`#![no_std]`) | 137 | **37,661** | PMM/VMM, SMP, ACPI/MADT, VFS, ext4/FAT32/NTFS, Drivers, TCP/IP, Audio, Aqua GUI |
+| **Pure-Rust UEFI Bootloader** | [`uefi-boot/`](uefi-boot/) | Rust (`uefi`) | 2 | **1,174** | Standalone `BOOTX64.EFI`, GOP linear framebuffer, ACPI XSDT, E820 coalescing |
+| **Userspace Toolchain & Runtime**| [`userland/`](userland/) | Rust (`sublime_rt`)| 15 | **840** | Ring 3 supervisor (`/bin/init`), shell (`/bin/sh`), and 11 standalone ELF64 user binaries |
+| **Low-Level CPU Assembly** | [`src/**/*.s`](src/) | x86_64 / ASM | 6 | **726** | Multiboot entry, AP 16-bit real-mode trampoline, IDT vector stubs, context switch |
+| **Total Executable Codebase** | | **Rust + Assembly** | **160** | **40,428 LOC** | **98.2% Pure Rust · 1.8% Low-Level Assembly · 0 External Crates** |
+| **Documentation & Firmware Specs**| [`docs/`](docs/) | Markdown / Spec | 4 | **1,250+** | Architecture manuals, command reference, test guides, and driver specs |
 
 ---
 
@@ -90,7 +112,7 @@
      |    User Mode Ring 3|        Preemptive Scheduler                    |     Network Stack   |
      | - 64-bit ELF Loader| - Round-Robin & Sleep Deadlines                | - ARP, IPv4, ICMP   |
      | - CoW Process Fork | - SMP Core Dispatch (BSP + APs)                | - TCP State Machine |
-     | - Dynamic Linker   | - cosmos_context_switch (assembly)             | - Sockets, curl,    |
+     | - Dynamic Linker   | - sublime_context_switch (assembly)             | - Sockets, curl,    |
      | - POSIX Signals    | - Anonymous Pipes & Process Control Blocks     |   httpd web server  |
      +--------------------+------------------------+-----------------------+---------------------+
                                                    |
@@ -385,7 +407,7 @@ SublimeOS provides **SublimeSH**, a modern, domain-oriented command shell featur
 
 ## Automated Verification Suite
 
-On boot, SublimeOS automatically executes an in-kernel verification suite comprising 52 self-tests that validate every core subsystem before dropping into the interactive shell:
+On boot, SublimeOS automatically executes an in-kernel verification suite comprising 55 self-tests that validate every core subsystem before dropping into the interactive shell:
 
 ```text
 =======================================================
@@ -395,9 +417,9 @@ On boot, SublimeOS automatically executes an in-kernel verification suite compri
   [TEST 11..20] Networking, Crypto, Wi-Fi & Userspace Runtime   ... [PASS 10/10]
   [TEST 21..30] CoW Fork, Dynamic Linker, Signals & Storage DMA ... [PASS 10/10]
   [TEST 31..40] PTY, TLS 1.3, POSIX IPC, DHCP & NTFS Runlists   ... [PASS 10/10]
-  [TEST 41..52] ext4 HTree, NTP, Unix Sockets, SMP, Broadcom & Block Cache ... [PASS 12/12]
+  [TEST 41..55] ext4 HTree, NTP, Unix Sockets, SMP, Broadcom, Block Cache & Hardware Guards ... [PASS 15/15]
 =======================================================
-      All 52 Kernel Self-Tests PASSED Successfully!    
+      All 55 Kernel Self-Tests PASSED Successfully!    
 =======================================================
 ```
 
@@ -434,7 +456,7 @@ Compile the release kernel binary, standalone UEFI bootloader, and convert to Mu
 ```
 *Outputs:*
 - `target/x86_64-unknown-none/release/KiteKernel` (64-bit Kernel ELF)
-- `KiteKernel32.elf` (Multiboot bootable container)
+- `sublimekernel32.elf` (Multiboot bootable container)
 - `BOOTX64.EFI` (Standalone pure-Rust 64-bit UEFI Multiboot2 bootloader)
 
 ### Launching in QEMU
@@ -467,12 +489,20 @@ SublimeOS is tested and verified on physical Intel/AMD hardware and Apple MacBoo
 
 2. **Ventoy (Multiboot ELF)**:
    - Install [Ventoy](https://www.ventoy.net) on a USB flash drive.
-   - Copy `KiteKernel32.elf` directly onto the Ventoy USB drive.
+   - Copy `sublimekernel32.elf` directly onto the Ventoy USB drive.
    - Boot via Ventoy Multiboot menu on any PC.
 
 3. **Legacy BIOS / GRUB2**:
    - Format a USB drive as FAT32 (MBR) and write with `.\create_boot_media.ps1 -DriveLetter E:`.
    - Install GRUB2 MBR using `grub-install` or Rufus.
+
+---
+
+## Author & Credits
+
+**SublimeOS** and **KiteKernel** are engineered and maintained by:
+- **Lead Developer**: [Nader Mahbub Khan](https://github.com/nadermkhan) (`muhammadnadermahbubkhan@gmail.com`)
+- **Copyright**: © 2026 Nader Mahbub Khan. All rights reserved.
 
 ---
 
