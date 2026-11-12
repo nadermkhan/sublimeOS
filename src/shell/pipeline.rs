@@ -289,7 +289,12 @@ pub fn write_file_to_vfs(path: &str, data: &[u8], append: bool) -> Result<(), &'
     let existing_node = parent.lock().lookup(filename).ok();
     let inode = match existing_node {
         Some(node) => {
-            if !append {
+            let ftype = node.lock().stat().file_type;
+            if ftype == crate::fs::vfs::FileType::CharDevice
+                || ftype == crate::fs::vfs::FileType::BlockDevice
+            {
+                node
+            } else if !append {
                 let _ = parent.lock().unlink(filename);
                 parent.lock().create(filename, FileType::Regular)?
             } else {
@@ -368,13 +373,13 @@ pub fn try_execute_pipeline(line: &str) -> bool {
 
         // Execute stage
         let stage_output = match stage_cmd {
-            "grep" => run_grep(&current_input, stage_args),
-            "wc" => run_wc(&current_input, stage_args),
-            "head" => run_head(&current_input, stage_args),
-            "tail" => run_tail(&current_input, stage_args),
+            "grep" | "find" => run_grep(&current_input, stage_args),
+            "wc" | "count" => run_wc(&current_input, stage_args),
+            "head" | "first" => run_head(&current_input, stage_args),
+            "tail" | "last" => run_tail(&current_input, stage_args),
             "sort" => run_sort(&current_input, stage_args),
-            "uniq" => run_uniq(&current_input, stage_args),
-            "cat" if stage_args.is_empty() && !current_input.is_empty() => {
+            "uniq" | "unique" | "distinct" => run_uniq(&current_input, stage_args),
+            "cat" | "view" | "read" if stage_args.is_empty() && !current_input.is_empty() => {
                 current_input.clone()
             }
             _ => {

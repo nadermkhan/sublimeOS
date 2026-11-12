@@ -45,10 +45,18 @@ impl PciDevice {
         }
         let offset = 0x10 + index * 4;
         let bar_low = unsafe { PciBus::read_config_dword(self.bus, self.device, self.function, offset) };
-        if (bar_low & 0x06) == 0x04 && index < 5 {
+        if bar_low == 0 || bar_low == 0xFFFF_FFFF {
+            return 0;
+        }
+        if (bar_low & 0x01) != 0 {
+            // I/O Space BAR: base address is bits 31..2
+            (bar_low & 0xFFFF_FFFC) as u64
+        } else if (bar_low & 0x06) == 0x04 && index < 5 {
+            // 64-bit Memory Space BAR
             let bar_high = unsafe { PciBus::read_config_dword(self.bus, self.device, self.function, offset + 4) };
             ((bar_high as u64) << 32) | ((bar_low & 0xFFFF_FFF0) as u64)
         } else {
+            // 32-bit Memory Space BAR
             (bar_low & 0xFFFF_FFF0) as u64
         }
     }
@@ -110,16 +118,12 @@ impl PciBus {
     pub fn scan_bus(&mut self) {
         self.devices.clear();
 
-        for bus in 0..=3 { // Scan primary buses
+        for bus in 0..=7 {
             for dev in 0..32 {
                 for func in 0..8 {
                     let dword0 = unsafe { Self::read_config_dword(bus, dev, func, 0x00) };
                     let vendor_id = (dword0 & 0xFFFF) as u16;
                     if vendor_id == 0xFFFF || vendor_id == 0x0000 {
-                        // Function not present
-                        if func == 0 {
-                            break; // Skip rest of functions for non-existent device
-                        }
                         continue;
                     }
 
@@ -147,11 +151,6 @@ impl PciBus {
                         header_type,
                         bar0,
                     });
-
-                    // If single-function device, don't check other functions
-                    if func == 0 && (dword3 & 0x00800000) == 0 {
-                        break;
-                    }
                 }
             }
         }

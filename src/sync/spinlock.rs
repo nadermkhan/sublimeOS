@@ -107,6 +107,30 @@ impl<T: ?Sized> IrqSafeSpinlock<T> {
             prev_irq,
         }
     }
+
+    /// Attempt to acquire the lock without spinning. Restores interrupt state on failure.
+    pub fn try_lock(&self) -> Option<IrqSafeSpinlockGuard<'_, T>> {
+        let prev_irq = are_interrupts_enabled();
+        disable_interrupts();
+        if !self.lock.swap(true, Ordering::Acquire) {
+            Some(IrqSafeSpinlockGuard {
+                lock: &self.lock,
+                data: unsafe { &mut *self.data.get() },
+                prev_irq,
+            })
+        } else {
+            if prev_irq {
+                enable_interrupts();
+            }
+            None
+        }
+    }
+
+    /// Force unlock without waiting or checking ownership.
+    /// Used strictly in fatal kernel panic or crash recovery to avoid deadlocks.
+    pub unsafe fn force_unlock(&self) {
+        self.lock.store(false, Ordering::Release);
+    }
 }
 
 pub struct IrqSafeSpinlockGuard<'a, T: ?Sized> {

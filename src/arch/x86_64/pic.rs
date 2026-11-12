@@ -5,17 +5,17 @@ const PIC1_DATA: u16 = 0x21;
 const PIC2_COMMAND: u16 = 0xA0;
 const PIC2_DATA: u16 = 0xA1;
 
-const PIC_EOI: u8 = 0x20;
-
 const ICW1_INIT: u8 = 0x10;
 const ICW1_ICW4: u8 = 0x01;
 const ICW4_8086: u8 = 0x01;
 
-/// Remap the 8259 PIC vectors to 0x20..0x2F (IRQs 32..47).
+/// Remap the 8259 PIC vectors to 0x20..0x2F (IRQs 32..47) and keep all lines masked
+/// so no legacy PIC interrupt can fire once Local APIC / I/O APIC takes over.
 pub fn remap(offset1: u8, offset2: u8) {
     unsafe {
-        let mask1 = inb(PIC1_DATA);
-        let mask2 = inb(PIC2_DATA);
+        // Mask both PICs before sending ICW sequence
+        outb(PIC1_DATA, 0xFF);
+        outb(PIC2_DATA, 0xFF);
 
         outb(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);
         io_wait();
@@ -37,35 +37,28 @@ pub fn remap(offset1: u8, offset2: u8) {
         outb(PIC2_DATA, ICW4_8086);
         io_wait();
 
-        outb(PIC1_DATA, mask1);
-        outb(PIC2_DATA, mask2);
+        // Keep every legacy 8259 PIC line permanently masked (0xFF)
+        outb(PIC1_DATA, 0xFF);
+        outb(PIC2_DATA, 0xFF);
     }
 }
 
-/// Send End-of-Interrupt (EOI) signal for the specified IRQ.
-pub fn send_eoi(irq: u8) {
-    unsafe {
-        if irq >= 8 {
-            outb(PIC2_COMMAND, PIC_EOI);
-        }
-        outb(PIC1_COMMAND, PIC_EOI);
-    }
-}
-
-/// Unmask a specific IRQ line on the PIC.
-pub fn unmask(irq: u8) {
+/// Mask a specific IRQ line on the PIC.
+pub fn mask(irq: u8) {
     unsafe {
         let port = if irq < 8 { PIC1_DATA } else { PIC2_DATA };
         let shift = if irq < 8 { irq } else { irq - 8 };
-        let mask = inb(port) & !(1 << shift);
-        outb(port, mask);
+        let value = inb(port) | (1 << shift);
+        outb(port, value);
     }
 }
 
-/// Mask all PIC interrupts.
+/// Mask all 8259 legacy PIC interrupts (Master 0x21 = 0xFF, Slave 0xA1 = 0xFF).
 pub fn mask_all() {
     unsafe {
         outb(PIC1_DATA, 0xFF);
+        io_wait();
         outb(PIC2_DATA, 0xFF);
+        io_wait();
     }
 }

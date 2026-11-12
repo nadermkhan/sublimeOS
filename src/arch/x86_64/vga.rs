@@ -40,6 +40,10 @@ impl ColorCode {
     pub const fn new(foreground: Color, background: Color) -> Self {
         ColorCode((background as u8) << 4 | (foreground as u8))
     }
+
+    pub const fn indices(self) -> (u8, u8) {
+        (self.0 & 0x0F, (self.0 >> 4) & 0x0F)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +244,7 @@ impl fmt::Write for VgaWriter {
 pub static VGA_WRITER: IrqSafeSpinlock<VgaWriter> = IrqSafeSpinlock::new(VgaWriter::new());
 
 static STDOUT_CAPTURE: IrqSafeSpinlock<Option<String>> = IrqSafeSpinlock::new(None);
+pub static PANICKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Begin capturing stdout to an in-memory buffer (for shell pipelines and redirection).
 pub fn start_stdout_capture() {
@@ -254,16 +259,35 @@ pub fn stop_stdout_capture() -> Option<String> {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    {
-        let mut cap = STDOUT_CAPTURE.lock();
-        if let Some(ref mut s) = *cap {
-            let _ = s.write_fmt(args);
-            return;
+    let is_panicked = PANICKED.load(core::sync::atomic::Ordering::Relaxed);
+    if !is_panicked {
+        if let Some(mut cap) = STDOUT_CAPTURE.try_lock() {
+            if let Some(ref mut s) = *cap {
+                let _ = s.write_fmt(args);
+                return;
+            }
         }
     }
-    let mut writer = VGA_WRITER.lock();
-    let _ = writer.write_fmt(args);
-    let _ = crate::arch::x86_64::serial::SERIAL1.lock().write_fmt(args);
+    if let Some(mut writer) = VGA_WRITER.try_lock() {
+        let _ = writer.write_fmt(args);
+    }
+    let in_tests = crate::arch::x86_64::pit::IN_KERNEL_TESTS.load(core::sync::atomic::Ordering::Relaxed);
+    if !in_tests {
+        crate::drivers::gop_console::write_fmt(args);
+    }
+    if let Some(mut serial) = crate::arch::x86_64::serial::SERIAL1.try_lock() {
+        let _ = serial.write_fmt(args);
+    }
+
+    struct LogRingHook;
+    impl core::fmt::Write for LogRingHook {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            crate::drivers::crashdump::append_log_slice(s.as_bytes());
+            Ok(())
+        }
+    }
+    let mut hook = LogRingHook;
+    let _ = hook.write_fmt(args);
 }
 
 #[macro_export]

@@ -65,7 +65,7 @@ impl DesktopManager {
         let win = match app_id {
             DesktopAppId::Terminal => Window::new(
                 id,
-                "Terminal — -zsh — 80x24",
+                "Terminal — -cosmicsh — 80x24",
                 90,
                 45,
                 580,
@@ -321,22 +321,35 @@ impl DesktopManager {
         // 4. Mouse Cursor Pointer
         draw_cursor(&mut self.canvas, self.mouse_x, self.mouse_y);
 
-        // 5. Blit to hardware linear framebuffer
-        let fb_ptr = VBE.lock().framebuffer;
-        self.canvas.copy_to_framebuffer(fb_ptr);
+        // 5. Blit to hardware linear framebuffer (respecting GOP pitch stride & channel shifts)
+        let (fb_ptr, pitch, bpp, rpos, gpos, bpos) = {
+            let vbe = VBE.lock();
+            (
+                vbe.framebuffer,
+                vbe.pitch,
+                vbe.bpp,
+                vbe.red_pos,
+                vbe.green_pos,
+                vbe.blue_pos,
+            )
+        };
+        self.canvas
+            .blit_to_framebuffer(fb_ptr, pitch, bpp, rpos, gpos, bpos);
     }
 }
 
 /// Launch the Cosmos Desktop GUI environment.
 pub fn launch_desktop() {
-    kinfo!("Starting Bochs VBE Graphics Mode (1024x768x32bpp)...");
+    kinfo!("Initializing UEFI GOP / Multiboot Linear Framebuffer for Aqua Desktop...");
 
     if let Err(e) = vbe::init(1024, 768) {
         kinfo!("GUI launch aborted: {}", e);
         return;
     }
 
-    let mut desktop_mgr = DesktopManager::new(1024, 768);
+    let (w, h) = vbe::dimensions();
+    crate::drivers::mouse::set_bounds(w as i32, h as i32);
+    let mut desktop_mgr = DesktopManager::new(w, h);
 
     // Open default initial windows: Terminal & System Monitor
     desktop_mgr.open_app(DesktopAppId::Terminal);
@@ -347,6 +360,7 @@ pub fn launch_desktop() {
     serial_println!("[INFO] Press F12 or click 'Exit to Shell' in Start Menu to return to text console.");
 
     let mut running = true;
+    crate::drivers::gop_console::set_gui_active(true);
 
     while running {
         // 1. Poll mouse input
@@ -393,5 +407,6 @@ pub fn launch_desktop() {
         sleep_ms(30);
     }
 
+    crate::drivers::gop_console::set_gui_active(false);
     kinfo!("Exited Cosmos Desktop GUI. Returning to CosmosSH text shell...");
 }

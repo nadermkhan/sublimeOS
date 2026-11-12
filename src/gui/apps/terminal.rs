@@ -85,29 +85,33 @@ impl TerminalApp {
                 self.lines.clear();
             }
             "sw_vers" => {
-                self.lines.push((String::from("ProductName:        CosmicOS"), Color::TEXT_PRIMARY));
+                self.lines.push((String::from("ProductName:        SublimeOS"), Color::TEXT_PRIMARY));
                 self.lines.push((String::from("ProductVersion:     1.0"), Color::TEXT_PRIMARY));
                 self.lines.push((String::from("BuildVersion:       1A01"), Color::TEXT_PRIMARY));
+                self.lines.push((String::from("KernelVersion:      KiteKernel 1.0.0"), Color::TEXT_PRIMARY));
             }
             "system_profiler" => {
-                self.lines.push((String::from("Model: CosmicStation Pro (x86_64)"), Color::ACCENT_CYAN));
-                self.lines.push((String::from("Chip: Sublime Multi-Core (AMD64 x86_64)"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("Memory: 128 MB Unified RAM"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("Kernel: Sublime Kernel 1.0.0"), Color::TEXT_PRIMARY));
+                let hw = crate::drivers::platform::smbios::get_hardware_telemetry();
+                self.lines.push((alloc::format!("Model:  {}", hw.model_name), Color::ACCENT_CYAN));
+                self.lines.push((alloc::format!("Ident:  {}", hw.model_identifier), Color::TEXT_PRIMARY));
+                self.lines.push((alloc::format!("Chip:   {}", hw.chip), Color::TEXT_PRIMARY));
+                self.lines.push((alloc::format!("Cores:  {}", hw.cores_threads), Color::TEXT_PRIMARY));
+                self.lines.push((alloc::format!("Memory: {}", hw.memory_summary), Color::TEXT_PRIMARY));
+                self.lines.push((alloc::format!("Serial: {}", hw.serial_number), Color::TEXT_MUTED));
             }
             "say" => {
                 let rest = cmd_line.strip_prefix("say").unwrap_or("").trim();
-                let mut s = String::from("[SpeechSynthesis (Cosmic Voice)] \"");
-                s.push_str(if rest.is_empty() { "Hello from CosmicOS" } else { rest });
+                let mut s = String::from("[SpeechSynthesis (Sublime Voice)] \"");
+                s.push_str(if rest.is_empty() { "Hello from SublimeOS" } else { rest });
                 s.push('"');
                 self.lines.push((s, Color::ACCENT_PURPLE));
             }
             "defaults" => {
-                self.lines.push((String::from("{ CosmicInterfaceStyle = Dark; CosmicKeyboardLayout = US; }"), Color::TEXT_PRIMARY));
+                self.lines.push((String::from("{ SublimeInterfaceStyle = Dark; SublimeKeyboardLayout = US; }"), Color::TEXT_PRIMARY));
             }
             "uname" => {
                 self.lines.push((
-                    String::from("CosmicOS CosmicOS.local 1.0.0 Sublime Kernel Version 1.0.0 x86_64"),
+                    String::from("SublimeOS sublime.local 1.0.0 KiteKernel Version 1.0.0 x86_64"),
                     Color::ACCENT_GREEN,
                 ));
             }

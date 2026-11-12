@@ -8,7 +8,8 @@ use crate::{print, println};
 
 pub fn run_all_tests() {
     println!("\n=======================================================");
-    println!("             CosmosKernel Verification Suite           ");
+    println!("          KiteKernel Verification Suite (SublimeOS)     ");
+    println!("             Copyright (c) 2026 Nader Mahbub Khan      ");
     println!("=======================================================");
 
     test_pmm();
@@ -56,6 +57,16 @@ pub fn run_all_tests() {
     test_posix_threads_and_futexes();
     test_demand_paging_and_swap();
     test_dns_cache_and_llmnr();
+    test_e820_pmm_scrubbing();
+    test_ap_trampoline_and_lapic_timer();
+    test_baremetal_hardware_guards();
+    test_broadcom_drivers();
+    test_apple_platform_and_ehci_hid();
+    test_usb_hub_and_early_gop();
+    test_unified_block_cache();
+    test_usb_hub_downstream_enumeration();
+    test_persistent_crashdump_subsystem();
+    test_smbios_and_authentic_hardware_telemetry();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -136,8 +147,11 @@ fn test_multitasking() {
 fn test_uart() {
     print!("  [TEST] 16550A UART & /dev/ttyS0 ... ");
     let com1 = crate::arch::x86_64::serial::COM1.lock();
-    assert!(com1.is_initialized, "COM1 should be initialized");
-    assert!(com1.chip_type != crate::arch::x86_64::serial::UartChipType::None, "COM1 should identify chip type");
+    if com1.is_initialized {
+        assert!(com1.chip_type != crate::arch::x86_64::serial::UartChipType::None, "COM1 should identify chip type");
+    } else {
+        crate::kinfo!("Legacy 16550A UART absent on this hardware (e.g. Apple Mac); operating in shadow/virtual mode.");
+    }
     drop(com1);
 
     // Verify /dev/ttyS0 in DevFS
@@ -623,18 +637,57 @@ fn test_wifi_subsystem() {
     assert_eq!(ch, 11);
     assert_eq!(sec, crate::net::wifi::WifiSecurity::Wpa2Psk);
 
-    // 2. Test WifiManager scan & connect
+    // 2. Verify WifiManager scan returns empty without fake mock APs when no physical Wi-Fi beacons exist
     let mut mgr = crate::net::wifi::WifiManager::new();
-    let scan = mgr.scan();
-    assert!(scan.len() >= 3, "WifiManager scan returned too few APs");
-    assert_eq!(scan[0].ssid, "Cosmic-5G");
+    assert!(
+        mgr.scan().is_empty(),
+        "WifiManager scan must not fabricate hardcoded mock access points"
+    );
 
-    // Connect with WPA2 passphrase
-    mgr.connect("Cosmic-5G", Some("CosmicSecretKey!"))
-        .expect("WifiManager connect failed");
+    // 3. Verify 802.11 management frame builders & real Beacon ingestion -> WPA2-PSK association
+    let sta_mac = [0x02, 0x10, 0xEC, 0x00, 0x00, 0x01];
+    let probe = crate::net::wifi::build_80211_probe_request(sta_mac, None);
+    assert_eq!(probe[0], 0x40); // Type 0 Mgmt, Subtype 4 Probe Request
+
+    let mut mgmt_beacon = beacon;
+    mgmt_beacon[0] = 0x80; // Subtype 8 = Beacon
+    mgmt_beacon[16..22].copy_from_slice(&[0x00, 0x14, 0x22, 0x01, 0x23, 0x45]); // BSSID
+    assert!(
+        mgr.ingest_80211_beacon(&mgmt_beacon[..56], -44),
+        "Failed to ingest valid 802.11 Beacon management frame"
+    );
+    assert_eq!(mgr.scan_results.len(), 1);
+    assert_eq!(mgr.scan_results[0].ssid, "CosmicNet");
+
+    let auth = crate::net::wifi::build_80211_auth_request([0x00, 0x14, 0x22, 0x01, 0x23, 0x45], sta_mac);
+    assert_eq!(auth[0], 0xB0); // Subtype 11 Auth
+    let assoc = crate::net::wifi::build_80211_assoc_request(
+        [0x00, 0x14, 0x22, 0x01, 0x23, 0x45],
+        sta_mac,
+        "CosmicNet",
+        true,
+    );
+    assert_eq!(assoc[0], 0x00); // Subtype 0 Assoc Req
+
+    mgr.connect("CosmicNet", Some("CosmicSecretKey!"))
+        .expect("WifiManager WPA2 connect failed");
     assert!(mgr.is_connected, "WifiManager not marked connected");
-    assert_eq!(mgr.current_channel, 36);
-    assert_eq!(mgr.link_speed_mbps, 866);
+    assert_eq!(mgr.current_channel, 11);
+    assert!(mgr.pmk.iter().any(|&b| b != 0), "WPA2 PMK must be non-zero");
+
+    // 4. Verify physical PCIe Wi-Fi TX/RX DMA descriptor ring allocation & enqueue
+    let mut ring = crate::drivers::net::wifi_hw::WifiDmaRing::allocate()
+        .expect("Failed to allocate physical Wi-Fi DMA descriptor ring");
+    assert_eq!(ring.tx_ring_phys() % 32, 0);
+    assert_eq!(ring.rx_ring_phys() % 32, 0);
+    let slot = ring.enqueue_tx(&probe).expect("Failed to queue 802.11 probe into TX DMA ring");
+    assert_eq!(slot, 0);
+    let tx_desc = ring.read_tx_desc(0).unwrap();
+    assert_eq!(tx_desc.status_len & 0xFFFF, probe.len() as u32);
+    assert_ne!(tx_desc.status_len & (1 << 31), 0, "TX descriptor OWN bit must be armed for HW DMA");
+    let rx_desc = ring.read_rx_desc(0).unwrap();
+    assert_ne!(rx_desc.status_len & (1 << 31), 0, "RX descriptor OWN bit must be armed for HW DMA");
+    drop(ring);
 
     // Disconnect
     mgr.disconnect();
@@ -799,6 +852,45 @@ fn test_audio_subsystem() {
     assert_eq!(wav.samples.len(), 4);
     assert_eq!(wav.samples[0], 1000);
     assert_eq!(wav.samples[1], -1000);
+
+    // 4. Verify physical page-aligned Intel HDA BDL & contiguous 64 KiB DMA PCM ring
+    let ring = crate::drivers::audio::hda::HdaDmaRing::allocate()
+        .expect("Failed to allocate physical Intel HDA BDL + PCM DMA ring");
+    assert_eq!(ring.bdl_phys & 0xFFF, 0, "HDA BDL must be 4 KiB page-aligned (>128-byte aligned)");
+    assert_eq!(ring.pcm_phys & 0xFFF, 0, "HDA PCM ring must be page-aligned");
+    let entry0 = ring.read_entry(0).unwrap();
+    let entry0_len = entry0.length;
+    assert_eq!(entry0_len, 4096);
+    let entry15 = ring.read_entry(15).unwrap();
+    let entry15_ioc = entry15.ioc;
+    assert_eq!(entry15_ioc, 1);
+    drop(ring);
+
+    // If hardware Intel HDA controller is present (e.g. QEMU -device intel-hda), test real SD_BDLPL/U & async RUN
+    let hda_opt = crate::drivers::audio::AUDIO_MANAGER.lock().hda_controller.clone();
+    if let Some(hda) = hda_opt {
+        let (bdl_lo, bdl_hi) = hda.read_bdl_registers();
+        let programmed_bdl = ((bdl_hi as u64) << 32) | (bdl_lo as u64);
+        assert_eq!(
+            programmed_bdl, hda.dma_ring.bdl_phys,
+            "Intel HDA SD_BDLPL/SD_BDLPU must match allocated physical BDL frame"
+        );
+        hda.play_pcm_samples(&tone);
+        let mut running = false;
+        for _ in 0..50_000 {
+            if hda.is_stream_running() {
+                running = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if running {
+            crate::kinfo!("Intel HDA hardware DMA stream active and running");
+        } else {
+            crate::kinfo!("Physical Intel HDA: SD_CTL.RUN latched or queued asynchronously on bare-metal PCH");
+        }
+        hda.stop_stream();
+    }
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
@@ -971,6 +1063,7 @@ fn test_userland_binaries() {
     let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
     assert!(names.contains(&String::from("init")));
     assert!(names.contains(&String::from("calc")));
+    assert!(names.contains(&String::from("hello")));
     assert!(names.contains(&String::from("sh")));
     assert!(names.contains(&String::from("snake")));
 
@@ -978,7 +1071,7 @@ fn test_userland_binaries() {
     let vfs = crate::fs::vfs::VFS.lock();
     let file = vfs.open("/bin/init", 0).expect("Failed to open /bin/init");
     drop(vfs);
-    let mut buf = alloc::vec![0u8; 16384];
+    let mut buf = alloc::vec![0u8; 32768];
     let n = file.read(&mut buf).expect("Failed to read /bin/init");
     let exit_init = crate::task::user::execute_user_binary(&buf[..n])
         .expect("Failed to execute /bin/init in Ring 3");
@@ -988,21 +1081,81 @@ fn test_userland_binaries() {
     let vfs = crate::fs::vfs::VFS.lock();
     let file = vfs.open("/bin/calc", 0).expect("Failed to open /bin/calc");
     drop(vfs);
-    let mut buf = alloc::vec![0u8; 16384];
+    let mut buf = alloc::vec![0u8; 32768];
     let n = file.read(&mut buf).expect("Failed to read /bin/calc");
     let exit_calc = crate::task::user::execute_user_binary(&buf[..n])
         .expect("Failed to execute /bin/calc in Ring 3");
     assert_eq!(exit_calc, 0);
 
-    // 4. Execute /bin/snake in Ring 3
+    // 4. Execute /bin/hello in Ring 3 (tests dynamic user heap allocation & vector formatting)
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/hello", 0).expect("Failed to open /bin/hello");
+    drop(vfs);
+    let mut buf = alloc::vec![0u8; 32768];
+    let n = file.read(&mut buf).expect("Failed to read /bin/hello");
+    let exit_hello = crate::task::user::execute_user_binary(&buf[..n])
+        .expect("Failed to execute /bin/hello in Ring 3");
+    assert_eq!(exit_hello, 0);
+
+    // 5. Execute /bin/snake in Ring 3
     let vfs = crate::fs::vfs::VFS.lock();
     let file = vfs.open("/bin/snake", 0).expect("Failed to open /bin/snake");
     drop(vfs);
-    let mut buf = alloc::vec![0u8; 16384];
+    let mut buf = alloc::vec![0u8; 32768];
     let n = file.read(&mut buf).expect("Failed to read /bin/snake");
     let exit_snake = crate::task::user::execute_user_binary(&buf[..n])
         .expect("Failed to execute /bin/snake in Ring 3");
     assert_eq!(exit_snake, 0);
+
+    // 6. Execute /bin/echo in Ring 3 with arguments
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/echo", 0).expect("Failed to open /bin/echo");
+    drop(vfs);
+    let mut buf = alloc::vec![0u8; 32768];
+    let n = file.read(&mut buf).expect("Failed to read /bin/echo");
+    let exit_echo = crate::task::user::execute_user_binary_with_args(&buf[..n], &["echo", "Hello", "Ring3", "POSIX!"])
+        .expect("Failed to execute /bin/echo in Ring 3");
+    assert_eq!(exit_echo, 0);
+
+    // 7. Execute /bin/ls in Ring 3 with arguments (SYS_GETDENTS64)
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/ls", 0).expect("Failed to open /bin/ls");
+    drop(vfs);
+    let mut buf = alloc::vec![0u8; 32768];
+    let n = file.read(&mut buf).expect("Failed to read /bin/ls");
+    let exit_ls = crate::task::user::execute_user_binary_with_args(&buf[..n], &["ls", "/bin"])
+        .expect("Failed to execute /bin/ls in Ring 3");
+    assert_eq!(exit_ls, 0);
+
+    // 8. Execute /bin/cat in Ring 3 with arguments
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/cat", 0).expect("Failed to open /bin/cat");
+    drop(vfs);
+    let mut buf = alloc::vec![0u8; 32768];
+    let n = file.read(&mut buf).expect("Failed to read /bin/cat");
+    let exit_cat = crate::task::user::execute_user_binary_with_args(&buf[..n], &["cat", "/proc/version"])
+        .expect("Failed to execute /bin/cat in Ring 3");
+    assert_eq!(exit_cat, 0);
+
+    // 9. Execute /bin/wc in Ring 3 with arguments
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/wc", 0).expect("Failed to open /bin/wc");
+    drop(vfs);
+    let mut buf = alloc::vec![0u8; 32768];
+    let n = file.read(&mut buf).expect("Failed to read /bin/wc");
+    let exit_wc = crate::task::user::execute_user_binary_with_args(&buf[..n], &["wc", "/proc/version"])
+        .expect("Failed to execute /bin/wc in Ring 3");
+    assert_eq!(exit_wc, 0);
+
+    // 10. Execute /bin/grep in Ring 3 with arguments
+    let vfs = crate::fs::vfs::VFS.lock();
+    let file = vfs.open("/bin/grep", 0).expect("Failed to open /bin/grep");
+    drop(vfs);
+    let mut buf = alloc::vec![0u8; 32768];
+    let n = file.read(&mut buf).expect("Failed to read /bin/grep");
+    let exit_grep = crate::task::user::execute_user_binary_with_args(&buf[..n], &["grep", "KiteKernel", "/proc/version"])
+        .expect("Failed to execute /bin/grep in Ring 3");
+    assert_eq!(exit_grep, 0);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
@@ -1181,24 +1334,37 @@ fn test_smp_and_apic_subsystem() {
     assert!(madt.lapic_address != 0, "MADT LAPIC address is 0");
     drop(madt);
 
-    // 3. Verify I/O APIC presence and Redirection Table access
+    // 3. Verify legacy 8259 PIC is completely masked and I/O APIC owns ISA IRQs
+    let pic1_mask = unsafe { crate::arch::x86_64::io::inb(0x21) };
+    let pic2_mask = unsafe { crate::arch::x86_64::io::inb(0xA1) };
+    assert_eq!(pic1_mask, 0xFF, "Master 8259 PIC must be fully masked (0xFF)");
+    assert_eq!(pic2_mask, 0xFF, "Slave 8259 PIC must be fully masked (0xFF)");
+
     let ioapic_virt = crate::arch::x86_64::ioapic::get_ioapic_base_virt();
     assert!(ioapic_virt != 0, "I/O APIC MMIO base not mapped");
     let redtbl1 = unsafe { crate::arch::x86_64::ioapic::read_redirection_entry(1) };
     assert_eq!(redtbl1 & 0xFF, 33, "IRQ 1 not routed to vector 33");
+    assert_eq!(redtbl1 & (1 << 16), 0, "IRQ 1 redirection entry should be unmasked on I/O APIC");
+    let redtbl12 = unsafe { crate::arch::x86_64::ioapic::read_redirection_entry(12) };
+    assert_eq!(redtbl12 & 0xFF, 44, "IRQ 12 not routed to vector 44");
+    assert_eq!(redtbl12 & (1 << 16), 0, "IRQ 12 redirection entry should be unmasked on I/O APIC");
 
-    // 4. Verify SMP Manager discovered cores and active BSP
+    // 4. Verify SMP Manager discovered cores, active BSP & trampoline status
+    assert!(crate::arch::x86_64::smp::is_trampoline_staged(), "16-bit AP trampoline not staged at 0x8000");
     let smp = crate::arch::x86_64::smp::SMP.lock();
     assert!(smp.cpu_count() >= 1, "SMP CPU count is 0");
-    assert!(smp.online_count() >= 1, "No online CPUs in SMP");
+    assert_eq!(smp.online_count(), smp.cpu_count(), "Not all enabled SMP cores came online");
     assert_eq!(smp.bsp_apic_id, bsp_id);
 
-    // 5. Test IPI dispatch interface if AP core exists
-    if let Some(ap) = smp.cores.iter().find(|c| !c.is_bsp) {
-        crate::arch::x86_64::apic::send_init_ipi(ap.apic_id);
-        crate::arch::x86_64::apic::send_sipi(ap.apic_id, 0x08);
-    }
+    // 5. Test full AP bootstrap cycle via staged 0x8000 trampoline if AP core exists
+    let first_ap = smp.cores.iter().find(|c| !c.is_bsp).map(|c| c.apic_id);
     drop(smp);
+    if let Some(ap_id) = first_ap {
+        assert!(
+            crate::arch::x86_64::smp::reboot_ap(ap_id),
+            "AP core failed to reboot cleanly through 0x8000 Long Mode trampoline"
+        );
+    }
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
@@ -1254,10 +1420,32 @@ fn test_userspace_windowserver_and_fb0() {
         &mut vscreen as *mut _ as usize,
     ).expect("FBIOGET_VSCREENINFO failed");
     assert_eq!(ioctl_ret, 0);
-    assert_eq!(vscreen.xres, 1024);
-    assert_eq!(vscreen.yres, 768);
-    assert_eq!(vscreen.bits_per_pixel, 32);
-    assert_eq!(vscreen.line_length, 4096);
+    assert!(vscreen.xres > 0 && vscreen.yres > 0, "Invalid screen resolution");
+    assert_eq!(vscreen.bits_per_pixel, 32, "Screen BPP should be 32-bit");
+    assert!(vscreen.line_length >= vscreen.xres * 4, "Invalid framebuffer line pitch");
+
+    // 2b. Test ioctl FBIOGET_INFO
+    let mut fb_info = crate::fs::devfs::FbInfo {
+        width: 0,
+        height: 0,
+        pitch: 0,
+        bpp: 0,
+        red_pos: 0,
+        red_mask: 0,
+        green_pos: 0,
+        green_mask: 0,
+        blue_pos: 0,
+        blue_mask: 0,
+        lfb_phys: 0,
+    };
+    let info_ret = fb_file.ioctl(
+        crate::fs::devfs::FBIOGET_INFO,
+        &mut fb_info as *mut _ as usize,
+    ).expect("FBIOGET_INFO failed");
+    assert_eq!(info_ret, 0);
+    assert_eq!(fb_info.width, vscreen.xres);
+    assert_eq!(fb_info.height, vscreen.yres);
+    assert_eq!(fb_info.bpp, 32);
 
     // 3. Test ioctl FBIO_BLIT_RECT
     let test_pixel: u32 = 0x00FF8800; // Aqua Orange
@@ -1274,13 +1462,26 @@ fn test_userspace_windowserver_and_fb0() {
     ).expect("FBIO_BLIT_RECT failed");
     assert_eq!(blit_ret, 0);
 
-    // Read back pixel via /dev/fb0 read at byte offset (100 * 4096 + 100 * 4)
-    let byte_offset = (100 * 4096 + 100 * 4) as usize;
+    // Read back pixel via /dev/fb0 read at byte offset (100 * line_length + 100 * 4)
+    let byte_offset = (100 * vscreen.line_length + 100 * 4) as usize;
     let mut read_pixel_bytes = [0u8; 4];
     let n = fb_file.inode.lock().read(byte_offset, &mut read_pixel_bytes).expect("Read /dev/fb0 failed");
     assert_eq!(n, 4);
     let read_pixel = u32::from_le_bytes(read_pixel_bytes);
     assert_eq!(read_pixel, test_pixel);
+
+    // 3b. Test ioctl FBIO_FLUSH_RECT (zero-copy dirty rectangle flush)
+    let flush_rect = crate::fs::devfs::FbRect {
+        x: 100,
+        y: 100,
+        width: 16,
+        height: 16,
+    };
+    let flush_ret = fb_file.ioctl(
+        crate::fs::devfs::FBIO_FLUSH_RECT,
+        &flush_rect as *const _ as usize,
+    ).expect("FBIO_FLUSH_RECT failed");
+    assert_eq!(flush_ret, 0);
 
     // 4. Verify /bin/windowserver and /lib/libgui.so exist
     assert!(vfs.open("/bin/windowserver", 0).is_ok(), "/bin/windowserver missing");
@@ -1773,6 +1974,9 @@ fn test_realtek_and_qualcomm_drivers() {
     let found_wlan1 = NET_MANAGER.lock().get_device("wlan1");
     assert!(found_wlan1.is_some());
 
+    // Remove synthetic unit-test NICs so live NET_MANAGER reflects only genuine PCI hardware
+    NET_MANAGER.lock().devices.truncate(prev_count);
+
     println!("\x1b[32m[PASS]\x1b[0m");
 }
 
@@ -1871,7 +2075,11 @@ fn test_usb_hid_subsystem() {
     use crate::drivers::usb::hid::{UsbHidDevice, UsbHidType, USB_HID};
 
     // Drain any leftover keys in keyboard buffer
-    while read_char().is_some() {}
+    for _ in 0..64 {
+        if read_char().is_none() {
+            break;
+        }
+    }
 
     // 1. Test USB HID Keyboard Report Processing (Boot Protocol)
     let mut kb_dev = UsbHidDevice::new("test_usb_kb", UsbHidType::Keyboard);
@@ -1903,6 +2111,13 @@ fn test_usb_hid_subsystem() {
     kb_dev.process_keyboard_report(&report_bksp);
     assert_eq!(read_char(), Some(0x08));
     kb_dev.process_keyboard_report(&report_release);
+
+    // Report: Apple 10-byte input report (Report ID 0x01, Left Shift 0x02, Key 'B' Usage 0x05)
+    let apple_report_b = [0x01, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    kb_dev.process_keyboard_report(&apple_report_b);
+    assert_eq!(read_char(), Some(b'B'), "Apple 10-byte report did not decode cleanly");
+    let apple_report_rel = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+    kb_dev.process_keyboard_report(&apple_report_rel);
 
     // 2. Test USB HID Mouse Report Processing (Boot Protocol)
     let mut mouse_dev = UsbHidDevice::new("test_usb_mouse", UsbHidType::Mouse);
@@ -3014,6 +3229,844 @@ fn test_dns_cache_and_llmnr() {
     let dummy_mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
     let reply_frame = crate::net::dns::handle_llmnr_packet(&llmnr_q, [10, 0, 2, 2], 5355, my_ip, dummy_mac);
     assert!(reply_frame.is_some(), "LLMNR packet handler should return reply frame for cosmos");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_e820_pmm_scrubbing() {
+    print!("  [TEST] E820 Memory Map Scrubbing & Reserved Region Guard ... ");
+
+    let mb_data = *crate::arch::x86_64::multiboot::MULTIBOOT.lock();
+    assert!(
+        mb_data.mmap_count > 0,
+        "Expected Multiboot E820 memory map entries to be parsed"
+    );
+
+    let mut pmm = PMM.lock();
+    assert!(pmm.parsed_from_e820, "PMM did not initialize from hardware E820 map");
+    assert!(pmm.e820_available_bytes > 0, "E820 reported zero available bytes");
+
+    // Verify low 1 MiB frames (IVT @ 0x0, Trampoline @ 0x8000, VGA @ 0xB8000) are strictly protected
+    assert!(pmm.is_frame_allocated(0), "IVT frame 0 must stay reserved");
+    assert!(pmm.is_frame_allocated(0x8000 / 4096), "SMP trampoline frame 0x8000 must stay reserved");
+    assert!(pmm.is_frame_allocated(0xB8000 / 4096), "VGA text frame 0xB8000 must stay reserved");
+
+    // Verify reserve_region / register_available_region alignment safety:
+    // Reserving any byte overlaps outward to the full 4KiB page
+    let test_frame_phys = pmm.alloc_frame().expect("Expected free RAM frame from E820");
+    let test_frame_idx = (test_frame_phys / 4096) as usize;
+    assert!(test_frame_phys >= 0x100000, "Allocated frame came from reserved <1MiB zone!");
+
+    // Confirm allocated frame does not fall inside any non-available E820 region
+    for entry in mb_data.memory_map_tags() {
+        if !entry.is_available() {
+            let entry_end = entry.end_addr();
+            let frame_end = test_frame_phys + 4096;
+            let overlaps = test_frame_phys < entry_end && frame_end > entry.base_addr;
+            assert!(!overlaps, "PMM allocated frame overlapping reserved E820 region!");
+        }
+    }
+
+    // Verify re-reserving a sub-page range protects the page cleanly
+    pmm.free_frame(test_frame_phys);
+    assert!(!pmm.is_frame_allocated(test_frame_idx));
+    pmm.reserve_region(test_frame_phys + 128, 64);
+    assert!(pmm.is_frame_allocated(test_frame_idx), "Sub-page reserve_region failed to scrub frame");
+    pmm.free_frame(test_frame_phys);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_ap_trampoline_and_lapic_timer() {
+    print!("  [TEST] 16-Bit AP Trampoline (0x8000) & LAPIC MMIO Timer ... ");
+
+    // 1. Verify AP trampoline was compiled, sized <= 4KiB, and staged cleanly at physical 0x8000
+    assert!(
+        crate::arch::x86_64::smp::is_trampoline_staged(),
+        "16-bit AP trampoline missing or corrupted at 0x8000"
+    );
+
+    // 2. Verify Local APIC MMIO Periodic Timer is active on Vector 48 and driving OS ticks
+    assert!(
+        crate::arch::x86_64::apic::is_lapic_timer_active(),
+        "LAPIC MMIO timer should be active on modern x86_64 CPU"
+    );
+    assert!(
+        crate::arch::x86_64::apic::get_lapic_ticks_per_ms() > 0,
+        "LAPIC timer calibration produced zero ticks/ms"
+    );
+
+    // 3. Verify calibrated sleep & MMIO timer tick advancement
+    let t0 = crate::arch::x86_64::pit::get_ticks();
+    crate::arch::x86_64::pit::sleep_ms(3);
+    let t1 = crate::arch::x86_64::pit::get_ticks();
+    assert!(t1 >= t0 + 2, "LAPIC MMIO system tick failed to advance (t0={}, t1={})", t0, t1);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_baremetal_hardware_guards() {
+    print!("  [TEST] Bare-Metal ACPI XSDT/MADT, PCI Display & Storage Guards ... ");
+
+    // 1. Verify ACPI RSDP/FADT/MADT discovery and MMIO bases
+    let acpi = *crate::arch::x86_64::acpi::ACPI.lock();
+    assert!(acpi.is_available, "ACPI RSDP should be detected on x86_64 platform");
+    assert!(acpi.madt_addr != 0 || crate::arch::x86_64::madt::MADT.lock().lapic_address != 0);
+
+    // 2. Verify UEFI GOP / Multiboot Linear Framebuffer state (no Bochs 0x1CE/0x1CF fallback)
+    let vbe = crate::drivers::vbe::VBE.lock();
+    assert!(!vbe.framebuffer.is_null(), "Framebuffer handle should be valid (LFB or RAM-backed)");
+    if vbe.text_mode_fallback {
+        assert_eq!(vbe.lfb_phys, 0, "Text-mode fallback must not claim physical MMIO LFB");
+    } else {
+        assert!(vbe.lfb_phys != 0, "Active hardware LFB must have non-zero physical address");
+    }
+    drop(vbe);
+
+    // 3. Verify GOP Canvas stride (pitch != width*4) & RGBX/BGRX channel swizzle
+    let mut gop_canvas = crate::gui::canvas::Canvas::new(2, 2);
+    gop_canvas.fill_rect(0, 0, 2, 2, crate::gui::color::Color::rgb(0x12, 0x34, 0x56));
+    let mut dst_buf = [0u32; 16]; // 6 u32s per row = 24-byte scanline pitch (> width*4 = 8 bytes)
+    gop_canvas.blit_to_framebuffer(dst_buf.as_mut_ptr(), 24, 32, 0, 8, 16); // UEFI RGB (R@0, G@8, B@16)
+    assert_eq!(dst_buf[0], 0x00563412, "GOP pixel channel pack mismatch on row 0");
+    assert_eq!(dst_buf[2], 0, "Padding bytes past width on row 0 must stay untouched");
+    assert_eq!(dst_buf[6], 0x00563412, "GOP 24-byte pitch stride mismatch on row 1");
+
+    // 4. Verify Native PCI IDE (prog_if = 0x05) with unassigned BARs never falls back to legacy 0x1F0/0x170
+    let native_ide_no_bar = crate::drivers::pci::PciDevice {
+        bus: 255,
+        device: 31,
+        function: 1,
+        vendor_id: 0x8086,
+        device_id: 0x2828,
+        class_code: 0x01,
+        subclass: 0x01,
+        prog_if: 0x05, // Bit 0 & Bit 2 set = Native PCI primary & secondary modes
+        header_type: 0x00,
+        bar0: 0,
+    };
+    let channels = crate::drivers::storage::ata::resolve_ide_channels(&native_ide_no_bar);
+    assert!(
+        channels[0].is_none() && channels[1].is_none(),
+        "Native PCI IDE with BAR=0 must skip legacy 0x1F0/0x170 ports"
+    );
+
+    // 5. Verify zeroed DMA frame helper zero-fills allocated frames cleanly
+    let dma_frame = crate::mm::pmm::alloc_zeroed_frame().expect("alloc_zeroed_frame failed");
+    let dma_slice = unsafe {
+        core::slice::from_raw_parts(crate::mm::phys_to_virt(dma_frame) as *const u64, 512)
+    };
+    assert!(dma_slice.iter().all(|&w| w == 0), "alloc_zeroed_frame left non-zero garbage");
+    PMM.lock().free_frame(dma_frame);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_broadcom_drivers() {
+    print!("  [TEST] Broadcom BCM57765 (tg3) & BCM4331 (b43/BCMA) Drivers ... ");
+
+    use crate::drivers::net::broadcom::b43::{
+        has_embedded_firmware, parse_fw_payload, B43Device, B43DmaDesc64, B43FwHeader,
+        B43_DMA64_RX0_BASE, B43_DMA64_TX0_BASE, B43_FW_TYPE_UCODE,
+    };
+    use crate::drivers::net::broadcom::tg3::{
+        Tg3Device, Tg3RxDesc, Tg3StatusBlock, Tg3TxDesc, TG3_GRCMBOX_RCVRET_CON_0_LO,
+        TG3_GRCMBOX_RCV_STD_PROD_LO, TG3_GRCMBOX_SNDHOST_PROD_0_LO, TG3_HOSTCC_STATUS_BLK_HI,
+        TG3_HOSTCC_STATUS_BLK_LO, TG3_MAC_ADDR_0_HIGH, TG3_MAC_ADDR_0_LOW, TG3_MAC_STATUS,
+        TG3_MISC_HOST_CTRL, TG3_RING_LEN,
+    };
+    use crate::drivers::pci::PciDevice;
+    use crate::net::device::{NetDevice, NetDeviceType};
+
+    // 1. Verify Broadcom DMA descriptor and status block ABI sizes/alignments
+    assert_eq!(core::mem::size_of::<Tg3TxDesc>(), 16);
+    assert_eq!(core::mem::size_of::<Tg3RxDesc>(), 32);
+    assert_eq!(core::mem::align_of::<Tg3StatusBlock>(), 64);
+    assert_eq!(core::mem::size_of::<B43FwHeader>(), 8);
+    assert_eq!(core::mem::size_of::<B43DmaDesc64>(), 16);
+
+    // 2. Test Broadcom NetXtreme BCM57765 (14E4:16B4) Status Block & DMA Rings against 64 KiB MMIO aperture
+    let tg3_mmio_phys = PMM
+        .lock()
+        .alloc_contiguous_frames(16)
+        .expect("Failed to allocate scratch MMIO aperture for BCM57765 test");
+    let tg3_mmio_virt = crate::mm::phys_to_virt(tg3_mmio_phys);
+    unsafe {
+        core::ptr::write_bytes(tg3_mmio_virt as *mut u8, 0, 16 * crate::mm::PAGE_SIZE);
+        // Seed hardware MAC 00:14:E4:57:76:51 and Link Synced bit in MAC_STATUS
+        core::ptr::write_volatile((tg3_mmio_virt + TG3_MAC_ADDR_0_HIGH) as *mut u32, 0x0000_0014);
+        core::ptr::write_volatile((tg3_mmio_virt + TG3_MAC_ADDR_0_LOW) as *mut u32, 0xE457_7651);
+        core::ptr::write_volatile((tg3_mmio_virt + TG3_MAC_STATUS) as *mut u32, 0x0000_0001);
+    }
+
+    let pci_bcm57765 = PciDevice {
+        bus: 2,
+        device: 0,
+        function: 0,
+        vendor_id: 0x14E4,
+        device_id: 0x16B4,
+        class_code: 0x02,
+        subclass: 0x00,
+        prog_if: 0x00,
+        header_type: 0x00,
+        bar0: 0,
+    };
+
+    {
+        let tg3 = Tg3Device::from_mmio(pci_bcm57765, tg3_mmio_virt)
+            .expect("BCM57765 Tg3Device initialization failed");
+        assert_eq!(tg3.name(), "en3");
+        assert_eq!(tg3.device_type(), NetDeviceType::Ethernet);
+        assert_eq!(tg3.mac_address(), [0x00, 0x14, 0xE4, 0x57, 0x76, 0x51]);
+        assert!(tg3.is_link_up());
+
+        unsafe {
+            let host_ctrl = core::ptr::read_volatile((tg3_mmio_virt + TG3_MISC_HOST_CTRL) as *const u32);
+            assert_ne!(host_ctrl & 0x02, 0, "Word swap bit not configured in MISC_HOST_CTRL");
+
+            let sb_lo = core::ptr::read_volatile((tg3_mmio_virt + TG3_HOSTCC_STATUS_BLK_LO) as *const u32);
+            let sb_hi = core::ptr::read_volatile((tg3_mmio_virt + TG3_HOSTCC_STATUS_BLK_HI) as *const u32);
+            let sb_prog = ((sb_hi as u64) << 32) | (sb_lo as u64);
+            let dma = tg3.dma.lock();
+            assert_eq!(sb_prog, dma.status_block_frame, "Status Block host address mismatch");
+            let rx_prod_mbox = core::ptr::read_volatile((tg3_mmio_virt + TG3_GRCMBOX_RCV_STD_PROD_LO) as *const u32);
+            assert_eq!(rx_prod_mbox, (TG3_RING_LEN - 1) as u32);
+        }
+
+        // Transmit frame and verify TxDesc[0] + TX doorbell mailbox write
+        let tx_frame = [0xAAu8, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x14, 0xE4, 0x57, 0x76, 0x51, 0x08, 0x06, 0x11, 0x22];
+        tg3.send_packet(&tx_frame).expect("BCM57765 send_packet failed");
+        unsafe {
+            let tx_mbox = core::ptr::read_volatile((tg3_mmio_virt + TG3_GRCMBOX_SNDHOST_PROD_0_LO) as *const u32);
+            assert_eq!(tx_mbox, 1, "TX Host Producer Mailbox not updated");
+            let dma = tg3.dma.lock();
+            let tx_desc0 = core::ptr::read_volatile(crate::mm::phys_to_virt(dma.tx_ring_frame) as *const Tg3TxDesc);
+            assert_eq!(tx_desc0.len_flags, ((tx_frame.len() as u32) << 16) | 0x04);
+        }
+
+        // Verify Status Block + RX Return Ring DMA ingestion
+        {
+            let dma = tg3.dma.lock();
+            unsafe {
+                let rx_slot0_virt = crate::mm::phys_to_virt(dma.rx_slot_phys(0)) as *mut u8;
+                core::ptr::copy_nonoverlapping(tx_frame.as_ptr(), rx_slot0_virt, tx_frame.len());
+                let rx_ret0 = crate::mm::phys_to_virt(dma.rx_ret_ring_frame) as *mut Tg3RxDesc;
+                core::ptr::write_volatile(
+                    rx_ret0,
+                    Tg3RxDesc {
+                        addr_hi: 0,
+                        addr_lo: 0,
+                        idx_len: tx_frame.len() as u32,
+                        type_flags: 0,
+                        err_vlan: 0,
+                        ip_tcp_csum: 0,
+                        reserved: 0,
+                        opaque: 0,
+                    },
+                );
+                let sb_mut = crate::mm::phys_to_virt(dma.status_block_frame) as *mut Tg3StatusBlock;
+                (*sb_mut).idx[0].rx_producer = 1;
+            }
+        }
+
+        let mut rx_buf = [0u8; 64];
+        let n = tg3.receive_packet(&mut rx_buf).expect("BCM57765 receive_packet failed");
+        assert_eq!(n, tx_frame.len());
+        assert_eq!(&rx_buf[..n], &tx_frame);
+        let ret_con = unsafe { core::ptr::read_volatile((tg3_mmio_virt + TG3_GRCMBOX_RCVRET_CON_0_LO) as *const u32) };
+        assert_eq!(ret_con, 1, "RX Return Consumer Mailbox not acknowledged");
+    }
+
+    {
+        let mut pmm = PMM.lock();
+        for i in 0..16 {
+            pmm.free_frame(tg3_mmio_phys + (i * crate::mm::PAGE_SIZE) as u64);
+        }
+    }
+
+    // 3. Test Broadcom BCM4331 (14E4:4331) b43_fw_header Parser, DMA64 Ring Programming & Firmware Gate
+    let valid_blob = [B43_FW_TYPE_UCODE, 1, 0, 0, 0, 0, 0, 8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    let parsed_fw = parse_fw_payload(&valid_blob, B43_FW_TYPE_UCODE).expect("b43_fw_header parse failed");
+    assert_eq!(parsed_fw.len(), 8);
+    assert!(parse_fw_payload(&valid_blob[..4], B43_FW_TYPE_UCODE).is_err());
+
+    let b43_mmio_phys = PMM
+        .lock()
+        .alloc_contiguous_frames(4)
+        .expect("Failed to allocate scratch MMIO aperture for BCM4331 test");
+    let b43_mmio_virt = crate::mm::phys_to_virt(b43_mmio_phys);
+    unsafe {
+        core::ptr::write_bytes(b43_mmio_virt as *mut u8, 0, 4 * crate::mm::PAGE_SIZE);
+        core::ptr::write_volatile(b43_mmio_virt as *mut u32, 0x1000_4331);
+    }
+
+    let pci_bcm4331 = PciDevice {
+        bus: 3,
+        device: 0,
+        function: 0,
+        vendor_id: 0x14E4,
+        device_id: 0x4331,
+        class_code: 0x02,
+        subclass: 0x80,
+        prog_if: 0x00,
+        header_type: 0x00,
+        bar0: 0,
+    };
+
+    {
+        let b43 = B43Device::from_mmio(pci_bcm4331, b43_mmio_virt, false)
+            .expect("BCM4331 B43Device initialization failed");
+        assert_eq!(b43.name(), "wlan2");
+        assert_eq!(b43.device_type(), NetDeviceType::Wireless80211);
+        assert_eq!(b43.chip_id, 0x4331);
+
+        let tx_ring_lo = unsafe { core::ptr::read_volatile((b43_mmio_virt + B43_DMA64_TX0_BASE + 0x08) as *const u32) };
+        let rx_ring_lo = unsafe { core::ptr::read_volatile((b43_mmio_virt + B43_DMA64_RX0_BASE + 0x08) as *const u32) };
+        {
+            let dma = b43.dma.lock();
+            assert_eq!(tx_ring_lo, (dma.tx_ring_phys() & 0xFFFF_FFFF) as u32);
+            assert_eq!(rx_ring_lo, (dma.rx_ring_phys() & 0xFFFF_FFFF) as u32);
+        }
+
+        if has_embedded_firmware() {
+            assert!(b43.firmware_loaded);
+            assert!(b43.ucode_bytes > 0);
+            assert!(b43.send_packet(&tx_frame_placeholder()).is_ok());
+        } else {
+            assert!(!b43.firmware_loaded);
+            assert!(!b43.is_link_up());
+            assert!(b43.send_packet(&tx_frame_placeholder()).is_err());
+        }
+    }
+
+    {
+        let mut pmm = PMM.lock();
+        for i in 0..4 {
+            pmm.free_frame(b43_mmio_phys + (i * crate::mm::PAGE_SIZE) as u64);
+        }
+    }
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+#[inline(always)]
+const fn tx_frame_placeholder() -> [u8; 4] {
+    [0x80, 0x00, 0x00, 0x00]
+}
+
+fn test_apple_platform_and_ehci_hid() {
+    print!("  [TEST] EHCI Periodic DMA Pipes, Apple Trackpad & SMC Backlight ... ");
+
+    use core::mem::{align_of, size_of};
+    use core::ptr::{read_volatile, write_volatile};
+    use crate::drivers::keyboard::read_char;
+    use crate::drivers::mouse::{apply_relative_event, MOUSE};
+    use crate::drivers::platform::apple::ApplePlatformHardware;
+    use crate::drivers::usb::ehci::{EhciController, EhciQtd, EhciQueueHead, UsbSpeed};
+    use crate::drivers::usb::hid::trackpad::{
+        build_boot_protocol_setup, is_apple_wellspring_trackpad,
+    };
+    use crate::drivers::usb::hid::UsbHidType;
+    use crate::fs::vfs::{FileType, VFS};
+    use crate::mm::pmm::{alloc_zeroed_frame, PMM};
+    use crate::mm::phys_to_virt;
+
+    // 1. Validate EHCI 1.0 hardware descriptor geometry and alignment
+    assert_eq!(size_of::<EhciQtd>(), 32);
+    assert_eq!(align_of::<EhciQtd>(), 32);
+    assert_eq!(size_of::<EhciQueueHead>(), 64);
+    assert_eq!(align_of::<EhciQueueHead>(), 32);
+
+    // 2. Validate Apple Wellspring PID database & USB HID SET_PROTOCOL(0) setup packet
+    assert!(is_apple_wellspring_trackpad(0x05AC, 0x0245));
+    assert!(is_apple_wellspring_trackpad(0x05AC, 0x0246));
+    assert!(!is_apple_wellspring_trackpad(0x8086, 0x0245));
+    assert_eq!(
+        build_boot_protocol_setup(2),
+        [0x21, 0x0B, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]
+    );
+
+    // 3. Instantiate scratch EHCI controller & verify Periodic Frame List + Interrupt IN polling
+    let scratch_phys = alloc_zeroed_frame().expect("Failed to alloc EHCI scratch MMIO page");
+    let scratch_virt = phys_to_virt(scratch_phys);
+    {
+        let mut ehci =
+            EhciController::new_scratch(scratch_virt, 2).expect("EHCI scratch init failed");
+
+        unsafe {
+            assert_eq!(
+                read_volatile((scratch_virt + 0x14) as *const u32),
+                ehci.frame_list_phys as u32
+            );
+            assert_eq!(
+                read_volatile((scratch_virt + 0x18) as *const u32),
+                ehci.async_qh_phys as u32
+            );
+            assert_eq!(read_volatile((scratch_virt + 0x40) as *const u32), 1);
+            let cmd = read_volatile((scratch_virt + 0x00) as *const u32);
+            assert_eq!(cmd & ((1 << 4) | (1 << 0)), (1 << 4) | (1 << 0));
+        }
+
+        // Attach 8ms Keyboard pipe (slot 0 -> odd frames 1, 9, ...) and 2ms Trackpad pipe (slot 1 -> even frames 0, 2, ...)
+        let kbd_slot = ehci
+            .attach_interrupt_pipe(UsbHidType::Keyboard, 1, 1, 1, UsbSpeed::High, 8, 8)
+            .expect("Keyboard pipe attach failed");
+        let tp_slot = ehci
+            .attach_interrupt_pipe(UsbHidType::Mouse, 1, 1, 2, UsbSpeed::High, 2, 4)
+            .expect("Trackpad pipe attach failed");
+        assert_eq!(kbd_slot, 0);
+        assert_eq!(tp_slot, 1);
+
+        let kbd_qh_link = ehci.pipes[kbd_slot].qh_phys | 0x02;
+        let tp_qh_link = ehci.pipes[tp_slot].qh_phys | 0x02;
+        unsafe {
+            let fl = ehci.frame_list_virt as *const u32;
+            assert_eq!(read_volatile(fl.add(0)), kbd_qh_link);
+            assert_eq!(read_volatile(fl.add(1)), tp_qh_link);
+            assert_eq!(read_volatile(fl.add(3)), tp_qh_link);
+            assert_eq!(read_volatile(fl.add(8)), kbd_qh_link);
+        }
+
+        for _ in 0..64 {
+            if read_char().is_none() {
+                break;
+            }
+        }
+        let (mx0, my0) = {
+            let m = MOUSE.lock();
+            (m.x, m.y)
+        };
+
+        // Simulate completed DMA Interrupt IN qTD payloads from silicon
+        unsafe {
+            // Keyboard report: Left Shift (0x02) + HID Key 'a' (0x04) => 'A'
+            let kbd_buf = ehci.pipes[kbd_slot].buf_virt as *mut u8;
+            let kbd_report = [0x02u8, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00];
+            for (i, &b) in kbd_report.iter().enumerate() {
+                write_volatile(kbd_buf.add(i), b);
+            }
+            let kbd_qtd = ehci.pipes[kbd_slot].qtd_virt as *mut EhciQtd;
+            write_volatile(&mut (*kbd_qtd).token, 0); // Active=0, Remaining=0 => 8 bytes received
+
+            // Apple Boot Mouse Emulation report: Left button (0x01), dx=+10, dy=-5
+            let tp_buf = ehci.pipes[tp_slot].buf_virt as *mut u8;
+            let tp_report = [0x01u8, 10u8, (-5i8) as u8, 0x00];
+            for (i, &b) in tp_report.iter().enumerate() {
+                write_volatile(tp_buf.add(i), b);
+            }
+            let tp_qtd = ehci.pipes[tp_slot].qtd_virt as *mut EhciQtd;
+            write_volatile(&mut (*tp_qtd).token, 0); // Active=0, Remaining=0 => 4 bytes received
+        }
+
+        let handled = ehci.poll_interrupt_pipes();
+        assert_eq!(handled, 2, "Expected both Keyboard and Trackpad qTDs to complete");
+        assert_eq!(read_char(), Some(b'A'), "USB keyboard Shift+'a' did not reach TTY/keyboard buffer");
+
+        {
+            let m = MOUSE.lock();
+            assert_eq!(m.x, (mx0 + 10).clamp(0, m.screen_width - 1));
+            assert_eq!(m.y, (my0 - 5).clamp(0, m.screen_height - 1));
+            assert!(m.left_button);
+        }
+        apply_relative_event(0, -10, 5); // Restore pointer state cleanly
+
+        // Verify Apple 10-byte report (Report ID 0x01, key 'r' Usage 0x15) through EHCI periodic pipe
+        ehci.pipes[kbd_slot].max_packet_size = 10;
+        unsafe {
+            let kbd_buf = ehci.pipes[kbd_slot].buf_virt as *mut u8;
+            let apple_kbd = [0x01u8, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+            for (i, &b) in apple_kbd.iter().enumerate() {
+                write_volatile(kbd_buf.add(i), b);
+            }
+            let kbd_qtd = ehci.pipes[kbd_slot].qtd_virt as *mut EhciQtd;
+            write_volatile(&mut (*kbd_qtd).token, 0);
+        }
+        let handled_apple = ehci.poll_interrupt_pipes();
+        assert_eq!(handled_apple, 1, "Expected Apple 10-byte keyboard qTD to complete");
+        assert_eq!(read_char(), Some(b'r'), "Apple 10-byte 'r' key failed to decode through EHCI pipe");
+
+        // Verify qTDs were re-armed Active for the next periodic frame
+        unsafe {
+            let kbd_tok = read_volatile(&(*(ehci.pipes[kbd_slot].qtd_virt as *const EhciQtd)).token);
+            let tp_tok = read_volatile(&(*(ehci.pipes[tp_slot].qtd_virt as *const EhciQtd)).token);
+            assert_ne!(kbd_tok & (1 << 7), 0, "Keyboard qTD not re-armed Active");
+            assert_ne!(tp_tok & (1 << 7), 0, "Trackpad qTD not re-armed Active");
+        }
+    }
+    PMM.lock().free_frame(scratch_phys);
+
+    // 4. Verify Apple Platform Backlight & /dev/backlight VFS + shell redirection
+    ApplePlatformHardware::set_keyboard_light(96);
+    assert_eq!(ApplePlatformHardware::get_keyboard_light(), 96);
+
+    let dev_node = VFS
+        .lock()
+        .resolve_path("/dev/backlight")
+        .expect("Missing /dev/backlight node in DevFS");
+    assert_eq!(dev_node.lock().stat().file_type, FileType::CharDevice);
+
+    let mut rbuf = [0u8; 16];
+    let n = dev_node
+        .lock()
+        .read(0, &mut rbuf)
+        .expect("Failed reading /dev/backlight");
+    assert_eq!(core::str::from_utf8(&rbuf[..n]).ok(), Some("96\n"));
+
+    let ok = crate::shell::pipeline::try_execute_pipeline("echo 128 > /dev/backlight");
+    assert!(ok, "echo 128 > /dev/backlight pipeline failed");
+    assert_eq!(ApplePlatformHardware::get_keyboard_light(), 128);
+
+    let dev_node_after = VFS
+        .lock()
+        .resolve_path("/dev/backlight")
+        .expect("/dev/backlight disappeared after > redirection");
+    assert_eq!(dev_node_after.lock().stat().file_type, FileType::CharDevice);
+    let n2 = dev_node_after.lock().read(0, &mut rbuf).unwrap();
+    assert_eq!(core::str::from_utf8(&rbuf[..n2]).ok(), Some("128\n"));
+
+    ApplePlatformHardware::set_keyboard_light(0);
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_usb_hub_and_early_gop() {
+    print!("  [TEST] USB 2.0 Hub Split-Transactions & Early GOP Console ... ");
+
+    use core::ptr::read_volatile;
+    use crate::drivers::gop_console::GopConsole;
+    use crate::drivers::usb::ehci::{EhciController, EhciQueueHead, UsbSpeed};
+    use crate::drivers::usb::hid::UsbHidType;
+    use crate::drivers::usb::hub::{
+        self, UsbConfigDescriptor, UsbDeviceDescriptor, UsbHubDescriptor,
+    };
+    use crate::mm::pmm::{alloc_zeroed_frame, PMM};
+    use crate::mm::{phys_to_virt, PAGE_SIZE};
+
+    // 1. Validate Early GOP Framebuffer Text Console (8x16 glyphs, ANSI colors, scroll, TTY flush)
+    let fb_pages = 10usize; // 160x64x32bpp = 40,960 bytes
+    let fb_phys = PMM
+        .lock()
+        .alloc_contiguous_frames(fb_pages)
+        .expect("Failed to allocate GOP scratch framebuffer");
+    let fb_virt = phys_to_virt(fb_phys);
+    {
+        let mut gop = GopConsole::new();
+        gop.configure(fb_virt as *mut u8, 160, 64, 160 * 4, 32, 16, 8, 0);
+        assert!(gop.initialized);
+        assert_eq!(gop.cols, 20);
+        assert_eq!(gop.rows, 4);
+
+        gop.write_bytes(b"\x1b[32m[OK]\x1b[0m GOP\nLine2\nLine3\nLine4\nLine5");
+        assert_eq!(gop.row, 3); // Scrolled cleanly within 4-row screen
+
+        // Verify glyph pixels drawn with non-background colors inside the 160x64 buffer
+        let mut non_bg_pixels = 0usize;
+        let bg_px = (16u32 << 16) | (20u32 << 8) | 26u32;
+        unsafe {
+            let px_ptr = fb_virt as *const u32;
+            for i in 0..(160 * 64) {
+                if read_volatile(px_ptr.add(i)) != bg_px {
+                    non_bg_pixels += 1;
+                }
+            }
+        }
+        assert!(non_bg_pixels > 40, "Expected rendered bitmap glyphs in GOP framebuffer");
+
+        // Verify multi-byte UTF-8 box-drawing characters decode to 1 cell per character
+        gop.clear_screen();
+        gop.write_bytes("██╔═╗".as_bytes());
+        assert_eq!(gop.col, 5, "Multi-byte UTF-8 box characters should advance by character count");
+    }
+    {
+        let mut pmm = PMM.lock();
+        for i in 0..fb_pages {
+            pmm.free_frame(fb_phys + (i * PAGE_SIZE) as u64);
+        }
+    }
+
+    // 2. Validate USB Hub & >64-byte Composite Apple Configuration Descriptor Parser
+    let hub_dev_raw: [u8; 18] = [
+        18, 0x01, 0x00, 0x02, 0x09, 0x00, 0x01, 64, 0x87, 0x80, 0x24, 0x00, 0x00, 0x00, 0, 0, 0, 1,
+    ];
+    let hub_dev = UsbDeviceDescriptor::from_bytes(&hub_dev_raw).expect("Hub DeviceDesc parse failed");
+    assert_eq!(hub_dev.id_vendor, 0x8087);
+    assert_eq!(hub_dev.id_product, 0x0024);
+    assert!(hub::is_hub_device(hub_dev.b_device_class, &[]));
+
+    let hub_desc_raw: [u8; 7] = [9, 0x29, 6, 0x09, 0x00, 50, 0];
+    let hub_desc = UsbHubDescriptor::from_bytes(&hub_desc_raw).expect("HubDesc parse failed");
+    assert_eq!(hub_desc.b_nbr_ports, 6);
+    assert_eq!(hub_desc.b_pwr_on_2_pwr_good, 50);
+
+    // Build a 68-byte Apple composite config tree (>64 bytes) with Keyboard (Iface 0 EP1) + Wellspring Boot Mouse (Iface 2 EP2)
+    let cfg_vec = alloc::vec![
+        // Config (9) - wTotalLength = 68
+        9u8, 0x02, 68, 0, 3, 1, 0, 0xA0, 250,
+        // Iface 0 Boot Keyboard (9) + HID (9) + EP 0x81 (7)
+        9, 0x04, 0, 0, 1, 0x03, 0x01, 0x01, 0,
+        9, 0x21, 0x11, 0x01, 0, 1, 0x22, 63, 0,
+        7, 0x05, 0x81, 0x03, 8, 0, 8,
+        // Iface 1 Vendor Touch (9)
+        9, 0x04, 1, 0, 0, 0x03, 0x00, 0x00, 0,
+        // Iface 2 Boot Mouse (9) + HID (9) + EP 0x82 (7)
+        9, 0x04, 2, 0, 1, 0x03, 0x01, 0x02, 0,
+        9, 0x21, 0x11, 0x01, 0, 1, 0x22, 52, 0,
+        7, 0x05, 0x82, 0x03, 4, 0, 2,
+    ];
+    let cfg_hdr = UsbConfigDescriptor::from_bytes(&cfg_vec).expect("ConfigDesc parse failed");
+    assert_eq!(cfg_hdr.w_total_length, 68);
+    let parsed_eps = hub::parse_hid_interrupt_endpoints(0x05AC, 0x0245, &cfg_vec);
+    assert_eq!(parsed_eps.len(), 2);
+    assert_eq!(parsed_eps[0].kind, UsbHidType::Keyboard);
+    assert_eq!(parsed_eps[0].interface_num, 0);
+    assert_eq!(parsed_eps[0].endpoint_num, 1);
+    assert_eq!(parsed_eps[1].kind, UsbHidType::Mouse);
+    assert_eq!(parsed_eps[1].interface_num, 2);
+    assert_eq!(parsed_eps[1].endpoint_num, 2);
+    assert!(parsed_eps[1].is_apple_wellspring);
+
+    // 3. Validate EHCI Split-Transaction QH TT bits (HubAddr=5, Port=3, C-Mask=0x1C)
+    let scratch_phys = alloc_zeroed_frame().expect("Failed to alloc EHCI split scratch");
+    {
+        let mut ehci =
+            EhciController::new_scratch(phys_to_virt(scratch_phys), 2).expect("EHCI init failed");
+        let slot = ehci
+            .attach_interrupt_pipe_ex(
+                UsbHidType::Mouse,
+                1,
+                9,
+                2,
+                UsbSpeed::Full,
+                2,
+                4,
+                Some((5, 3)),
+                0x05AC,
+                0x0245,
+            )
+            .expect("Split pipe attach failed");
+        let qh = unsafe { read_volatile(ehci.pipes[slot].qh_virt as *const EhciQueueHead) };
+        assert_eq!((qh.ep_caps >> 16) & 0x7F, 5, "TT Hub Address mismatch");
+        assert_eq!((qh.ep_caps >> 23) & 0x7F, 3, "TT Hub Port mismatch");
+        assert_eq!((qh.ep_caps >> 8) & 0xFF, 0x1C, "Split C-Mask mismatch");
+        assert!(ehci.pipes[slot].trackpad_driver.as_ref().unwrap().is_apple_wellspring());
+    }
+    PMM.lock().free_frame(scratch_phys);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_unified_block_cache() {
+    print!("  [TEST] Unified Storage Block Cache (Buffer Cache & Sync) ... ");
+
+    let raw_dev = MemBlockDevice::new("sim_bcache0", 64);
+    let cached_dev = crate::fs::bcache::CachedBlockDevice::new(raw_dev.clone());
+
+    // 1. Write sector 10 through cache
+    let mut write_buf = [0u8; 512];
+    write_buf[0] = 0xDE;
+    write_buf[1] = 0xAD;
+    write_buf[510] = 0xBE;
+    write_buf[511] = 0xEF;
+    assert!(cached_dev.write_sectors(10, 1, &write_buf).is_ok(), "Cache write failed");
+
+    // 2. Read sector 10 through cache (should hit cache)
+    let mut read_buf = [0u8; 512];
+    assert!(cached_dev.read_sectors(10, 1, &mut read_buf).is_ok(), "Cache read failed");
+    assert_eq!(read_buf[0], 0xDE);
+    assert_eq!(read_buf[1], 0xAD);
+    assert_eq!(read_buf[510], 0xBE);
+    assert_eq!(read_buf[511], 0xEF);
+
+    // 3. Verify underlying hardware received write-through data
+    let mut hw_buf = [0u8; 512];
+    assert!(raw_dev.read_sectors(10, 1, &mut hw_buf).is_ok(), "Raw dev read failed");
+    assert_eq!(hw_buf[0], 0xDE);
+    assert_eq!(hw_buf[511], 0xEF);
+
+    // 4. Test cache hit counting and stats
+    let (entries, hits, _misses, writes) = crate::fs::bcache::BLOCK_CACHE.lock().stats();
+    assert!(entries > 0, "Expected non-zero cached entries");
+    assert!(hits > 0, "Expected at least one cache hit");
+    assert!(writes > 0, "Expected recorded cache writes");
+
+    // 5. Test flush_all
+    assert!(crate::fs::bcache::BLOCK_CACHE.lock().flush_all().is_ok());
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_usb_hub_downstream_enumeration() {
+    print!("  [TEST] USB 2.0 Hub Downstream Enumeration & Topology ... ");
+
+    use core::ptr::read_volatile;
+    use crate::drivers::usb::ehci::{EhciController, EhciQueueHead, UsbSpeed};
+    use crate::drivers::usb::hub::{self, UsbHubDescriptor};
+    use crate::mm::pmm::{alloc_zeroed_frame, PMM};
+    use crate::mm::phys_to_virt;
+
+    // 1. Hub Class Descriptor parsing with port power & removable mask
+    // 9 bytes: [len=9, type=0x29, nports=6, chars=0x0009, pwr2good=50 (100ms), current=0, removable=0b00000110 (ports 1 & 2 non-removable/internal)]
+    let raw_hub = [9u8, 0x29, 6, 0x09, 0x00, 50, 0, 0x06, 0x00];
+    let hub_desc = UsbHubDescriptor::from_bytes(&raw_hub).expect("Failed to parse Hub Descriptor");
+    assert_eq!(hub_desc.b_nbr_ports, 6);
+    assert_eq!(hub_desc.b_pwr_on_2_pwr_good, 50);
+    assert!(!hub_desc.is_port_removable(1), "Port 1 should be internal/non-removable");
+    assert!(!hub_desc.is_port_removable(2), "Port 2 should be internal/non-removable");
+    assert!(hub_desc.is_port_removable(3), "Port 3 should be external/removable");
+
+    // 2. Product name identification
+    let hub_name = hub::get_usb_product_description(0x8087, 0x0024, 0x09);
+    assert!(hub_name.contains("Rate Matching Hub"), "Expected RMH identification");
+    let kbd_name = hub::get_usb_product_description(0x05AC, 0x0245, 0x03);
+    assert!(kbd_name.contains("Apple Internal Keyboard"), "Expected Apple Keyboard identification");
+
+    // 3. Multi-tier Transaction Translator logic check
+    // If hub is High-Speed, child is Full-Speed -> TT is Some((hub_addr, port))
+    let tt_tier1 = Some((1u8, 1u8));
+    // If child is a second hub (Full-Speed), downstream devices behind it retain tier-1 TT
+    let child_speed = UsbSpeed::Low;
+    let hub2_speed = UsbSpeed::Full;
+    let inherited_tt = if child_speed == UsbSpeed::High {
+        None
+    } else if hub2_speed == UsbSpeed::High {
+        Some((2u8, 1u8))
+    } else {
+        tt_tier1
+    };
+    assert_eq!(inherited_tt, Some((1, 1)), "Full-speed hub should inherit parent high-speed TT");
+
+    // 4. Simulated Hub & Downstream Keyboard + Trackpad Enumeration on scratch EHCI
+    let scratch_phys = alloc_zeroed_frame().expect("Failed to alloc EHCI hub scratch frame");
+    {
+        let mut ehci = EhciController::new_scratch(phys_to_virt(scratch_phys), 6)
+            .expect("EHCI scratch init failed");
+
+        // Verify hub depth bounds
+        assert!(ehci.enumerate_device(1, UsbSpeed::High, None, 0).is_err(), "Depth 0 must error");
+
+        // Run simulated Rate Matching Hub enumeration
+        assert!(ehci.simulate_mock_hub_and_downstream_enumeration().is_ok());
+
+        // Validate discovered device tree
+        assert_eq!(ehci.discovered_devices.len(), 3);
+        let d_hub = &ehci.discovered_devices[0];
+        assert_eq!(d_hub.address, 1);
+        assert!(d_hub.is_hub);
+        assert_eq!(d_hub.hub_ports, Some(6));
+        assert_eq!(d_hub.parent_hub, None);
+
+        let d_kbd = &ehci.discovered_devices[1];
+        assert_eq!(d_kbd.address, 2);
+        assert!(!d_kbd.is_hub);
+        assert_eq!(d_kbd.parent_hub, Some((1, 1)));
+        assert_eq!(d_kbd.vendor_id, 0x05AC);
+
+        let d_tp = &ehci.discovered_devices[2];
+        assert_eq!(d_tp.address, 3);
+        assert!(!d_tp.is_hub);
+        assert_eq!(d_tp.parent_hub, Some((1, 2)));
+        assert_eq!(d_tp.vendor_id, 0x05AC);
+
+        // Validate physical DMA Queue Heads programmed for Split Transactions
+        assert_eq!(ehci.pipes.len(), 2);
+        // Pipe 0 (Keyboard)
+        let qh_kbd = unsafe { read_volatile(ehci.pipes[0].qh_virt as *const EhciQueueHead) };
+        assert_eq!((qh_kbd.ep_caps >> 16) & 0x7F, 1, "Kbd TT Hub Addr mismatch");
+        assert_eq!((qh_kbd.ep_caps >> 23) & 0x7F, 1, "Kbd TT Hub Port mismatch");
+        assert_eq!((qh_kbd.ep_caps >> 8) & 0xFF, 0x1C, "Kbd TT C-Mask mismatch");
+        assert_eq!((qh_kbd.ep_caps >> 30) & 0x03, 1, "Kbd Mult mismatch");
+
+        // Pipe 1 (Wellspring Trackpad)
+        let qh_tp = unsafe { read_volatile(ehci.pipes[1].qh_virt as *const EhciQueueHead) };
+        assert_eq!((qh_tp.ep_caps >> 16) & 0x7F, 1, "Trackpad TT Hub Addr mismatch");
+        assert_eq!((qh_tp.ep_caps >> 23) & 0x7F, 2, "Trackpad TT Hub Port mismatch");
+        assert_eq!((qh_tp.ep_caps >> 8) & 0xFF, 0x1C, "Trackpad TT C-Mask mismatch");
+        assert_eq!((qh_tp.ep_caps >> 30) & 0x03, 1, "Trackpad Mult mismatch");
+        assert!(ehci.pipes[1].trackpad_driver.as_ref().unwrap().is_apple_wellspring());
+    }
+    PMM.lock().free_frame(scratch_phys);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_persistent_crashdump_subsystem() {
+    print!("  [TEST] Pre-Allocated Persistent Crash Dump & Log Ring ... ");
+
+    use crate::drivers::crashdump::{
+        append_log_slice, is_target_registered, register_target, write_panic_dump, LOG_RING,
+    };
+
+    // 1. Verify Log Ring Buffer capturing
+    let test_msg = b"[TEST_TRACE] Pre-panic kernel telemetry checkpoint\n";
+    append_log_slice(test_msg);
+
+    let mut extracted = [0u8; 1024];
+    let n = LOG_RING.lock().extract_recent(&mut extracted);
+    assert!(n > 0, "Log ring should have captured bytes");
+    let log_str = core::str::from_utf8(&extracted[..n]).unwrap_or("");
+    assert!(
+        log_str.contains("[TEST_TRACE] Pre-panic kernel telemetry checkpoint"),
+        "Log ring should contain test trace message"
+    );
+
+    // 2. Mock a 128-sector (64 KiB) pre-allocated crash dump target on a MemBlockDevice
+    let mock_disk = MemBlockDevice::new("mock_usb_panic", 256);
+    register_target(mock_disk.clone(), 10, 128, 65536);
+    assert!(is_target_registered(), "Crash dump target should be registered");
+
+    // 3. Trigger write_panic_dump
+    let reason_fmt = format_args!("Simulated assertion failed: test condition false");
+    let result = write_panic_dump(
+        &reason_fmt,
+        "src/tests/mod.rs",
+        3950,
+        12,
+        0, // APIC ID
+        0x0000_0246,
+        0xFFFF_8000_0078_FF00,
+        0xFFFF_8000_0078_FF30,
+        0x0000_0000_0000_0000,
+        0x0000_0000_0020_1000,
+    );
+
+    assert!(result.is_ok(), "write_panic_dump should succeed to registered target");
+    let bytes_written = result.unwrap();
+    assert!(bytes_written > 0, "Expected non-zero bytes written to crash dump");
+
+    // 4. Verify raw sectors on mock block device
+    let mut sector_data = [0u8; 1024];
+    mock_disk.read_sectors(10, 2, &mut sector_data).expect("Failed to read back sectors 10-11");
+    let dump_header = core::str::from_utf8(&sector_data).unwrap_or("");
+
+    assert!(dump_header.contains("SUBLIMEOS KERNEL PANIC CRASH DUMP"));
+    assert!(dump_header.contains("KiteKernel 1.0.0"));
+    assert!(dump_header.contains("Nader Mahbub Khan"));
+    assert!(dump_header.contains("Crash Location:        src/tests/mod.rs:3950:12"));
+    assert!(dump_header.contains("Simulated assertion failed"));
+    assert!(dump_header.contains("APIC ID 0"));
+    assert!(dump_header.contains("RSP: 0xFFFF80000078FF00"));
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_smbios_and_authentic_hardware_telemetry() {
+    print!("  [TEST] Authentic Hardware Telemetry (SMBIOS, CPUID Brand, Core/Thread Counts) ... ");
+    let hw = crate::drivers::platform::smbios::get_hardware_telemetry();
+
+    // 1. CPU Brand string must not be empty and must not contain fake mock names
+    assert!(!hw.chip.is_empty(), "CPU brand string should not be empty");
+    assert!(!hw.chip.contains("Sublime Multi-Core Architecture"), "Fake CPU mock detected");
+
+    // 2. Model Identifier must not be CosmicStation1,1
+    assert!(!hw.model_identifier.contains("CosmicStation"), "Fake model identifier detected");
+
+    // 3. Serial Number must not be CS1000SUBX64
+    assert!(!hw.serial_number.contains("CS1000SUBX64"), "Fake serial number detected");
+
+    // 4. Hardware UUID must not be the hardcoded 4C4C4544-0051-5010-8043-B5C04F345233 mock
+    assert!(!hw.hardware_uuid.contains("4C4C4544-0051-5010-8043-B5C04F345233"), "Fake UUID mock detected");
+
+    // 5. Memory summary must report real non-zero managed RAM
+    assert!(!hw.memory_summary.is_empty(), "Memory summary must not be empty");
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

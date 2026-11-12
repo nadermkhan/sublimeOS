@@ -246,13 +246,86 @@ impl Canvas {
         }
     }
 
-    /// Fast copy to the VBE linear framebuffer.
+    /// Fast copy to the framebuffer (assumes packed 32bpp BGRA with pitch == width * 4).
     pub fn copy_to_framebuffer(&self, fb_ptr: *mut u32) {
+        self.blit_to_framebuffer(fb_ptr, self.width * 4, 32, 16, 8, 0);
+    }
+
+    /// Blit canvas pixels to an arbitrary UEFI GOP / Multiboot Linear Framebuffer,
+    /// honoring scanline byte `pitch`, `bpp` (24 or 32), and RGB/BGR channel shifts.
+    pub fn blit_to_framebuffer(
+        &self,
+        fb_ptr: *mut u32,
+        pitch: u32,
+        bpp: u32,
+        red_pos: u8,
+        green_pos: u8,
+        blue_pos: u8,
+    ) {
         if fb_ptr.is_null() {
             return;
         }
-        unsafe {
-            core::ptr::copy_nonoverlapping(self.buffer.as_ptr(), fb_ptr, self.buffer.len());
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let stride = (pitch as usize).max(w * 4);
+
+        if bpp == 32 && red_pos == 16 && green_pos == 8 && blue_pos == 0 {
+            if stride == w * 4 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(self.buffer.as_ptr(), fb_ptr, self.buffer.len());
+                }
+            } else {
+                let dst_bytes = fb_ptr as *mut u8;
+                for y in 0..h {
+                    unsafe {
+                        let dst_row = dst_bytes.add(y * stride) as *mut u32;
+                        let src_row = self.buffer.as_ptr().add(y * w);
+                        core::ptr::copy_nonoverlapping(src_row, dst_row, w);
+                    }
+                }
+            }
+            return;
+        }
+
+        let dst_bytes = fb_ptr as *mut u8;
+        if bpp == 32 {
+            for y in 0..h {
+                let dst_row = unsafe { dst_bytes.add(y * stride) as *mut u32 };
+                let src_base = y * w;
+                for x in 0..w {
+                    let argb = self.buffer[src_base + x];
+                    let r = (argb >> 16) & 0xFF;
+                    let g = (argb >> 8) & 0xFF;
+                    let b = argb & 0xFF;
+                    let packed = (r << red_pos) | (g << green_pos) | (b << blue_pos);
+                    unsafe {
+                        core::ptr::write_volatile(dst_row.add(x), packed);
+                    }
+                }
+            }
+        } else if bpp == 24 {
+            let bpp_stride = (pitch as usize).max(w * 3);
+            for y in 0..h {
+                let dst_row = unsafe { dst_bytes.add(y * bpp_stride) };
+                let src_base = y * w;
+                for x in 0..w {
+                    let argb = self.buffer[src_base + x];
+                    let r = ((argb >> 16) & 0xFF) as u8;
+                    let g = ((argb >> 8) & 0xFF) as u8;
+                    let b = (argb & 0xFF) as u8;
+                    unsafe {
+                        if red_pos == 16 {
+                            *dst_row.add(x * 3) = b;
+                            *dst_row.add(x * 3 + 1) = g;
+                            *dst_row.add(x * 3 + 2) = r;
+                        } else {
+                            *dst_row.add(x * 3) = r;
+                            *dst_row.add(x * 3 + 1) = g;
+                            *dst_row.add(x * 3 + 2) = b;
+                        }
+                    }
+                }
+            }
         }
     }
 }

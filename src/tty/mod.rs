@@ -38,6 +38,7 @@ impl TtyManager {
             self.active_index = index;
             let vga_ptr = VGA_BUFFER_ADDR as *mut ScreenChar;
             self.consoles[self.active_index].flush_to_vga(vga_ptr);
+            crate::drivers::gop_console::flush_tty_console(&self.consoles[self.active_index]);
             self.update_hardware_cursor();
         }
     }
@@ -49,6 +50,7 @@ impl TtyManager {
         // Update physical screen
         let vga_ptr = VGA_BUFFER_ADDR as *mut ScreenChar;
         self.consoles[active].flush_to_vga(vga_ptr);
+        crate::drivers::gop_console::tty_write_bytes(&[byte]);
         self.update_hardware_cursor();
     }
 
@@ -58,6 +60,7 @@ impl TtyManager {
 
         let vga_ptr = VGA_BUFFER_ADDR as *mut ScreenChar;
         self.consoles[active].flush_to_vga(vga_ptr);
+        crate::drivers::gop_console::tty_write_bytes(s.as_bytes());
         self.update_hardware_cursor();
     }
 
@@ -120,7 +123,7 @@ pub fn init() {
 
     // Initialize ttys001 with a secondary shell banner
     tty.consoles[1].write_string("\x1b[36m=== CosmicOS Virtual Console [ttys001] ===\x1b[0m\n");
-    tty.consoles[1].write_string("Secondary zsh session ready.\n\n");
+    tty.consoles[1].write_string("Secondary cosmicsh session ready.\n\n");
 
     // Initialize ttys002 as Console.app / dmesg
     tty.consoles[2].write_string("\x1b[33m=== CosmicOS Console [ttys002 - log stream] ===\x1b[0m\n");
@@ -133,4 +136,9 @@ pub fn init() {
     // TTY 1 is active by default
     tty.consoles[0].flush_to_vga(vga_ptr);
     tty.update_hardware_cursor();
+}
+
+/// Inject an input character from USB HID or external input devices into the active TTY/shell input stream.
+pub fn push_input_char(ch: char) {
+    crate::drivers::keyboard::push_char(ch as u8);
 }

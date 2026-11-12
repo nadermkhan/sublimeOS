@@ -112,6 +112,15 @@ pub fn alloc_process(name: &str) -> ProcessId {
     pid
 }
 
+/// Allocate and initialize the master init process strictly as PID 1.
+pub fn alloc_init_process() -> ProcessId {
+    let mut table = PROCESS_TABLE.lock();
+    table.retain(|p| p.lock().pid != 1);
+    let pcb = Arc::new(IrqSafeSpinlock::new(ProcessControlBlock::new(1, 0, "init")));
+    table.push(pcb);
+    1
+}
+
 /// Look up a process by PID.
 pub fn get_process(pid: ProcessId) -> Option<Arc<IrqSafeSpinlock<ProcessControlBlock>>> {
     let table = PROCESS_TABLE.lock();
@@ -609,12 +618,38 @@ pub fn sys_open(path_ptr: *const u8, flags: i32, _mode: i32) -> i64 {
         crate::tty::pty::allocate_pty_master()
     } else {
         let vfs = crate::fs::vfs::VFS.lock();
-        let n = match vfs.resolve_path(path_str) {
-            Ok(n) => n,
-            Err(_) => return -2, // -ENOENT
-        };
-        drop(vfs);
-        n
+        match vfs.resolve_path(path_str) {
+            Ok(n) => {
+                if (flags & 0x200) != 0 {
+                    // O_TRUNC: truncate existing file
+                    let _ = n.lock().truncate(0);
+                }
+                n
+            }
+            Err(_) => {
+                if (flags & 0x40) != 0 {
+                    // O_CREAT: create file in parent directory
+                    let mut parts: alloc::vec::Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
+                    if parts.is_empty() {
+                        return -22;
+                    }
+                    let filename = parts.pop().unwrap();
+                    let parent_path = if parts.is_empty() { "/" } else { &path_str[..path_str.rfind('/').unwrap_or(0)] };
+                    let parent = match vfs.resolve_path(parent_path) {
+                        Ok(p) => p,
+                        Err(_) => return -2,
+                    };
+                    drop(vfs);
+                    let created = match parent.lock().create(filename, crate::fs::vfs::FileType::Regular) {
+                        Ok(n) => n,
+                        Err(_) => return -13, // -EACCES
+                    };
+                    created
+                } else {
+                    return -2; // -ENOENT
+                }
+            }
+        }
     };
 
     let file = Arc::new(crate::fs::vfs::File::new(inode, flags as u32));
@@ -1106,21 +1141,38 @@ pub fn sys_mmap(
 
         if is_fb {
             let vbe = crate::drivers::vbe::VBE.lock();
-            let phys = if vbe.lfb_phys > 0 { vbe.lfb_phys } else { 0xFD000000 };
+            let phys = vbe.lfb_phys;
             drop(vbe);
 
-            if let Some(ref mut aspace) = p.address_space {
-                if aspace.map_phys_region(
-                    target_addr,
-                    length as u64,
-                    phys,
-                    map_flags,
-                    crate::mm::address_space::VmaType::Mmap,
-                ).is_ok() {
-                    return target_addr as i64;
+            let fb_flags = map_flags | crate::mm::vmm::PAGE_WRITE_COMBINING;
+
+            if phys != 0 {
+                if let Some(ref mut aspace) = p.address_space {
+                    if aspace.map_phys_region(
+                        target_addr,
+                        length as u64,
+                        phys,
+                        fb_flags,
+                        crate::mm::address_space::VmaType::Mmap,
+                    ).is_ok() {
+                        return target_addr as i64;
+                    }
                 }
+                return -12; // -ENOMEM
+            } else {
+                // Virtual RAM-backed fallback: map allocated RAM pages
+                if let Some(ref mut aspace) = p.address_space {
+                    if aspace.map_region(
+                        target_addr,
+                        length as u64,
+                        map_flags,
+                        crate::mm::address_space::VmaType::Mmap,
+                    ).is_ok() {
+                        return target_addr as i64;
+                    }
+                }
+                return -12; // -ENOMEM
             }
-            return -12; // -ENOMEM
         }
 
         // Check if file inode provides physical frames (e.g. POSIX shared memory ShmObject)

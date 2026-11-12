@@ -112,6 +112,19 @@ impl Fat32FileSystem {
         self.data_start_lba + ((cluster.saturating_sub(2)) as u64 * self.sectors_per_cluster as u64)
     }
 
+    pub fn probe_and_register_crash_dump(self: &Arc<Self>, raw_device: &Arc<dyn BlockDevice>) {
+        let root = Fat32Inode {
+            fs: self.clone(),
+            start_cluster: self.root_cluster,
+            size: 0,
+            file_type: crate::fs::vfs::FileType::Directory,
+            name: alloc::string::String::from("/"),
+            parent_cluster: self.root_cluster,
+            dir_entry_offset: 0,
+        };
+        root.probe_and_register_crash_dump(raw_device);
+    }
+
     pub fn next_cluster(&self, cluster: u32) -> Result<Option<u32>, &'static str> {
         let fat_offset = (cluster as u64) * 4;
         let fat_sector = self.fat_start_lba + (fat_offset / 512);
@@ -591,7 +604,32 @@ impl Fat32Inode {
         }
     }
 
-    fn readdir_internal(&self) -> Result<Vec<(String, u32, usize, bool, usize)>, &'static str> {
+    /// Discover pre-allocated `PANIC.LOG` in this directory (usually root) and register as crash dump target.
+    pub fn probe_and_register_crash_dump(&self, raw_device: &Arc<dyn BlockDevice>) {
+        if let Ok(entries) = self.readdir_internal() {
+            for (name, start_cluster, size, is_dir, _) in entries {
+                if !is_dir && (name.eq_ignore_ascii_case("PANIC.LOG") || name.eq_ignore_ascii_case("PANIC.TXT")) {
+                    let start_lba = self.fs.cluster_to_lba(start_cluster);
+                    let sector_count = ((size + 511) / 512).max(1) as u32;
+                    crate::drivers::crashdump::register_target(
+                        raw_device.clone(),
+                        start_lba,
+                        sector_count,
+                        size,
+                    );
+                    crate::kinfo!(
+                        "CrashDump: Persistent crash log target registered at LBA 0x{:X} ({} KB, {} sectors)",
+                        start_lba,
+                        size / 1024,
+                        sector_count
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn readdir_internal(&self) -> Result<Vec<(String, u32, usize, bool, usize)>, &'static str> {
         let mut list = Vec::new();
         let mut curr_cluster = self.start_cluster;
         let mut cluster_buf = [0u8; 4096];

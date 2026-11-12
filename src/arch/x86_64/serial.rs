@@ -3,7 +3,6 @@ use alloc::collections::VecDeque;
 use core::fmt;
 use crate::arch::x86_64::idt::{register_irq_handler, InterruptContext};
 use crate::arch::x86_64::io::{inb, outb};
-use crate::arch::x86_64::pic::unmask;
 use crate::fs::vfs::{FileType, InodeOperations, Stat};
 use crate::sync::IrqSafeSpinlock;
 use crate::kinfo;
@@ -313,7 +312,7 @@ pub fn init() {
         let chip = COM1.lock().chip_type;
         kinfo!("UART COM1 online at 0x{:03X} (115200 8-N-1, {:?}, IRQ 4)", COM1_PORT, chip);
         register_irq_handler(4, uart_irq4_handler);
-        unmask(4);
+        crate::arch::x86_64::ioapic::unmask_isa_irq(4);
     }
 
     // 2. Initialize COM2
@@ -322,7 +321,7 @@ pub fn init() {
         let chip = COM2.lock().chip_type;
         kinfo!("UART COM2 online at 0x{:03X} (115200 8-N-1, {:?}, IRQ 3)", COM2_PORT, chip);
         register_irq_handler(3, uart_irq3_handler);
-        unmask(3);
+        crate::arch::x86_64::ioapic::unmask_isa_irq(3);
     }
 }
 

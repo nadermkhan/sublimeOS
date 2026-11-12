@@ -186,6 +186,14 @@ impl<'a> ElfBinary<'a> {
     /// Load the ELF PT_LOAD segments and user stack into the given AddressSpace.
     /// Returns (entry_point, user_stack_top).
     pub fn load_into_address_space(&self, addr_space: &mut AddressSpace) -> Result<(u64, u64), &'static str> {
+        self.load_into_address_space_with_args(addr_space, &[])
+    }
+
+    pub fn load_into_address_space_with_args(
+        &self,
+        addr_space: &mut AddressSpace,
+        args: &[&str],
+    ) -> Result<(u64, u64), &'static str> {
         let vmm = VMM.lock();
         let pml4 = unsafe { &mut *(phys_to_virt(addr_space.pml4_phys) as *mut crate::mm::vmm::PageTable) };
 
@@ -260,6 +268,7 @@ impl<'a> ElfBinary<'a> {
 
         // Allocate and map User Stack (16 pages = 64 KiB)
         let stack_bottom = USER_STACK_TOP - (USER_STACK_PAGES * PAGE_SIZE as u64);
+        let mut top_virt_frame: *mut u8 = core::ptr::null_mut();
         for p in 0..USER_STACK_PAGES {
             let curr_page = stack_bottom + p * (PAGE_SIZE as u64);
             let frame = PMM.lock().alloc_frame().ok_or("Out of physical memory for user stack")?;
@@ -267,6 +276,10 @@ impl<'a> ElfBinary<'a> {
 
             unsafe {
                 core::ptr::write_bytes(virt_frame, 0, PAGE_SIZE);
+            }
+
+            if p == USER_STACK_PAGES - 1 {
+                top_virt_frame = virt_frame;
             }
 
             vmm.map_page(pml4, curr_page, frame, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER)?;
@@ -279,9 +292,77 @@ impl<'a> ElfBinary<'a> {
             vma_type: VmaType::Stack,
         });
 
-        // Align stack top to 16 bytes minus 8 (standard AMD64 ABI stack alignment for initial RIP entry)
-        let user_rsp = (USER_STACK_TOP - 16) & !0xF;
+        // Set up initial stack with System V AMD64 ABI argc, argv, and strings
+        let user_rsp = if !top_virt_frame.is_null() {
+            setup_user_stack_args(top_virt_frame, USER_STACK_TOP, args)
+        } else {
+            USER_STACK_TOP - 24
+        };
 
         Ok((self.header.entry, user_rsp))
     }
+}
+
+/// Set up System V AMD64 initial user stack: [argc, argv[0], ..., argv[N], NULL, envp NULL, string data].
+/// Ensures initial user_rsp % 16 == 8 so that 'pop rdi' leaves rsp 16-byte aligned before 'call'.
+fn setup_user_stack_args(top_page: *mut u8, user_stack_top: u64, args: &[&str]) -> u64 {
+    if args.is_empty() {
+        let sp_offset = 4096 - 24;
+        unsafe {
+            let ptr = top_page.add(sp_offset) as *mut u64;
+            *ptr = 0;        // argc = 0
+            *ptr.add(1) = 0; // argv[0] = NULL
+            *ptr.add(2) = 0; // envp NULL
+        }
+        return user_stack_top - 24;
+    }
+
+    let mut str_offset = 4096usize;
+    let mut arg_vaddrs = alloc::vec::Vec::new();
+
+    for arg in args {
+        let bytes = arg.as_bytes();
+        let len = bytes.len() + 1; // include null terminator
+        if str_offset < len + 256 {
+            break;
+        }
+        str_offset -= len;
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), top_page.add(str_offset), bytes.len());
+            *top_page.add(str_offset + bytes.len()) = 0;
+        }
+        let vaddr = user_stack_top - (4096 - str_offset as u64);
+        arg_vaddrs.push(vaddr);
+    }
+
+    // Align str_offset down to 8 bytes
+    str_offset &= !0x7;
+
+    // Entries: argc (1), argv pointers (arg_vaddrs.len()), argv NULL (1), envp NULL (1)
+    let total_entries = 3 + arg_vaddrs.len();
+    let table_bytes = total_entries * 8;
+    let mut sp_offset = str_offset.saturating_sub(table_bytes);
+
+    if sp_offset % 16 != 8 {
+        sp_offset = sp_offset.saturating_sub(8);
+    }
+
+    unsafe {
+        let mut ptr = top_page.add(sp_offset) as *mut u64;
+        // 1. argc
+        *ptr = arg_vaddrs.len() as u64;
+        ptr = ptr.add(1);
+        // 2. argv[0..argc]
+        for &vaddr in &arg_vaddrs {
+            *ptr = vaddr;
+            ptr = ptr.add(1);
+        }
+        // 3. argv NULL sentinel
+        *ptr = 0;
+        ptr = ptr.add(1);
+        // 4. envp NULL sentinel
+        *ptr = 0;
+    }
+
+    user_stack_top - (4096 - sp_offset as u64)
 }

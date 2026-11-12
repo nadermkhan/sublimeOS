@@ -75,6 +75,9 @@ ISR_NOERRCODE 45  /* IRQ 13: FPU */
 ISR_NOERRCODE 46  /* IRQ 14: Primary ATA */
 ISR_NOERRCODE 47  /* IRQ 15: Secondary ATA */
 
+/* Local APIC Timer vector 0x30 (48) */
+ISR_NOERRCODE 48
+
 /* Syscall vector 0x80 (128) */
 ISR_NOERRCODE 128
 

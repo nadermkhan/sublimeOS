@@ -199,11 +199,7 @@ impl RealtekDevice {
 
         // 4. Configure RX buffer pointer
         let rx_ptr = self.rx_buffer.lock().as_ptr() as usize;
-        let rx_phys = if rx_ptr >= 0xFFFFFFFF80000000 {
-            (rx_ptr - 0xFFFFFFFF80000000) as u32
-        } else {
-            rx_ptr as u32
-        };
+        let rx_phys = crate::mm::virt_to_phys(rx_ptr as u64) as u32;
         self.write_reg32(REG_RBSTART, rx_phys);
 
         // 5. Configure Receive settings (Accept Broadcast, Multicast, Physical match, All packets)
@@ -237,11 +233,7 @@ impl NetDevice for RealtekDevice {
         let tsd_reg = REG_TSD0 + (desc as u16) * 4;
 
         // Allocate bounce buffer for transmit
-        let tx_phys = if (packet.as_ptr() as usize) >= 0xFFFFFFFF80000000 {
-            ((packet.as_ptr() as usize) - 0xFFFFFFFF80000000) as u32
-        } else {
-            packet.as_ptr() as usize as u32
-        };
+        let tx_phys = crate::mm::virt_to_phys(packet.as_ptr() as usize as u64) as u32;
 
         self.write_reg32(tsad_reg, tx_phys);
         // Writing size to TSD triggers hardware DMA transmission

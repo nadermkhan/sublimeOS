@@ -7,6 +7,8 @@ pub const PAGE_PRESENT: u64 = 1 << 0;
 pub const PAGE_WRITABLE: u64 = 1 << 1;
 pub const PAGE_USER: u64 = 1 << 2;
 pub const PAGE_WRITE_THROUGH: u64 = 1 << 3;
+/// Write-Combining memory type (selects PAT Entry 1 = 0x01 WC via PCD=0, PWT=1, PAT=0)
+pub const PAGE_WRITE_COMBINING: u64 = 1 << 3;
 pub const PAGE_NO_CACHE: u64 = 1 << 4;
 pub const PAGE_ACCESSED: u64 = 1 << 5;
 pub const PAGE_DIRTY: u64 = 1 << 6;

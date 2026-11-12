@@ -4,6 +4,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::drivers::storage::{BlockDevice, STORAGE_MANAGER};
+use crate::fs::bcache::CachedBlockDevice;
 use crate::fs::exfat::{ExFatFileSystem, ExFatInode};
 use crate::fs::ext4::{Ext4FileSystem, Ext4Inode};
 use crate::fs::fat32::{Fat32FileSystem, Fat32Inode};
@@ -92,8 +93,9 @@ pub fn probe_filesystem(
 
     // 4. Check for FAT32
     if sector0[510] == 0x55 && sector0[511] == 0xAA {
-        if let Ok(fs) = Fat32FileSystem::mount(device) {
+        if let Ok(fs) = Fat32FileSystem::mount(device.clone()) {
             let label = fs.volume_label.clone();
+            fs.probe_and_register_crash_dump(&device);
             let root = Fat32Inode::new_root(fs);
             return Ok((root, "fat32", label));
         }
@@ -104,7 +106,8 @@ pub fn probe_filesystem(
 
 /// Mount a single partition device into /Volumes/ if it contains a recognizable filesystem.
 pub fn mount_partition_device(part: Arc<dyn BlockDevice>) -> Result<String, &'static str> {
-    let (root_inode, fs_type, volume_label) = probe_filesystem(part.clone())?;
+    let cached_part: Arc<dyn BlockDevice> = Arc::new(CachedBlockDevice::new(part.clone()));
+    let (root_inode, fs_type, volume_label) = probe_filesystem(cached_part)?;
 
     let vfs = VFS.lock();
     let vol_dir = vfs.resolve_path("/Volumes")?;
@@ -162,6 +165,11 @@ pub fn mount_all_storage() {
     let storage = STORAGE_MANAGER.lock();
     let num_devices = storage.devices.len();
     drop(storage);
+
+    if num_devices == 0 {
+        kinfo!("Storage: No physical disk devices discovered; running cleanly from in-memory RamFS (/tmp, /Volumes).");
+        return;
+    }
 
     for dev_idx in 0..num_devices {
         let dev = {

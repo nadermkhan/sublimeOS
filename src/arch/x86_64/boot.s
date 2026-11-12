@@ -33,8 +33,8 @@ multiboot2_header:
 .short 5           /* type: 5 = framebuffer request */
 .short 0           /* flags: 0 */
 .long 20           /* size: 20 bytes */
-.long 1024         /* width: 1024 */
-.long 768          /* height: 768 */
+.long 0            /* width: 0 = prefer native GOP panel width */
+.long 0            /* height: 0 = prefer native GOP panel height */
 .long 32           /* depth: 32 bpp */
 
 /* Multiboot 2 Information Request Tag (Type 1) */
@@ -98,9 +98,9 @@ _start:
     mov eax, offset early_pml4
     mov cr3, eax
 
-    /* Enable PAE (Physical Address Extension) in CR4 */
+    /* Enable PAE (bit 5), OSFXSR (bit 9), and OSXMMEXCPT (bit 10) in CR4 */
     mov eax, cr4
-    or eax, 1 << 5
+    or eax, (1 << 5) | (1 << 9) | (1 << 10)
     mov cr4, eax
 
     /* Enable Long Mode (LME) and NX bit in EFER MSR (0xC0000080) */
@@ -109,9 +109,10 @@ _start:
     or eax, (1 << 8) | (1 << 11)
     wrmsr
 
-    /* Enable Paging (PG) and Write Protect (WP) in CR0 */
+    /* Enable Paging (PG), Write Protect (WP), MP in CR0 and clear EM */
     mov eax, cr0
-    or eax, (1 << 31) | (1 << 16) | 1
+    and eax, ~(1 << 2)
+    or eax, (1 << 31) | (1 << 16) | (1 << 1) | 1
     mov cr0, eax
 
     /* Load 64-bit GDT */
@@ -137,13 +138,38 @@ no_long_mode:
  * Populate early page tables:
  * - Identity map first 1 GiB using 2 MiB huge pages
  * - Higher-half map first 1 GiB at 0xFFFFFFFF80000000 using 2 MiB huge pages
+ * - Higher-half Direct Map (HHDM) 64 GiB at 0xFFFF800000000000 using 2 MiB huge pages
  */
 setup_early_paging:
+    /* Zero out page table structures in .boot.bss */
+    mov edi, offset early_pml4
+    mov ecx, 1024
+    xor eax, eax
+    rep stosd
+
+    mov edi, offset early_pdpt_identity
+    mov ecx, 1024
+    rep stosd
+
+    mov edi, offset early_pdpt_higher
+    mov ecx, 1024
+    rep stosd
+
+    mov edi, offset early_pdpt_physmap
+    mov ecx, 1024
+    rep stosd
+
     /* Link PML4[0] -> early_pdpt_identity (Flags: Present=1, Writable=2) */
     mov eax, offset early_pdpt_identity
     or eax, 0x03
     mov dword ptr [early_pml4], eax
     mov dword ptr [early_pml4 + 4], 0
+
+    /* Link PML4[256] -> early_pdpt_physmap (0xFFFF800000000000 HHDM) */
+    mov eax, offset early_pdpt_physmap
+    or eax, 0x03
+    mov dword ptr [early_pml4 + 256 * 8], eax
+    mov dword ptr [early_pml4 + 256 * 8 + 4], 0
 
     /* Link PML4[511] -> early_pdpt_higher (0xFFFFFF8000000000) */
     mov eax, offset early_pdpt_higher
@@ -184,6 +210,31 @@ setup_early_paging:
     inc ecx
     cmp ecx, 512
     jne .Lloop2
+
+    /* Link early_pdpt_physmap[0..63] -> early_pd_physmap[0..63] */
+    xor ecx, ecx
+    mov eax, offset early_pd_physmap
+    or eax, 0x03
+.Lloop_pdpt_physmap:
+    mov dword ptr [early_pdpt_physmap + ecx * 8], eax
+    mov dword ptr [early_pdpt_physmap + ecx * 8 + 4], 0
+    add eax, 4096
+    inc ecx
+    cmp ecx, 64
+    jne .Lloop_pdpt_physmap
+
+    /* Populate early_pd_physmap with 32768 * 2 MiB pages (64 GiB) */
+    xor ecx, ecx
+    mov ebx, 0x83 /* Present | Writable | Huge (2MB) */
+    xor edx, edx
+.Lloop_pd_physmap:
+    mov dword ptr [early_pd_physmap + ecx * 8], ebx
+    mov dword ptr [early_pd_physmap + ecx * 8 + 4], edx
+    add ebx, 0x200000
+    adc edx, 0
+    inc ecx
+    cmp ecx, 32768
+    jne .Lloop_pd_physmap
 
     ret
 
@@ -252,6 +303,10 @@ early_pd_identity:
     .skip 4096
 early_pd_higher:
     .skip 4096
+early_pdpt_physmap:
+    .skip 4096
+early_pd_physmap:
+    .skip 262144                /* 64 Page Directories = 256 KiB (maps 64 GiB using 2 MiB huge pages) */
 
 .align 16
 boot_stack_bottom:
@@ -263,5 +318,5 @@ boot_stack_top:
 .global kernel_stack_bottom
 .global kernel_stack_top
 kernel_stack_bottom:
-    .skip 65536                 /* 64 KiB kernel stack */
+    .skip 524288                /* 512 KiB kernel stack */
 kernel_stack_top:

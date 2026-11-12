@@ -4,10 +4,10 @@ use alloc::sync::Arc;
 use crate::drivers::pci::{PciBus, PCI};
 use crate::drivers::storage::BlockDevice;
 use crate::mm::phys_to_virt;
-use crate::mm::pmm::PMM;
+use crate::mm::pmm::alloc_zeroed_frame;
 use crate::mm::vmm::map_mmio_range;
 use crate::sync::IrqSafeSpinlock;
-use crate::kinfo;
+use crate::{kinfo, kwarn};
 
 // Generic Host Control Register Offsets
 pub const HOST_CAP: usize = 0x00;
@@ -345,6 +345,10 @@ impl BlockDevice for AhciDisk {
     }
 
     fn write_sectors(&self, lba: u64, count: u32, buf: &[u8]) -> Result<(), &'static str> {
+        let is_panicked = crate::arch::x86_64::vga::PANICKED.load(core::sync::atomic::Ordering::Relaxed);
+        if is_panicked {
+            unsafe { self.port.force_unlock(); }
+        }
         self.port.lock().write_sector_dma(lba, count, buf)
     }
 
@@ -354,116 +358,128 @@ impl BlockDevice for AhciDisk {
 }
 
 pub fn init() {
-    let pci = PCI.lock();
-    let mut controller_found = false;
+    let ahci_devs: alloc::vec::Vec<_> = {
+        let pci = PCI.lock();
+        pci.devices
+            .iter()
+            .filter(|dev| dev.class_code == 0x01 && dev.subclass == 0x06 && dev.prog_if == 0x01)
+            .cloned()
+            .collect()
+    };
 
-    for dev in pci.devices.iter() {
-        if dev.class_code == 0x01 && dev.subclass == 0x06 && dev.prog_if == 0x01 {
-            controller_found = true;
-            let abar_phys = dev.read_bar(5);
-            kinfo!(
-                "AHCI SATA Controller Found: Vendor 0x{:04X}, Device 0x{:04X}, Bus {}:{}:{}, ABAR: 0x{:X}",
-                dev.vendor_id,
-                dev.device_id,
-                dev.bus,
-                dev.device,
-                dev.function,
-                abar_phys
-            );
+    if ahci_devs.is_empty() {
+        kinfo!("AHCI: No SATA AHCI controller discovered on PCI bus.");
+        return;
+    }
 
-            // Enable PCI Bus Mastering and Memory Space
-            unsafe {
-                PciBus::enable_bus_mastering(dev.bus, dev.device, dev.function);
+    for dev in ahci_devs {
+        let abar_phys = dev.read_bar(5);
+        if abar_phys == 0 {
+            kwarn!("AHCI: Controller at Bus {}:{}:{} has null BAR5 ABAR; skipping.", dev.bus, dev.device, dev.function);
+            continue;
+        }
+        kinfo!(
+            "AHCI SATA Controller Found: Vendor 0x{:04X}, Device 0x{:04X}, Bus {}:{}:{}, ABAR: 0x{:X}",
+            dev.vendor_id,
+            dev.device_id,
+            dev.bus,
+            dev.device,
+            dev.function,
+            abar_phys
+        );
+
+        // Enable PCI Bus Mastering and Memory Space
+        unsafe {
+            PciBus::enable_bus_mastering(dev.bus, dev.device, dev.function);
+        }
+
+        let mmio_virt = match map_mmio_range(abar_phys, 8192) {
+            Ok(v) => v,
+            Err(e) => {
+                kwarn!("Failed to map AHCI ABAR MMIO: {}", e);
+                continue;
             }
+        };
 
-            let mmio_virt = match map_mmio_range(abar_phys, 8192) {
-                Ok(v) => v,
-                Err(e) => {
-                    kinfo!("Failed to map AHCI ABAR MMIO: {}", e);
-                    continue;
-                }
-            };
+        // Read Generic Host Control
+        let ghc_ptr = (mmio_virt + HOST_GHC as u64) as *mut u32;
+        let pi_ptr = (mmio_virt + HOST_PI as u64) as *const u32;
+        let vs_ptr = (mmio_virt + HOST_VS as u64) as *const u32;
 
-            // Read Generic Host Control
-            let ghc_ptr = (mmio_virt + HOST_GHC as u64) as *mut u32;
-            let pi_ptr = (mmio_virt + HOST_PI as u64) as *const u32;
-            let vs_ptr = (mmio_virt + HOST_VS as u64) as *const u32;
+        unsafe {
+            // Enable AHCI mode (GHC.AE = 1)
+            core::ptr::write_volatile(ghc_ptr, core::ptr::read_volatile(ghc_ptr) | (1 << 31));
+        }
 
-            unsafe {
-                // Enable AHCI mode (GHC.AE = 1)
-                core::ptr::write_volatile(ghc_ptr, core::ptr::read_volatile(ghc_ptr) | (1 << 31));
-            }
+        let pi = unsafe { core::ptr::read_volatile(pi_ptr) };
+        let vs = unsafe { core::ptr::read_volatile(vs_ptr) };
+        kinfo!("AHCI Controller Online: Version {}.{}, Implemented Ports Mask: 0x{:08X}", (vs >> 16), vs & 0xFFFF, pi);
 
-            let pi = unsafe { core::ptr::read_volatile(pi_ptr) };
-            let vs = unsafe { core::ptr::read_volatile(vs_ptr) };
-            kinfo!("AHCI Controller Online: Version {}.{}, Implemented Ports Mask: 0x{:08X}", (vs >> 16), vs & 0xFFFF, pi);
+        let mut disk_idx = 0;
+        for port_no in 0..32 {
+            if (pi & (1 << port_no)) != 0 {
+                let port_base = mmio_virt + 0x100 + (port_no as u64 * 0x80);
+                let ssts = unsafe { core::ptr::read_volatile((port_base + PORT_SSTS as u64) as *const u32) };
+                let sig = unsafe { core::ptr::read_volatile((port_base + PORT_SIG as u64) as *const u32) };
 
-            let mut disk_idx = 0;
-            for port_no in 0..32 {
-                if (pi & (1 << port_no)) != 0 {
-                    let port_base = mmio_virt + 0x100 + (port_no as u64 * 0x80);
-                    let ssts = unsafe { core::ptr::read_volatile((port_base + PORT_SSTS as u64) as *const u32) };
-                    let sig = unsafe { core::ptr::read_volatile((port_base + PORT_SIG as u64) as *const u32) };
+                // DET: bits 0..3 == 3, IPM: bits 8..11 == 1
+                let det = ssts & 0x0F;
+                let ipm = (ssts >> 8) & 0x0F;
 
-                    // DET: bits 0..3 == 3, IPM: bits 8..11 == 1
-                    let det = ssts & 0x0F;
-                    let ipm = (ssts >> 8) & 0x0F;
+                if det == 3 && ipm == 1 && sig == SATA_SIG_ATA {
+                    let (Some(cmd_list_frame), Some(fis_frame), Some(cmd_table_frame), Some(dma_buf_frame)) = (
+                        alloc_zeroed_frame(),
+                        alloc_zeroed_frame(),
+                        alloc_zeroed_frame(),
+                        alloc_zeroed_frame(),
+                    ) else {
+                        kwarn!("AHCI: Out of DMA frames for port {}", port_no);
+                        continue;
+                    };
 
-                    if det == 3 && ipm == 1 && sig == SATA_SIG_ATA {
-                        // Allocate DMA structures
-                        let cmd_list_frame = PMM.lock().alloc_frame().unwrap_or(0);
-                        let fis_frame = PMM.lock().alloc_frame().unwrap_or(0);
-                        let cmd_table_frame = PMM.lock().alloc_frame().unwrap_or(0);
-                        let dma_buf_frame = PMM.lock().alloc_frame().unwrap_or(0);
+                    let mut port = AhciPort {
+                        port_no,
+                        mmio_base: mmio_virt,
+                        cmd_list_phys: cmd_list_frame,
+                        fis_phys: fis_frame,
+                        cmd_table_phys: cmd_table_frame,
+                        dma_buf_phys: dma_buf_frame,
+                        total_sectors: 0,
+                        model: String::new(),
+                    };
 
-                        let mut port = AhciPort {
+                    port.stop_port();
+
+                    unsafe {
+                        port.write_reg(PORT_CLB, (cmd_list_frame & 0xFFFF_FFFF) as u32);
+                        port.write_reg(PORT_CLBU, ((cmd_list_frame >> 32) & 0xFFFF_FFFF) as u32);
+                        port.write_reg(PORT_FB, (fis_frame & 0xFFFF_FFFF) as u32);
+                        port.write_reg(PORT_FBU, ((fis_frame >> 32) & 0xFFFF_FFFF) as u32);
+                        port.write_reg(PORT_SERR, 0xFFFF_FFFF);
+                        port.write_reg(PORT_IS, 0xFFFF_FFFF);
+                    }
+
+                    port.start_port();
+
+                    let disk_name = alloc::format!("sda{}", disk_idx);
+                    if let Ok(sectors) = port.identify() {
+                        kinfo!(
+                            "AHCI Port {}: Attached SATA Drive '{}' ({} sectors, {} MB)",
                             port_no,
-                            mmio_base: mmio_virt,
-                            cmd_list_phys: cmd_list_frame,
-                            fis_phys: fis_frame,
-                            cmd_table_phys: cmd_table_frame,
-                            dma_buf_phys: dma_buf_frame,
-                            total_sectors: 0,
-                            model: String::new(),
-                        };
-
-                        port.stop_port();
-
-                        unsafe {
-                            port.write_reg(PORT_CLB, (cmd_list_frame & 0xFFFF_FFFF) as u32);
-                            port.write_reg(PORT_CLBU, ((cmd_list_frame >> 32) & 0xFFFF_FFFF) as u32);
-                            port.write_reg(PORT_FB, (fis_frame & 0xFFFF_FFFF) as u32);
-                            port.write_reg(PORT_FBU, ((fis_frame >> 32) & 0xFFFF_FFFF) as u32);
-                            port.write_reg(PORT_SERR, 0xFFFF_FFFF);
-                            port.write_reg(PORT_IS, 0xFFFF_FFFF);
-                        }
-
-                        port.start_port();
-
-                        let disk_name = alloc::format!("sda{}", disk_idx);
-                        if let Ok(sectors) = port.identify() {
-                            kinfo!(
-                                "AHCI Port {}: Attached SATA Drive '{}' ({} sectors, {} MB)",
-                                port_no,
-                                port.model,
-                                sectors,
-                                (sectors * 512) / (1024 * 1024)
-                            );
-                            let disk = Arc::new(AhciDisk {
-                                name: disk_name,
-                                port: IrqSafeSpinlock::new(port),
-                            });
-                            crate::drivers::storage::STORAGE_MANAGER.lock().register(disk);
-                            disk_idx += 1;
-                        }
+                            port.model,
+                            sectors,
+                            (sectors * 512) / (1024 * 1024)
+                        );
+                        let disk = Arc::new(AhciDisk {
+                            name: disk_name,
+                            port: IrqSafeSpinlock::new(port),
+                        });
+                        crate::drivers::storage::STORAGE_MANAGER.lock().register(disk);
+                        disk_idx += 1;
                     }
                 }
             }
-            break;
         }
-    }
-
-    if !controller_found {
-        kinfo!("AHCI SATA controller not detected (using ATA/IDE storage bus).");
+        break;
     }
 }

@@ -38,6 +38,7 @@ impl DevFsDirectory {
         entries.insert(String::from("disk0s1"), Arc::new(IrqSafeSpinlock::new(NullDev)));
         entries.insert(String::from("rtc"), Arc::new(IrqSafeSpinlock::new(RtcDev)));
         entries.insert(String::from("fb0"), Arc::new(IrqSafeSpinlock::new(FbDev)));
+        entries.insert(String::from("backlight"), Arc::new(IrqSafeSpinlock::new(BacklightDev)));
         entries.insert(String::from("ptmx"), Arc::new(IrqSafeSpinlock::new(crate::tty::pty::PtmxDev)));
         entries.insert(String::from("pts"), Arc::new(IrqSafeSpinlock::new(crate::tty::pty::PtsDirectory)));
         entries.insert(String::from("shm"), Arc::new(IrqSafeSpinlock::new(crate::mm::shm::ShmDirectory)));
@@ -170,6 +171,8 @@ impl InodeOperations for RtcDev {
 
 pub const FBIOGET_VSCREENINFO: u32 = 0x4600;
 pub const FBIO_BLIT_RECT: u32 = 0x4601;
+pub const FBIOGET_INFO: u32 = 0x4602;
+pub const FBIO_FLUSH_RECT: u32 = 0x4603;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -192,6 +195,31 @@ pub struct FbBlitRect {
     pub data_ptr: u64,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FbInfo {
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u32,
+    pub red_pos: u8,
+    pub red_mask: u8,
+    pub green_pos: u8,
+    pub green_mask: u8,
+    pub blue_pos: u8,
+    pub blue_mask: u8,
+    pub lfb_phys: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FbRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub struct FbDev;
 
 fn ensure_vbe() {
@@ -209,7 +237,15 @@ impl InodeOperations for FbDev {
         } else {
             1024 * 768 * 4
         };
-        let fb_ptr = if !vbe.framebuffer.is_null() {
+
+        // Prefer reading from fast RAM shadow buffer if GopConsole allocated one
+        let gop_shadow = crate::drivers::gop_console::GOP_CONSOLE
+            .try_lock()
+            .and_then(|c| if !c.shadow_fb.is_null() { Some(c.shadow_fb as *const u8) } else { None });
+
+        let read_ptr = if let Some(shadow_ptr) = gop_shadow {
+            shadow_ptr
+        } else if !vbe.framebuffer.is_null() {
             vbe.framebuffer as *const u8
         } else {
             crate::drivers::vbe::FRAMEBUFFER_VIRT_BASE as *const u8
@@ -222,7 +258,7 @@ impl InodeOperations for FbDev {
         let avail = total_size - offset;
         let count = avail.min(buf.len());
         unsafe {
-            core::ptr::copy_nonoverlapping(fb_ptr.add(offset), buf.as_mut_ptr(), count);
+            core::ptr::copy_nonoverlapping(read_ptr.add(offset), buf.as_mut_ptr(), count);
         }
         Ok(count)
     }
@@ -247,6 +283,17 @@ impl InodeOperations for FbDev {
         }
         let avail = total_size - offset;
         let count = avail.min(buf.len());
+
+        // Update RAM shadow buffer if present
+        if let Some(con) = crate::drivers::gop_console::GOP_CONSOLE.try_lock() {
+            if !con.shadow_fb.is_null() {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(buf.as_ptr(), con.shadow_fb.add(offset), count);
+                }
+            }
+        }
+
+        // Burst write to hardware Write-Combining framebuffer
         unsafe {
             core::ptr::copy_nonoverlapping(buf.as_ptr(), fb_ptr.add(offset), count);
         }
@@ -265,7 +312,7 @@ impl InodeOperations for FbDev {
                 let height = if vbe.height > 0 { vbe.height } else { 768 };
                 let bpp = if vbe.bpp > 0 { vbe.bpp } else { 32 };
                 let pitch = if vbe.pitch > 0 { vbe.pitch } else { width * 4 };
-                let phys = if vbe.lfb_phys > 0 { vbe.lfb_phys } else { 0xFD000000 };
+                let phys = vbe.lfb_phys;
                 let smem_len = pitch * height;
                 drop(vbe);
 
@@ -284,6 +331,31 @@ impl InodeOperations for FbDev {
                 }
                 Ok(0)
             }
+            FBIOGET_INFO => {
+                if arg == 0 {
+                    return Err("Invalid user pointer for FBIOGET_INFO");
+                }
+                let vbe = crate::drivers::vbe::VBE.lock();
+                let info = FbInfo {
+                    width: if vbe.width > 0 { vbe.width } else { 1024 },
+                    height: if vbe.height > 0 { vbe.height } else { 768 },
+                    pitch: if vbe.pitch > 0 { vbe.pitch } else { 4096 },
+                    bpp: if vbe.bpp > 0 { vbe.bpp } else { 32 },
+                    red_pos: vbe.red_pos,
+                    red_mask: vbe.red_mask,
+                    green_pos: vbe.green_pos,
+                    green_mask: vbe.green_mask,
+                    blue_pos: vbe.blue_pos,
+                    blue_mask: vbe.blue_mask,
+                    lfb_phys: vbe.lfb_phys,
+                };
+                drop(vbe);
+                unsafe {
+                    let ptr = arg as *mut FbInfo;
+                    *ptr = info;
+                }
+                Ok(0)
+            }
             FBIO_BLIT_RECT => {
                 if arg == 0 {
                     return Err("Invalid user pointer for FBIO_BLIT_RECT");
@@ -292,6 +364,7 @@ impl InodeOperations for FbDev {
                 let vbe = crate::drivers::vbe::VBE.lock();
                 let screen_w = if vbe.width > 0 { vbe.width } else { 1024 };
                 let screen_h = if vbe.height > 0 { vbe.height } else { 768 };
+                let pitch = if vbe.pitch > 0 { vbe.pitch } else { screen_w * 4 };
                 let fb_ptr = if !vbe.framebuffer.is_null() {
                     vbe.framebuffer
                 } else {
@@ -299,20 +372,98 @@ impl InodeOperations for FbDev {
                 };
                 drop(vbe);
 
-                if blit.x + blit.width > screen_w || blit.y + blit.height > screen_h || blit.data_ptr == 0 {
+                let x_end = blit.x.checked_add(blit.width);
+                let y_end = blit.y.checked_add(blit.height);
+                if x_end.map_or(true, |xe| xe > screen_w)
+                    || y_end.map_or(true, |ye| ye > screen_h)
+                    || blit.data_ptr == 0
+                {
                     return Err("Blit rectangle out of bounds");
                 }
 
                 let src = blit.data_ptr as *const u32;
+                let fb_bytes = fb_ptr as *mut u8;
+
+                // Sync with RAM shadow backbuffer if present
+                if let Some(con) = crate::drivers::gop_console::GOP_CONSOLE.try_lock() {
+                    if !con.shadow_fb.is_null() {
+                        let shadow_bytes = con.shadow_fb;
+                        for row in 0..blit.height {
+                            let byte_off = (blit.y + row) as usize * pitch as usize + (blit.x as usize * 4);
+                            let dst_row = unsafe { shadow_bytes.add(byte_off) as *mut u32 };
+                            let src_row = row * blit.width;
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    src.add(src_row as usize),
+                                    dst_row,
+                                    blit.width as usize,
+                                );
+                            }
+                        }
+                    }
+                }
+
                 for row in 0..blit.height {
-                    let dst_row = (blit.y + row) * screen_w + blit.x;
+                    let dst_byte_offset = (blit.y + row) as usize * pitch as usize + (blit.x as usize * 4);
+                    let dst_row_ptr = unsafe { fb_bytes.add(dst_byte_offset) as *mut u32 };
                     let src_row = row * blit.width;
                     unsafe {
                         core::ptr::copy_nonoverlapping(
                             src.add(src_row as usize),
-                            fb_ptr.add(dst_row as usize),
+                            dst_row_ptr,
                             blit.width as usize,
                         );
+                    }
+                }
+                Ok(0)
+            }
+            FBIO_FLUSH_RECT => {
+                if arg == 0 {
+                    return Err("Invalid user pointer for FBIO_FLUSH_RECT");
+                }
+                let rect = unsafe { &*(arg as *const FbRect) };
+                let vbe = crate::drivers::vbe::VBE.lock();
+                let screen_w = if vbe.width > 0 { vbe.width } else { 1024 };
+                let screen_h = if vbe.height > 0 { vbe.height } else { 768 };
+                let pitch = if vbe.pitch > 0 { vbe.pitch } else { screen_w * 4 };
+                drop(vbe);
+
+                if rect.x >= screen_w || rect.y >= screen_h {
+                    return Ok(0);
+                }
+                let flush_w = rect.width.min(screen_w - rect.x);
+                let flush_h = rect.height.min(screen_h - rect.y);
+                if flush_w == 0 || flush_h == 0 {
+                    return Ok(0);
+                }
+
+                // Burst write damaged bounding box from RAM shadow buffer to Write-Combined hardware VRAM
+                if let Some(con) = crate::drivers::gop_console::GOP_CONSOLE.try_lock() {
+                    if !con.shadow_fb.is_null() && !con.fb_ptr.is_null() {
+                        for row in 0..flush_h {
+                            let py = (rect.y + row) as usize;
+                            let px = rect.x as usize;
+                            let offset = py * (pitch as usize) + px * 4;
+                            let src = unsafe { con.shadow_fb.add(offset) as *const u64 };
+                            let dst = unsafe { con.fb_ptr.add(offset) as *mut u64 };
+                            let u64_count = (flush_w as usize * 4) / 8;
+                            for i in 0..u64_count {
+                                unsafe {
+                                    core::ptr::write_volatile(dst.add(i), *src.add(i));
+                                }
+                            }
+                            let rem_bytes = (flush_w as usize * 4) % 8;
+                            if rem_bytes > 0 {
+                                let rem_offset = u64_count * 8;
+                                let s8 = unsafe { con.shadow_fb.add(offset + rem_offset) };
+                                let d8 = unsafe { con.fb_ptr.add(offset + rem_offset) };
+                                for i in 0..rem_bytes {
+                                    unsafe {
+                                        core::ptr::write_volatile(d8.add(i), *s8.add(i));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(0)
@@ -332,6 +483,58 @@ impl InodeOperations for FbDev {
         Stat {
             inode: 105,
             size,
+            file_type: FileType::CharDevice,
+            mode: 0o666,
+        }
+    }
+}
+
+/// `/dev/backlight` character device controlling MacBookPro8,2 keyboard/panel backlight (0..255).
+pub struct BacklightDev;
+
+impl InodeOperations for BacklightDev {
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+        let cur = crate::drivers::platform::apple::ApplePlatformHardware::get_keyboard_light();
+        let s = alloc::format!("{}\n", cur);
+        let bytes = s.as_bytes();
+        if offset >= bytes.len() {
+            return Ok(0);
+        }
+        let to_copy = (bytes.len() - offset).min(buf.len());
+        buf[..to_copy].copy_from_slice(&bytes[offset..offset + to_copy]);
+        Ok(to_copy)
+    }
+
+    fn write(&mut self, _offset: usize, buf: &[u8]) -> Result<usize, &'static str> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let val = if let Ok(text) = core::str::from_utf8(buf) {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Ok(buf.len());
+            }
+            if let Ok(parsed) = trimmed.parse::<u16>() {
+                parsed.min(255) as u8
+            } else if buf.len() == 1 {
+                buf[0]
+            } else {
+                return Err("Invalid brightness value for /dev/backlight (expected 0..255)");
+            }
+        } else if buf.len() == 1 {
+            buf[0]
+        } else {
+            return Err("Invalid non-UTF8 payload for /dev/backlight");
+        };
+
+        crate::drivers::platform::apple::ApplePlatformHardware::set_keyboard_light(val);
+        Ok(buf.len())
+    }
+
+    fn stat(&self) -> Stat {
+        Stat {
+            inode: 106,
+            size: 4,
             file_type: FileType::CharDevice,
             mode: 0o666,
         }

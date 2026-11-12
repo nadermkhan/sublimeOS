@@ -1,3 +1,4 @@
+pub mod bcache;
 pub mod devfs;
 pub mod exfat;
 pub mod ext4;
@@ -17,6 +18,8 @@ use crate::fs::vfs::VFS;
 use crate::kinfo;
 
 pub fn init() {
+    bcache::init();
+
     // 1. Create root directory Inode
     let root = RamInode::new_dir();
 
@@ -44,14 +47,14 @@ pub fn init() {
     // /System/Library/CoreServices/SystemVersion.plist
     let sys_lib = RamInode::new_dir();
     let core_services = RamInode::new_dir();
-    let sys_version_plist = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//CosmicOS//DTD PLIST 1.0//EN\" \"http://www.cosmicos.org/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>ProductBuildVersion</key>\n\t<string>1A01</string>\n\t<key>ProductName</key>\n\t<string>CosmicOS</string>\n\t<key>ProductUserVisibleVersion</key>\n\t<string>1.0</string>\n\t<key>ProductVersion</key>\n\t<string>1.0</string>\n\t<key>KernelName</key>\n\t<string>Sublime Kernel</string>\n\t<key>KernelVersion</key>\n\t<string>1.0.0</string>\n</dict>\n</plist>\n";
+    let sys_version_plist = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//SublimeOS//DTD PLIST 1.0//EN\" \"http://www.sublimeos.org/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>ProductBuildVersion</key>\n\t<string>1A01</string>\n\t<key>ProductName</key>\n\t<string>SublimeOS</string>\n\t<key>ProductUserVisibleVersion</key>\n\t<string>1.0</string>\n\t<key>ProductVersion</key>\n\t<string>1.0</string>\n\t<key>KernelName</key>\n\t<string>KiteKernel</string>\n\t<key>KernelVersion</key>\n\t<string>1.0.0</string>\n\t<key>Author</key>\n\t<string>Nader Mahbub Khan</string>\n\t<key>Copyright</key>\n\t<string>Copyright (c) 2026 Nader Mahbub Khan</string>\n</dict>\n</plist>\n";
     core_services.lock().add_child("SystemVersion.plist", RamInode::new_file(sys_version_plist));
     sys_lib.lock().add_child("CoreServices", core_services);
     system.lock().add_child("Library", sys_lib);
 
     // /Library/Preferences/.GlobalPreferences.plist
     let lib_prefs = RamInode::new_dir();
-    let cosmic_prefs = b"CosmicInterfaceStyle = Dark\nCosmicFontSmoothing = 2\nCosmicKeyboardLayout = US\n";
+    let cosmic_prefs = b"SublimeInterfaceStyle = Dark\nSublimeFontSmoothing = 2\nSublimeKeyboardLayout = US\n";
     lib_prefs.lock().add_child(".GlobalPreferences.plist", RamInode::new_file(cosmic_prefs));
     library.lock().add_child("Preferences", lib_prefs);
 
@@ -69,18 +72,19 @@ pub fn init() {
     user_cosmos.lock().add_child("Desktop", RamInode::new_dir());
     user_cosmos.lock().add_child("Documents", RamInode::new_dir());
     user_cosmos.lock().add_child("Downloads", RamInode::new_dir());
-    let zshrc = b"# CosmicOS zsh configuration\nexport PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\nalias ll=\"ls -la\"\n";
-    user_cosmos.lock().add_child(".zshrc", RamInode::new_file(zshrc));
-    users.lock().add_child("cosmos", user_cosmos);
+    let cosmicshrc = b"# SublimeOS shell configuration\nexport PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\nalias ll=\"list\"\n";
+    user_cosmos.lock().add_child(".sublimerc", RamInode::new_file(cosmicshrc));
+    user_cosmos.lock().add_child(".zshrc", RamInode::new_file(cosmicshrc));
+    users.lock().add_child("sublime", user_cosmos);
 
     // /Volumes/
     let cosmic_hd = RamInode::new_dir();
-    cosmic_hd.lock().add_child(".cosmic_container", RamInode::new_file(b"CosmicFS Container Version 1.0\n"));
-    volumes.lock().add_child("Cosmic HD", cosmic_hd);
-    volumes.lock().add_child("Cosmic USB", RamInode::new_dir());
+    cosmic_hd.lock().add_child(".sublime_container", RamInode::new_file(b"SublimeOS Container Version 1.0\n"));
+    volumes.lock().add_child("Sublime HD", cosmic_hd);
+    volumes.lock().add_child("Sublime USB", RamInode::new_dir());
 
     // /etc/hosts & /etc/motd
-    let motd_content = b"\n=======================================================\n  Welcome to CosmicOS (Sublime Kernel 1.0.0 x86_64)\n=======================================================\nType 'sw_vers' or 'system_profiler' for system info.\n\n";
+    let motd_content = b"\n=======================================================\n  Welcome to SublimeOS (KiteKernel 1.0.0 x86_64)\n  Copyright (c) 2026 Nader Mahbub Khan\n=======================================================\nType 'system' or 'help' for system status & commands.\n\n";
     etc.lock().add_child("motd", RamInode::new_file(motd_content));
     etc.lock().add_child("hosts", RamInode::new_file(b"127.0.0.1\tlocalhost\n255.255.255.255\tbroadcast\n::1\t\tlocalhost\n"));
 
@@ -107,7 +111,7 @@ pub fn init() {
         mt.add("procfs", "/proc", "procfs", "ro");
     }
 
-    kinfo!("VFS initialized: CosmicOS hierarchy (/System, /Library, /Applications, /Users, /Volumes)");
+    kinfo!("VFS initialized: SublimeOS hierarchy (/System, /Library, /Applications, /Users, /Volumes)");
 }
 
 /// Automatically detect and mount physical storage block devices (FAT32, exFAT, ext4, NTFS).

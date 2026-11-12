@@ -14,11 +14,30 @@ static INPUT_QUEUE: crate::sync::IrqSafeSpinlock<VecDeque<u8>> =
     crate::sync::IrqSafeSpinlock::new(VecDeque::new());
 
 pub fn get_next_input_char() -> Option<u8> {
+    // 1. Check if IRQ 1 interrupt handler already buffered a character
     if let Some(ch) = crate::drivers::keyboard::read_char() {
         return Some(ch);
     }
 
-    // Drain available bytes from serial RX ring buffer into in-memory queue
+    // 2. Polled fallback for PS/2 / EFI SMM port 0x64 / 0x60
+    let status = unsafe { crate::arch::x86_64::io::inb(0x64) };
+    if (status & 0x01) != 0 && status != 0xFF {
+        let scancode = unsafe { crate::arch::x86_64::io::inb(0x60) };
+        if scancode != 0 && scancode != 0xFF {
+            crate::drivers::keyboard::KEYBOARD.lock().handle_scancode(scancode);
+            if let Some(ch) = crate::drivers::keyboard::read_char() {
+                return Some(ch);
+            }
+        }
+    }
+
+    // 3. Polled fallback for USB HID controllers
+    crate::drivers::usb::poll_hid_nonblocking();
+    if let Some(ch) = crate::drivers::keyboard::read_char() {
+        return Some(ch);
+    }
+
+    // 4. Drain available bytes from serial RX ring buffer into in-memory queue
     {
         let mut queue = INPUT_QUEUE.lock();
         while let Some(b) = crate::arch::x86_64::serial::read_rx_char() {
@@ -37,11 +56,16 @@ pub fn get_next_input_char() -> Option<u8> {
     INPUT_QUEUE.lock().pop_front()
 }
 
-const COMMAND_LIST: [&str; 46] = [
+const COMMAND_LIST: [&str; 71] = [
+    // Modern commands
+    "system", "sys", "tasks", "process", "storage", "disks", "network", "net", "audio", "desktop",
+    "list", "view", "edit", "create", "delete", "remove", "folder", "make",
+    "find", "count", "first", "last", "unique", "distinct", "test", "sync",
+    // Classic utilities & shortcuts
     "sw_vers", "system_profiler", "sysctl", "diskutil", "open", "say", "beep", "chime", "play", "exec", "defaults",
     "whoami", "hostname", "top", "help", "clear", "uname", "uptime", "date", "mem",
     "ps", "jobs", "fg", "bg", "ls", "cat", "echo", "mkdir", "touch", "rm", "mount", "wifi", "ifconfig",
-    "ping", "nslookup", "curl", "httpd", "reboot", "nano", "edit", "grep", "wc", "head",
+    "ping", "nslookup", "curl", "httpd", "reboot", "nano", "grep", "wc", "head",
     "tail", "sort", "uniq"
 ];
 
@@ -59,9 +83,9 @@ pub fn run_shell() -> ! {
     println!("Last login: Wed Nov 11 09:18:21 on ttys000");
     println!("CosmicOS (Sublime Kernel Version 1.0.0 x86_64)");
     println!("Consoles: Alt+F1 (ttys000) | Alt+F2 (ttys001) | Alt+F3 (Console) | Alt+F4 (Activity)");
-    println!("Type 'sw_vers', 'system_profiler', or 'help'. Use TAB for completion.\n");
+    println!("Type 'system' or 'help' to explore commands. Use TAB for completion.\n");
 
-    let prompt = "\x1b[32mcosmos@CosmicOS\x1b[0m \x1b[34m/\x1b[0m % ";
+    let prompt = "\x1b[36mcosmic\x1b[0m \x1b[34m/\x1b[0m > ";
     print!("{}", prompt);
 
     let mut line_buffer: Vec<char> = Vec::with_capacity(256);

@@ -1,6 +1,7 @@
 use core::arch::asm;
 
 pub const IA32_APIC_BASE: u32 = 0x1B;
+pub const IA32_PAT: u32 = 0x277;
 pub const IA32_EFER: u32 = 0xC0000080;
 pub const IA32_STAR: u32 = 0xC0000081;
 pub const IA32_LSTAR: u32 = 0xC0000082;

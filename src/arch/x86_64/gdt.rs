@@ -97,40 +97,55 @@ pub fn init() {
         GDT.entries[5] = low;
         GDT.entries[6] = high;
 
-        // Load GDT
-        let gdt_desc = GdtDescriptor {
-            size: (size_of::<GdtTable>() - 1) as u16,
-            offset: core::ptr::addr_of!(GDT.entries) as u64,
-        };
+        reload_kernel_gdt_segments();
 
-        asm!("lgdt [{}]", in(reg) &gdt_desc, options(readonly, nostack, preserves_flags));
-
-        // Reload segment registers
-        asm!(
-            "push {kcs}",
-            "lea {tmp}, [2f + rip]",
-            "push {tmp}",
-            "retfq",
-            "2:",
-            "mov ds, {kds:x}",
-            "mov es, {kds:x}",
-            "mov fs, {kds:x}",
-            "mov gs, {kds:x}",
-            "mov ss, {kds:x}",
-            kcs = in(reg) (KERNEL_CS as u64),
-            kds = in(reg) (KERNEL_DS),
-            tmp = out(reg) _,
-            options(preserves_flags)
-        );
-
-        // Load Task Register (LTR)
+        // Load Task Register (LTR) on BSP only
         asm!("ltr {0:x}", in(reg) TSS_SELECTOR, options(nostack, preserves_flags));
     }
+}
+
+/// Load the shared kernel GDT on an Application Processor (AP) without reloading BSP's busy TSS.
+pub unsafe fn load_kernel_gdt_for_ap() {
+    reload_kernel_gdt_segments();
+}
+
+unsafe fn reload_kernel_gdt_segments() {
+    let gdt_desc = GdtDescriptor {
+        size: (size_of::<GdtTable>() - 1) as u16,
+        offset: core::ptr::addr_of!(GDT.entries) as u64,
+    };
+
+    asm!("lgdt [{}]", in(reg) &gdt_desc, options(readonly, nostack, preserves_flags));
+
+    // Reload segment registers
+    asm!(
+        "push {kcs}",
+        "lea {tmp}, [2f + rip]",
+        "push {tmp}",
+        "retfq",
+        "2:",
+        "mov ds, {kds:x}",
+        "mov es, {kds:x}",
+        "mov fs, {kds:x}",
+        "mov gs, {kds:x}",
+        "mov ss, {kds:x}",
+        kcs = in(reg) (KERNEL_CS as u64),
+        kds = in(reg) (KERNEL_DS),
+        tmp = out(reg) _,
+        options(preserves_flags)
+    );
 }
 
 /// Set the kernel stack pointer (RSP0) in the TSS for user-to-kernel transitions.
 pub fn set_kernel_stack(stack_top: u64) {
     unsafe {
         TSS.rsp[0] = stack_top;
+    }
+}
+
+/// Get the current kernel stack pointer (RSP0) in the TSS.
+pub fn get_kernel_stack() -> u64 {
+    unsafe {
+        TSS.rsp[0]
     }
 }

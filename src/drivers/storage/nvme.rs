@@ -4,10 +4,10 @@ use alloc::sync::Arc;
 use crate::drivers::pci::{PciBus, PCI};
 use crate::drivers::storage::BlockDevice;
 use crate::mm::phys_to_virt;
-use crate::mm::pmm::PMM;
+use crate::mm::pmm::alloc_zeroed_frame;
 use crate::mm::vmm::map_mmio_range;
 use crate::sync::IrqSafeSpinlock;
-use crate::kinfo;
+use crate::{kinfo, kwarn};
 
 // NVMe Controller Registers (Offsets from BAR0)
 pub const NVME_REG_CAP: usize = 0x00;     // Controller Capabilities (64-bit)
@@ -304,126 +304,145 @@ impl BlockDevice for NvmeDisk {
 }
 
 pub fn init() {
-    let pci = PCI.lock();
-    let mut found = false;
+    let nvme_devs: alloc::vec::Vec<_> = {
+        let pci = PCI.lock();
+        pci.devices
+            .iter()
+            .filter(|dev| dev.class_code == 0x01 && dev.subclass == 0x08 && dev.prog_if == 0x02)
+            .cloned()
+            .collect()
+    };
 
-    for dev in pci.devices.iter() {
-        if dev.class_code == 0x01 && dev.subclass == 0x08 && dev.prog_if == 0x02 {
-            found = true;
-            let bar0_phys = dev.read_bar(0);
-            kinfo!(
-                "PCIe NVMe Controller Found: Vendor 0x{:04X}, Device 0x{:04X}, Bus {}:{}:{}, BAR0: 0x{:X}",
-                dev.vendor_id,
-                dev.device_id,
-                dev.bus,
-                dev.device,
-                dev.function,
-                bar0_phys
-            );
-
-            unsafe {
-                PciBus::enable_bus_mastering(dev.bus, dev.device, dev.function);
-            }
-
-            let mmio_virt = match map_mmio_range(bar0_phys, 16384) {
-                Ok(v) => v,
-                Err(e) => {
-                    kinfo!("Failed to map NVMe BAR0 MMIO: {}", e);
-                    continue;
-                }
-            };
-
-            let cap_ptr = mmio_virt as *const u64;
-            let cap = unsafe { core::ptr::read_volatile(cap_ptr) };
-            let dstrd = ((cap >> 32) & 0x0F) as usize;
-            let doorbell_stride = 4 << dstrd;
-            let vs = unsafe { core::ptr::read_volatile((mmio_virt + NVME_REG_VS as u64) as *const u32) };
-
-            kinfo!(
-                "NVMe Controller Online: Version {}.{}.{}, Doorbell Stride: {} bytes",
-                (vs >> 16) & 0xFFFF,
-                (vs >> 8) & 0xFF,
-                vs & 0xFF,
-                doorbell_stride
-            );
-
-            // Allocate DMA frames
-            let admin_sq_frame = PMM.lock().alloc_frame().unwrap_or(0);
-            let admin_cq_frame = PMM.lock().alloc_frame().unwrap_or(0);
-            let io_sq_frame = PMM.lock().alloc_frame().unwrap_or(0);
-            let io_cq_frame = PMM.lock().alloc_frame().unwrap_or(0);
-            let dma_buf_frame = PMM.lock().alloc_frame().unwrap_or(0);
-
-            let mut controller = NvmeController {
-                mmio_base: mmio_virt,
-                doorbell_stride,
-                admin_sq_phys: admin_sq_frame,
-                admin_cq_phys: admin_cq_frame,
-                io_sq_phys: io_sq_frame,
-                io_cq_phys: io_cq_frame,
-                dma_buf_phys: dma_buf_frame,
-                admin_sq_tail: 0,
-                admin_cq_head: 0,
-                admin_phase: 1,
-                io_sq_tail: 0,
-                io_cq_head: 0,
-                io_phase: 1,
-                total_sectors: 0,
-                sector_size: 512,
-                model: String::new(),
-            };
-
-            unsafe {
-                // Disable controller first (CC.EN = 0)
-                let cc_ptr = (mmio_virt + NVME_REG_CC as u64) as *mut u32;
-                let csts_ptr = (mmio_virt + NVME_REG_CSTS as u64) as *const u32;
-                core::ptr::write_volatile(cc_ptr, 0);
-
-                for _ in 0..1000 {
-                    if (core::ptr::read_volatile(csts_ptr) & 1) == 0 {
-                        break;
-                    }
-                    crate::arch::x86_64::pit::sleep_ms(1);
-                }
-
-                // Program Admin Queue Attributes (AQA: ASQS = 63, ACQS = 63)
-                let aqa = (63 << 16) | 63;
-                controller.write_reg32(NVME_REG_AQA, aqa);
-
-                // Program ASQ and ACQ
-                controller.write_reg64(NVME_REG_ASQ, admin_sq_frame);
-                controller.write_reg64(NVME_REG_ACQ, admin_cq_frame);
-
-                // Enable controller with IOSQES=6, IOCQES=4, EN=1
-                let cc = 1 | (6 << 16) | (4 << 20);
-                controller.write_reg32(NVME_REG_CC, cc);
-
-                for _ in 0..1000 {
-                    if (core::ptr::read_volatile(csts_ptr) & 1) != 0 {
-                        break;
-                    }
-                    crate::arch::x86_64::pit::sleep_ms(1);
-                }
-            }
-
-            if let Ok(()) = controller.init_queues() {
-                kinfo!(
-                    "NVMe Namespace 1 Online: Drive '{}' ({} sectors, {} MB)",
-                    controller.model,
-                    controller.total_sectors,
-                    (controller.total_sectors * 512) / (1024 * 1024)
-                );
-                let disk = Arc::new(NvmeDisk {
-                    name: String::from("nvme0n1"),
-                    controller: IrqSafeSpinlock::new(controller),
-                });
-                crate::drivers::storage::STORAGE_MANAGER.lock().register(disk);
-            }
-            break;
-        }
+    if nvme_devs.is_empty() {
+        kinfo!("PCIe NVMe controller not detected on PCI bus.");
+        return;
     }
 
-    if !found {
-        kinfo!("PCIe NVMe controller not detected on PCI bus.");
+    for dev in nvme_devs {
+        let bar0_phys = dev.read_bar(0);
+        if bar0_phys == 0 {
+            kwarn!("NVMe: Controller at Bus {}:{}:{} has null BAR0; skipping.", dev.bus, dev.device, dev.function);
+            continue;
+        }
+        kinfo!(
+            "PCIe NVMe Controller Found: Vendor 0x{:04X}, Device 0x{:04X}, Bus {}:{}:{}, BAR0: 0x{:X}",
+            dev.vendor_id,
+            dev.device_id,
+            dev.bus,
+            dev.device,
+            dev.function,
+            bar0_phys
+        );
+
+        unsafe {
+            PciBus::enable_bus_mastering(dev.bus, dev.device, dev.function);
+        }
+
+        let mmio_virt = match map_mmio_range(bar0_phys, 16384) {
+            Ok(v) => v,
+            Err(e) => {
+                kwarn!("Failed to map NVMe BAR0 MMIO: {}", e);
+                continue;
+            }
+        };
+
+        let cap_ptr = mmio_virt as *const u64;
+        let cap = unsafe { core::ptr::read_volatile(cap_ptr) };
+        let dstrd = ((cap >> 32) & 0x0F) as usize;
+        let doorbell_stride = 4 << dstrd;
+        let vs = unsafe { core::ptr::read_volatile((mmio_virt + NVME_REG_VS as u64) as *const u32) };
+
+        kinfo!(
+            "NVMe Controller Online: Version {}.{}.{}, Doorbell Stride: {} bytes",
+            (vs >> 16) & 0xFFFF,
+            (vs >> 8) & 0xFF,
+            vs & 0xFF,
+            doorbell_stride
+        );
+
+        // Allocate and strictly zero-initialize 4KiB DMA frames (SQ/CQ phase bits rely on zeroes)
+        let (
+            Some(admin_sq_frame),
+            Some(admin_cq_frame),
+            Some(io_sq_frame),
+            Some(io_cq_frame),
+            Some(dma_buf_frame),
+        ) = (
+            alloc_zeroed_frame(),
+            alloc_zeroed_frame(),
+            alloc_zeroed_frame(),
+            alloc_zeroed_frame(),
+            alloc_zeroed_frame(),
+        ) else {
+            kwarn!("NVMe: Out of DMA frames while initializing controller");
+            continue;
+        };
+
+        let mut controller = NvmeController {
+            mmio_base: mmio_virt,
+            doorbell_stride,
+            admin_sq_phys: admin_sq_frame,
+            admin_cq_phys: admin_cq_frame,
+            io_sq_phys: io_sq_frame,
+            io_cq_phys: io_cq_frame,
+            dma_buf_phys: dma_buf_frame,
+            admin_sq_tail: 0,
+            admin_cq_head: 0,
+            admin_phase: 1,
+            io_sq_tail: 0,
+            io_cq_head: 0,
+            io_phase: 1,
+            total_sectors: 0,
+            sector_size: 512,
+            model: String::new(),
+        };
+
+        unsafe {
+            // Disable controller first (CC.EN = 0)
+            let cc_ptr = (mmio_virt + NVME_REG_CC as u64) as *mut u32;
+            let csts_ptr = (mmio_virt + NVME_REG_CSTS as u64) as *const u32;
+            core::ptr::write_volatile(cc_ptr, 0);
+
+            for _ in 0..1000 {
+                if (core::ptr::read_volatile(csts_ptr) & 1) == 0 {
+                    break;
+                }
+                crate::arch::x86_64::pit::sleep_ms(1);
+            }
+
+            // Program Admin Queue Attributes (AQA: ASQS = 63, ACQS = 63)
+            let aqa = (63 << 16) | 63;
+            controller.write_reg32(NVME_REG_AQA, aqa);
+
+            // Program ASQ and ACQ
+            controller.write_reg64(NVME_REG_ASQ, admin_sq_frame);
+            controller.write_reg64(NVME_REG_ACQ, admin_cq_frame);
+
+            // Enable controller with IOSQES=6, IOCQES=4, EN=1
+            let cc = 1 | (6 << 16) | (4 << 20);
+            controller.write_reg32(NVME_REG_CC, cc);
+
+            for _ in 0..1000 {
+                if (core::ptr::read_volatile(csts_ptr) & 1) != 0 {
+                    break;
+                }
+                crate::arch::x86_64::pit::sleep_ms(1);
+            }
+        }
+
+        if let Ok(()) = controller.init_queues() {
+            kinfo!(
+                "NVMe Namespace 1 Online: Drive '{}' ({} sectors, {} MB)",
+                controller.model,
+                controller.total_sectors,
+                (controller.total_sectors * 512) / (1024 * 1024)
+            );
+            let disk = Arc::new(NvmeDisk {
+                name: String::from("nvme0n1"),
+                controller: IrqSafeSpinlock::new(controller),
+            });
+            crate::drivers::storage::STORAGE_MANAGER.lock().register(disk);
+        }
+        break;
     }
 }

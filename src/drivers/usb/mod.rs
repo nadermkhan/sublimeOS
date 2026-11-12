@@ -8,6 +8,7 @@ use crate::kinfo;
 
 pub mod ehci;
 pub mod hid;
+pub mod hub;
 pub mod msc;
 pub mod xhci;
 
@@ -26,6 +27,28 @@ impl UsbSubsystem {
 }
 
 pub static USB: IrqSafeSpinlock<UsbSubsystem> = IrqSafeSpinlock::new(UsbSubsystem::new());
+
+/// Non-blocking poll of EHCI Periodic Interrupt pipes from timer ticks.
+pub fn poll_hid_nonblocking() {
+    if let Some(mut usb) = USB.try_lock() {
+        for ehci in usb.ehci_controllers.iter_mut() {
+            ehci.poll_interrupt_pipes();
+        }
+    }
+}
+
+/// Emergency poll of USB keyboards and trackpads during kernel panic.
+pub fn poll_hid_panic() {
+    let mut usb = if let Some(guard) = USB.try_lock() {
+        guard
+    } else {
+        unsafe { USB.force_unlock(); }
+        USB.lock()
+    };
+    for ehci in usb.ehci_controllers.iter_mut() {
+        ehci.poll_interrupt_pipes();
+    }
+}
 
 /// Scan PCI bus and initialize all detected USB host controllers (xHCI & EHCI).
 pub fn init() {

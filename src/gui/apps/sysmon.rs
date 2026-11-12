@@ -50,7 +50,7 @@ impl SysmonApp {
         let processes = [
             ("kernel_task", "0.8%", "2", "2.8 MB", "Sublime Core"),
             ("launchd", "0.1%", "1", "340 KB", "System"),
-            ("WindowServer", "1.6%", "1", "1.6 MB", "Aqua / VBE"),
+            ("WindowServer", "1.6%", "1", "1.6 MB", "Aqua / GOP"),
             ("Terminal", "0.2%", "1", "580 KB", "zsh / ttys000"),
             ("Finder", "0.3%", "1", "820 KB", "Native App"),
             ("Activity Monitor", "0.5%", "1", "940 KB", "Native App"),

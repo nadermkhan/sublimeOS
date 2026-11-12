@@ -1,4 +1,7 @@
 extern crate alloc;
+pub mod keyboard;
+pub mod trackpad;
+
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -32,18 +35,21 @@ impl UsbHidDevice {
         }
     }
 
-    /// Process standard 8-byte USB HID Boot Keyboard Report:
-    /// Byte 0: Modifier keys bitmask
-    /// Byte 1: Reserved
-    /// Bytes 2..7: Pressed keycodes (USB HID usage table)
+    /// Process standard 8-byte or Apple 10-byte USB HID Keyboard Report.
     pub fn process_keyboard_report(&mut self, report: &[u8]) {
         if report.len() < 8 {
             return;
         }
 
-        let modifiers = report[0];
-        let mut keys = [0u8; 6];
-        keys.copy_from_slice(&report[2..8]);
+        let (modifiers, keys) = if report.len() >= 9 && report[0] <= 0x03 {
+            let mut k = [0u8; 6];
+            k.copy_from_slice(&report[3..9]);
+            (report[1], k)
+        } else {
+            let mut k = [0u8; 6];
+            k.copy_from_slice(&report[2..8]);
+            (report[0], k)
+        };
 
         let mut kb = KEYBOARD.lock();
 

@@ -1,5 +1,11 @@
-/target/
+target/
+**/target/
 *.elf
-*.log
 *.bin
+*.efi
+*.log
 usb_payload/
+input.txt
+out_sh.txt
+scratch_test.txt
+test_output.txt

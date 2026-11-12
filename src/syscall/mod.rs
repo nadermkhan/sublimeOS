@@ -22,6 +22,14 @@ pub extern "C" fn syscall_dispatcher(
         SYS_IOCTL => crate::task::process::sys_ioctl(a1 as usize, a2 as u32, a3 as usize),
         SYS_MMAP => crate::task::process::sys_mmap(a1, a2 as usize, a3 as i32, _a4 as i32, _a5 as i32, _a6),
         SYS_MUNMAP => crate::task::process::sys_munmap(a1, a2 as usize) as i64,
+        SYS_FSYNC => {
+            let _ = crate::fs::bcache::BLOCK_CACHE.lock().flush_all();
+            0
+        }
+        SYS_SYNC => {
+            let _ = crate::fs::bcache::BLOCK_CACHE.lock().flush_all();
+            0
+        }
         SYS_FTRUNCATE => crate::task::process::sys_ftruncate(a1 as usize, a2 as usize),
         SYS_BRK => crate::task::user::sys_brk(a1) as i64,
         SYS_UNAME => fs_calls::sys_uname(a1 as *mut fs_calls::UtsName) as i64,
@@ -54,7 +62,84 @@ pub extern "C" fn syscall_dispatcher(
         SYS_CLONE => crate::task::process::sys_clone(a1, a2 as *mut u8, a3 as *mut i32, _a4 as *mut i32, _a5),
         SYS_FUTEX => crate::ipc::futex::sys_futex(a1 as *mut u32, a2 as i32, a3 as u32, _a4 as *const u64, _a5 as *mut u32, _a6 as u32),
         SYS_FORK => crate::task::process::sys_fork() as i64,
+        SYS_SPAWN => {
+            let path_ptr = a1 as *const u8;
+            if path_ptr.is_null() {
+                return -14; // -EFAULT
+            }
+            let mut path_bytes = [0u8; 256];
+            let mut len = 0;
+            unsafe {
+                while len < 255 {
+                    let b = *path_ptr.add(len);
+                    if b == 0 {
+                        break;
+                    }
+                    path_bytes[len] = b;
+                    len += 1;
+                }
+            }
+            if let Ok(cmd_line) = core::str::from_utf8(&path_bytes[..len]) {
+                let parts: alloc::vec::Vec<&str> = cmd_line.split_whitespace().collect();
+                if parts.is_empty() {
+                    return -22; // -EINVAL
+                }
+                let raw_path = parts[0];
+                let resolved_path = if raw_path.starts_with('/') {
+                    alloc::string::String::from(raw_path)
+                } else {
+                    alloc::format!("/bin/{}", raw_path)
+                };
+                let vfs = crate::fs::vfs::VFS.lock();
+                let file = match vfs.open(&resolved_path, 0) {
+                    Ok(f) => f,
+                    Err(_) => match vfs.open(raw_path, 0) {
+                        Ok(f) => f,
+                        Err(_) => return -2, // -ENOENT
+                    },
+                };
+                drop(vfs);
+                let mut buf = alloc::vec![0u8; 131072];
+                let n = match file.read(&mut buf) {
+                    Ok(n) => n,
+                    Err(_) => return -5, // -EIO
+                };
+                match crate::task::user::execute_user_binary_with_args(&buf[..n], &parts[..]) {
+                    Ok(code) => code as i64,
+                    Err(_) => -8, // -ENOEXEC
+                }
+            } else {
+                -22 // -EINVAL
+            }
+        }
         SYS_EXECVE => crate::task::process::sys_execve(a1 as *const u8, a2 as *const *const u8, a3 as *const *const u8) as i64,
+        SYS_REBOOT => {
+            crate::arch::x86_64::acpi::poweroff();
+        }
+        SYS_SYSCOMMAND => {
+            let cmd_ptr = a1 as *const u8;
+            if cmd_ptr.is_null() {
+                return -14;
+            }
+            let mut cmd_bytes = [0u8; 256];
+            let mut len = 0;
+            unsafe {
+                while len < 255 {
+                    let b = *cmd_ptr.add(len);
+                    if b == 0 {
+                        break;
+                    }
+                    cmd_bytes[len] = b;
+                    len += 1;
+                }
+            }
+            if let Ok(cmd_str) = core::str::from_utf8(&cmd_bytes[..len]) {
+                crate::shell::commands::execute_command(cmd_str);
+                0
+            } else {
+                -22
+            }
+        }
         SYS_WAIT4 => crate::task::process::sys_waitpid(a1 as i64, a2 as *mut i32, a3 as i32) as i64,
         SYS_KILL => crate::task::process::sys_kill(a1 as i32, a2 as i32) as i64,
         SYS_SETPGID => crate::task::process::sys_setpgid(a1 as i32, a2 as i32) as i64,
@@ -66,6 +151,7 @@ pub extern "C" fn syscall_dispatcher(
         SYS_RT_SIGPROCMASK => crate::task::process::sys_rt_sigprocmask(a1 as i32, a2 as *const u64, a3 as *mut u64, _a4 as usize) as i64,
         SYS_SCHED_SETAFFINITY => crate::task::process::sys_sched_setaffinity(a1 as i32, a2 as usize, a3 as *const u64) as i64,
         SYS_SCHED_GETAFFINITY => crate::task::process::sys_sched_getaffinity(a1 as i32, a2 as usize, a3 as *mut u64) as i64,
+        SYS_GETDENTS64 => crate::syscall::fs_calls::sys_getdents64(a1 as usize, a2 as *mut u8, a3 as usize) as i64,
         SYS_SEM_OPEN => crate::task::process::sys_sem_open(a1 as *const u8, a2 as i32, a3 as u32, _a4 as u32),
         SYS_SEM_CLOSE => crate::task::process::sys_sem_close(a1 as usize),
         SYS_SEM_POST => crate::task::process::sys_sem_post(a1 as usize),

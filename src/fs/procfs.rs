@@ -67,11 +67,11 @@ fn read_dynamic_string(s: &str, offset: usize, buf: &mut [u8]) -> Result<usize, 
 pub struct ProcVersion;
 impl InodeOperations for ProcVersion {
     fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
-        let s = "Sublime Kernel Version 1.0.0: sublime-release/RELEASE_X86_64; root:sublime/RELEASE_X86_64 x86_64\n";
+        let s = "KiteKernel Version 1.0.0 (SublimeOS): kitekernel-release/RELEASE_X86_64; author:Nader Mahbub Khan; copyright:2026 x86_64\n";
         read_dynamic_string(s, offset, buf)
     }
     fn stat(&self) -> Stat {
-        Stat { inode: 200, size: 95, file_type: FileType::Regular, mode: 0o444 }
+        Stat { inode: 200, size: 122, file_type: FileType::Regular, mode: 0o444 }
     }
 }
 

@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use crate::arch::x86_64::io::{inb, inw, outb, outw};
 use crate::drivers::storage::{BlockDevice, STORAGE_MANAGER};
-use crate::kinfo;
+use crate::{kinfo, kwarn};
 
 const STATUS_BSY: u8 = 0x80;
 const _STATUS_DRDY: u8 = 0x40;
@@ -150,15 +150,59 @@ impl BlockDevice for AtaDrive {
     }
 }
 
+/// Derive validated primary and secondary IDE channel I/O ports from PCI configuration.
+/// - Native PCI mode (prog_if bit 0 / bit 2) MUST provide non-zero BARs; never falls back to legacy 0x1F0/0x170.
+/// - ISA compatibility mode only uses 0x1F0/0x3F6 or 0x170/0x376 when PCI prog_if explicitly enables compat decoding.
+pub fn resolve_ide_channels(ide_dev: &crate::drivers::pci::PciDevice) -> [Option<(u16, u16, &'static str)>; 2] {
+    let mut buses: [Option<(u16, u16, &'static str)>; 2] = [None, None];
+    if (ide_dev.prog_if & 0x01) != 0 {
+        let b0 = ide_dev.read_bar(0) as u16;
+        let b1 = ide_dev.read_bar(1) as u16;
+        if b0 > 0 && b1 > 0 {
+            buses[0] = Some((b0, b1 + 2, "Primary"));
+        } else {
+            kwarn!("ATA/IDE: Primary channel in Native PCI mode with unassigned BAR; skipping legacy 0x1F0.");
+        }
+    } else {
+        buses[0] = Some((0x1F0, 0x3F6, "Primary"));
+    }
+
+    if (ide_dev.prog_if & 0x04) != 0 {
+        let b2 = ide_dev.read_bar(2) as u16;
+        let b3 = ide_dev.read_bar(3) as u16;
+        if b2 > 0 && b3 > 0 {
+            buses[1] = Some((b2, b3 + 2, "Secondary"));
+        } else {
+            kwarn!("ATA/IDE: Secondary channel in Native PCI mode with unassigned BAR; skipping legacy 0x170.");
+        }
+    } else {
+        buses[1] = Some((0x170, 0x376, "Secondary"));
+    }
+
+    buses
+}
+
 pub fn init() {
-    let buses = [
-        (0x1F0u16, 0x3F6u16, "Primary"),
-        (0x170u16, 0x376u16, "Secondary"),
-    ];
+    // Only probe ATA/IDE I/O ports if PCI bus enumeration actually discovered a legacy IDE controller.
+    // On modern UEFI/NVMe/AHCI bare-metal systems, blind writes to 0x1F0/0x170 can hang or fault.
+    let ide_controller = {
+        let pci = crate::drivers::pci::PCI.lock();
+        pci.devices
+            .iter()
+            .find(|dev| dev.class_code == 0x01 && dev.subclass == 0x01)
+            .cloned()
+    };
+
+    let Some(ide_dev) = ide_controller else {
+        kinfo!("ATA/IDE: No PCI IDE controller found; skipping legacy PIO ports (0x1F0/0x170).");
+        return;
+    };
+
+    let buses = resolve_ide_channels(&ide_dev);
 
     let mut disk_id = 0;
 
-    for (io_base, ctrl_base, _bus_name) in buses.iter() {
+    for (io_base, ctrl_base, _bus_name) in buses.iter().flatten() {
         for &is_slave in &[false, true] {
             if let Some(drive) = probe_ata_drive(*io_base, *ctrl_base, is_slave, disk_id) {
                 kinfo!(
@@ -177,6 +221,11 @@ pub fn init() {
 
 fn probe_ata_drive(io_base: u16, ctrl_base: u16, is_slave: bool, id: usize) -> Option<AtaDrive> {
     unsafe {
+        // Floating-bus check before issuing any register writes
+        if inb(io_base + 7) == 0xFF {
+            return None;
+        }
+
         let drive_sel = if is_slave { 0xB0 } else { 0xA0 };
         outb(io_base + 6, drive_sel);
         for _ in 0..4 {

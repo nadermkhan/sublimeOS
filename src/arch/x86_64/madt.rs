@@ -1,6 +1,6 @@
 extern crate alloc;
 use alloc::vec::Vec;
-use crate::mm::phys_to_virt;
+use crate::arch::x86_64::acpi::map_acpi_phys;
 use crate::sync::IrqSafeSpinlock;
 use crate::kinfo;
 
@@ -28,7 +28,7 @@ pub struct MadtIso {
 }
 
 pub struct MadtInfo {
-    pub lapic_address: u32,
+    pub lapic_address: u64,
     pub flags: u32,
     pub cpus: Vec<MadtCpu>,
     pub io_apics: Vec<MadtIoApic>,
@@ -50,14 +50,22 @@ impl MadtInfo {
 pub static MADT: IrqSafeSpinlock<MadtInfo> = IrqSafeSpinlock::new(MadtInfo::empty());
 
 pub fn parse_madt(madt_phys: u64) {
-    let virt = phys_to_virt(madt_phys) as *const u8;
-    let len = unsafe { *(virt.add(4) as *const u32) } as usize;
-    if len < 44 {
+    let Some(hdr_virt) = map_acpi_phys(madt_phys, 44) else {
+        return;
+    };
+    let hdr = hdr_virt as *const u8;
+    let len = unsafe { core::ptr::read_unaligned(hdr.add(4) as *const u32) } as usize;
+    if len < 44 || len > 1024 * 1024 {
         return;
     }
 
-    let lapic_address = unsafe { *(virt.add(36) as *const u32) };
-    let flags = unsafe { *(virt.add(40) as *const u32) };
+    let Some(full_virt) = map_acpi_phys(madt_phys, len) else {
+        return;
+    };
+    let virt = full_virt as *const u8;
+
+    let mut lapic_address = unsafe { core::ptr::read_unaligned(virt.add(36) as *const u32) } as u64;
+    let flags = unsafe { core::ptr::read_unaligned(virt.add(40) as *const u32) };
 
     let mut cpus = Vec::new();
     let mut io_apics = Vec::new();
@@ -77,7 +85,7 @@ pub fn parse_madt(madt_phys: u64) {
                 if entry_len >= 8 {
                     let processor_id = unsafe { *virt.add(offset + 2) };
                     let apic_id = unsafe { *virt.add(offset + 3) };
-                    let cpu_flags = unsafe { *(virt.add(offset + 4) as *const u32) };
+                    let cpu_flags = unsafe { core::ptr::read_unaligned(virt.add(offset + 4) as *const u32) };
                     let enabled = (cpu_flags & 1) != 0 || (cpu_flags & 2) != 0;
                     cpus.push(MadtCpu {
                         processor_id,
@@ -91,8 +99,8 @@ pub fn parse_madt(madt_phys: u64) {
                 // I/O APIC
                 if entry_len >= 12 {
                     let id = unsafe { *virt.add(offset + 2) };
-                    let address = unsafe { *(virt.add(offset + 4) as *const u32) };
-                    let gsi_base = unsafe { *(virt.add(offset + 8) as *const u32) };
+                    let address = unsafe { core::ptr::read_unaligned(virt.add(offset + 4) as *const u32) };
+                    let gsi_base = unsafe { core::ptr::read_unaligned(virt.add(offset + 8) as *const u32) };
                     io_apics.push(MadtIoApic {
                         id,
                         address,
@@ -105,14 +113,40 @@ pub fn parse_madt(madt_phys: u64) {
                 if entry_len >= 10 {
                     let bus = unsafe { *virt.add(offset + 2) };
                     let source_irq = unsafe { *virt.add(offset + 3) };
-                    let gsi = unsafe { *(virt.add(offset + 4) as *const u32) };
-                    let iso_flags = unsafe { *(virt.add(offset + 8) as *const u16) };
+                    let gsi = unsafe { core::ptr::read_unaligned(virt.add(offset + 4) as *const u32) };
+                    let iso_flags = unsafe { core::ptr::read_unaligned(virt.add(offset + 8) as *const u16) };
                     overrides.push(MadtIso {
                         bus,
                         source_irq,
                         gsi,
                         flags: iso_flags,
                     });
+                }
+            }
+            5 => {
+                // Local APIC Address Override (64-bit physical address)
+                if entry_len >= 12 {
+                    let override_addr = unsafe { core::ptr::read_unaligned(virt.add(offset + 4) as *const u64) };
+                    if override_addr != 0 {
+                        lapic_address = override_addr;
+                    }
+                }
+            }
+            9 => {
+                // Processor Local x2APIC
+                if entry_len >= 16 {
+                    let x2apic_id = unsafe { core::ptr::read_unaligned(virt.add(offset + 4) as *const u32) };
+                    let cpu_flags = unsafe { core::ptr::read_unaligned(virt.add(offset + 8) as *const u32) };
+                    let acpi_uid = unsafe { core::ptr::read_unaligned(virt.add(offset + 12) as *const u32) };
+                    let enabled = (cpu_flags & 1) != 0 || (cpu_flags & 2) != 0;
+                    if x2apic_id < 256 && !cpus.iter().any(|c| c.apic_id as u32 == x2apic_id) {
+                        cpus.push(MadtCpu {
+                            processor_id: acpi_uid as u8,
+                            apic_id: x2apic_id as u8,
+                            flags: cpu_flags,
+                            enabled,
+                        });
+                    }
                 }
             }
             _ => {}
@@ -122,7 +156,7 @@ pub fn parse_madt(madt_phys: u64) {
     }
 
     kinfo!(
-        "ACPI MADT parsed: LAPIC Base: 0x{:08X}, {} CPU core(s), {} I/O APIC(s)",
+        "ACPI MADT parsed: LAPIC Base: 0x{:X}, {} CPU core(s), {} I/O APIC(s)",
         lapic_address,
         cpus.len(),
         io_apics.len()

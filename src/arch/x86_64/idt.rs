@@ -96,10 +96,13 @@ extern "C" {
     fn isr_36(); fn isr_37(); fn isr_38(); fn isr_39();
     fn isr_40(); fn isr_41(); fn isr_42(); fn isr_43();
     fn isr_44(); fn isr_45(); fn isr_46(); fn isr_47();
+    fn isr_48();
 
     fn isr_128();
     fn isr_255();
 }
+
+pub const LAPIC_TIMER_VECTOR: usize = 48;
 
 pub fn init() {
     unsafe {
@@ -129,19 +132,27 @@ pub fn init() {
             IDT.entries[32 + i].set_handler(irq as *const () as usize, 0, 0);
         }
 
+        // Local APIC MMIO Periodic Timer (Vector 48)
+        IDT.entries[LAPIC_TIMER_VECTOR].set_handler(isr_48 as *const () as usize, 0, 0);
+
         // Syscall `int 0x80` (Vector 128) accessible from user space (DPL 3)
         IDT.entries[128].set_handler(isr_128 as *const () as usize, 0, 3);
 
         // Spurious interrupt (Vector 255)
         IDT.entries[255].set_handler(isr_255 as *const () as usize, 0, 0);
 
-        let idt_desc = IdtDescriptor {
-            size: (size_of::<IdtTable>() - 1) as u16,
-            offset: core::ptr::addr_of!(IDT.entries) as u64,
-        };
-
-        asm!("lidt [{}]", in(reg) &idt_desc, options(readonly, nostack, preserves_flags));
+        load_idt();
     }
+}
+
+/// Load the initialized global IDT on the executing CPU core.
+pub unsafe fn load_idt() {
+    let idt_desc = IdtDescriptor {
+        size: (size_of::<IdtTable>() - 1) as u16,
+        offset: core::ptr::addr_of!(IDT.entries) as u64,
+    };
+
+    asm!("lidt [{}]", in(reg) &idt_desc, options(readonly, nostack, preserves_flags));
 }
 
 pub type IrqHandlerFn = fn(&mut InterruptContext);
@@ -164,17 +175,26 @@ pub extern "C" fn interrupt_dispatch(ctx: *mut InterruptContext) {
         // CPU Exceptions
         0..=31 => handle_exception(ctx_ref),
 
-        // Hardware IRQs (32..47)
+        // Spurious 8259 PIC interrupts (IRQ 7 -> vec 39, IRQ 15 -> vec 47).
+        // Per x86 APIC/PIC specification, ignore without issuing EOI.
+        39 | 47 => return,
+
+        // Hardware IRQs routed via I/O APIC (32..=47)
         32..=47 => {
             let irq = vec - 32;
-            // Acknowledge interrupt to PIC before dispatching handler
-            crate::arch::x86_64::pic::send_eoi(irq as u8);
-
             unsafe {
                 if let Some(handler) = IRQ_HANDLERS[irq] {
                     handler(ctx_ref);
                 }
             }
+            // Acknowledge Local APIC EOI so the In-Service Register (ISR) clears cleanly
+            crate::arch::x86_64::apic::eoi();
+        }
+
+        // Local APIC MMIO Timer Interrupt (Vector 48)
+        LAPIC_TIMER_VECTOR => {
+            crate::arch::x86_64::apic::eoi();
+            crate::arch::x86_64::pit::advance_system_tick(ctx_ref);
         }
 
         // Syscall via int 0x80

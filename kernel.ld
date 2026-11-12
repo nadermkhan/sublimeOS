@@ -22,21 +22,21 @@ SECTIONS
     /* Switch to higher half virtual address space */
     . = ALIGN(2M) + 0xFFFFFFFF80000000;
 
-    .text : AT(ADDR(.text) - 0xFFFFFFFF80000000)
+    .text ALIGN(4K) : AT(ADDR(.text) - 0xFFFFFFFF80000000)
     {
         __text_start = .;
         *(.text .text.*)
         __text_end = .;
     }
 
-    .rodata : AT(ADDR(.rodata) - 0xFFFFFFFF80000000)
+    .rodata ALIGN(4K) : AT(ADDR(.rodata) - 0xFFFFFFFF80000000)
     {
         __rodata_start = .;
         *(.rodata .rodata.*)
         __rodata_end = .;
     }
 
-    .data : AT(ADDR(.data) - 0xFFFFFFFF80000000)
+    .data ALIGN(4K) : AT(ADDR(.data) - 0xFFFFFFFF80000000)
     {
         __data_start = .;
         *(.data .data.*)
@@ -44,7 +44,7 @@ SECTIONS
         __data_end = .;
     }
 
-    .bss : AT(ADDR(.bss) - 0xFFFFFFFF80000000)
+    .bss ALIGN(4K) : AT(ADDR(.bss) - 0xFFFFFFFF80000000)
     {
         __bss_start = .;
         *(.bss .bss.*)

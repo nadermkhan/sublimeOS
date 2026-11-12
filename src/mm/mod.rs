@@ -7,7 +7,7 @@ pub mod vma;
 pub mod vmm;
 
 pub const PAGE_SIZE: usize = 4096;
-pub const PHYSICAL_MEMORY_OFFSET: u64 = 0xFFFFFFFF80000000;
+pub const PHYSICAL_MEMORY_OFFSET: u64 = 0xFFFF800000000000;
 
 /// Convert a physical memory address to a kernel virtual address via direct mapping.
 #[inline(always)]
@@ -15,10 +15,16 @@ pub fn phys_to_virt(phys: u64) -> u64 {
     phys + PHYSICAL_MEMORY_OFFSET
 }
 
-/// Convert a kernel direct-mapped virtual address to a physical address.
+/// Convert a kernel direct-mapped virtual address or kernel symbol address to a physical address.
 #[inline(always)]
 pub fn virt_to_phys(virt: u64) -> u64 {
-    virt - PHYSICAL_MEMORY_OFFSET
+    if virt >= PHYSICAL_MEMORY_OFFSET && virt < 0xFFFFFFFF80000000 {
+        virt - PHYSICAL_MEMORY_OFFSET
+    } else if virt >= 0xFFFFFFFF80000000 {
+        virt - 0xFFFFFFFF80000000
+    } else {
+        virt
+    }
 }
 
 /// Align address down to nearest 4KiB page boundary.

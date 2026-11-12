@@ -1,0 +1,57 @@
+[package]
+name = "cosmic-userland"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cosmic_rt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "init"
+path = "src/bin/init.rs"
+
+[[bin]]
+name = "calc"
+path = "src/bin/calc.rs"
+
+[[bin]]
+name = "hello"
+path = "src/bin/hello.rs"
+
+[[bin]]
+name = "sh"
+path = "src/bin/sh.rs"
+
+[[bin]]
+name = "snake"
+path = "src/bin/snake.rs"
+
+[[bin]]
+name = "echo"
+path = "src/bin/echo.rs"
+
+[[bin]]
+name = "cat"
+path = "src/bin/cat.rs"
+
+[[bin]]
+name = "ls"
+path = "src/bin/ls.rs"
+
+[[bin]]
+name = "grep"
+path = "src/bin/grep.rs"
+
+[[bin]]
+name = "wc"
+path = "src/bin/wc.rs"
+
+[[bin]]
+name = "edit"
+path = "src/bin/edit.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true

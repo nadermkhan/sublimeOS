@@ -20,6 +20,12 @@ use crate::kinfo;
 
 /// Full architecture initialization sequence for x86_64.
 pub fn init() {
+    // 0. Enable SSE / SIMD instructions in CR0/CR4 & PAT Write-Combining (WC)
+    unsafe {
+        registers::enable_sse();
+        registers::enable_write_combining();
+    }
+
     // 1. Initialize COM1 Serial port hardware early for low-level logging
     serial::init_early();
 
@@ -31,19 +37,20 @@ pub fn init() {
     gdt::init();
     kinfo!("GDT & 64-bit TSS loaded with IST stacks");
 
-    // 4. Initialize Interrupt Descriptor Table
+    // 4. Remap legacy 8259 PIC to vectors 32..47 and mask all lines (0xFF) before IDT/APIC
+    pic::remap(32, 40);
+    pic::mask_all();
+    kinfo!("8259 PIC remapped to vectors 32..47 and globally masked");
+
+    // 5. Initialize Interrupt Descriptor Table
     idt::init();
     kinfo!("IDT initialized with 256 vector handlers");
 
-    // 5. Remap legacy PIC to IRQs 32..47
-    pic::remap(32, 40);
-    kinfo!("8259 PIC remapped to vectors 32..47");
-
-    // 6. Initialize 8254 PIT timer at 1000 Hz (1ms tick)
+    // 6. Initialize 8254 PIT timer calibration support
     pit::init(1000);
-    kinfo!("8254 PIT initialized at 1000 Hz");
+    kinfo!("8254 PIT initialized at 1000 Hz (IRQ 0 masked; LAPIC drives system ticks)");
 
-    // 7. Full UART subsystem initialization (IRQ 4 & 3 handlers, unmask PIC, detect COM1 & COM2)
+    // 7. Full UART subsystem initialization (installs IRQ 4 & 3 handlers; routed via I/O APIC)
     serial::init();
 
     // 8. Initialize AMD64 fast syscall (LSTAR/STAR)
@@ -53,6 +60,10 @@ pub fn init() {
 
 /// Initialize ACPI, Local APIC, I/O APIC, and SMP multiprocessing once memory management is active.
 pub fn init_apic_smp() {
+    // Ensure legacy 8259 master & slave PICs remain completely masked before APIC startup
+    unsafe {
+        ioapic::disable_legacy_pic();
+    }
     acpi::init();
     apic::init();
     ioapic::init();

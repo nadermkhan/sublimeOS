@@ -15,6 +15,63 @@ pub fn execute_command(line: &str) {
     let args = &parts[1..];
 
     match cmd {
+        // Modern Core Domain Commands
+        "system" | "sys" => cmd_system(args),
+        "hardware" | "specs" => cmd_system_profiler(),
+        "about" => cmd_sw_vers(),
+        "tasks" | "process" | "proc" => cmd_tasks(args),
+        "storage" | "disks" | "disk" => cmd_storage(args),
+        "power" => {
+            let sub = args.first().copied().unwrap_or("status");
+            match sub {
+                "off" | "shutdown" | "halt" => cmd_halt(),
+                "restart" | "reboot" | "reset" => cmd_reboot(),
+                _ => println!("Usage: power [off | restart]"),
+            }
+        }
+        "sync" => {
+            let _ = crate::fs::bcache::BLOCK_CACHE.lock().flush_all();
+            println!("Storage cache synced.");
+        },
+        "network" | "net" => cmd_network(args),
+        "audio" | "sound" => cmd_audio(args),
+        "display" | "screen" => cmd_font(args),
+        "path" | "where" => println!("/"),
+
+        // Modern File Operations
+        "list" | "files" => cmd_ls(args),
+        "view" | "read" => cmd_cat(args),
+        "print" => cmd_echo(args),
+        "edit" => cmd_nano(args),
+        "create" => cmd_touch(args),
+        "delete" | "remove" => cmd_rm(args),
+        "folder" => {
+            let sub = args.first().copied().unwrap_or("");
+            if sub == "create" || sub == "new" || sub == "make" {
+                cmd_mkdir(&args[1..]);
+            } else {
+                println!("Usage: folder create <path>");
+            }
+        }
+        "make" => {
+            if args.len() >= 2 && (args[0] == "folder" || args[0] == "dir" || args[0] == "directory") {
+                cmd_mkdir(&args[1..]);
+            } else {
+                println!("Usage: make folder <path>");
+            }
+        }
+
+        // Modern Stream Filters
+        "find" => cmd_grep(args),
+        "count" => cmd_wc(args),
+        "first" => cmd_head(args),
+        "last" => cmd_tail(args),
+        "unique" | "distinct" => cmd_uniq(args),
+
+        // Desktop
+        "desktop" => cmd_gui(),
+
+        // Classic Utilities & Backward-Compatible Shortcuts
         "sw_vers" => cmd_sw_vers(),
         "system_profiler" => cmd_system_profiler(),
         "sysctl" => cmd_sysctl(args),
@@ -27,7 +84,7 @@ pub fn execute_command(line: &str) {
         "exec" => cmd_exec(args),
         "defaults" => cmd_defaults(args),
         "whoami" => println!("cosmos"),
-        "hostname" => println!("CosmicOS.local"),
+        "hostname" => println!("sublimeos.local"),
         "top" => cmd_top(),
         "help" => cmd_help(),
         "clear" => cmd_clear(),
@@ -40,6 +97,7 @@ pub fn execute_command(line: &str) {
         "fg" => crate::shell::job::cmd_fg(args),
         "bg" => crate::shell::job::cmd_bg(args),
         "lspci" => cmd_lspci(),
+        "lsusb" | "usb" => cmd_usb(),
         "ls" => cmd_ls(args),
         "cat" => cmd_cat(args),
         "echo" => cmd_echo(args),
@@ -49,7 +107,7 @@ pub fn execute_command(line: &str) {
         "tail" => cmd_tail(args),
         "sort" => cmd_sort(args),
         "uniq" => cmd_uniq(args),
-        "nano" | "edit" => cmd_nano(args),
+        "nano" => cmd_nano(args),
         "mkdir" => cmd_mkdir(args),
         "touch" => cmd_touch(args),
         "rm" => cmd_rm(args),
@@ -68,60 +126,191 @@ pub fn execute_command(line: &str) {
         "gui" => cmd_gui(),
         "windowserver" => cmd_windowserver(),
         "test" => crate::tests::run_all_tests(),
-        "reboot" => cmd_reboot(),
+        "reboot" | "restart" => cmd_reboot(),
+        "shutdown" | "poweroff" => cmd_shutdown(args),
         "halt" => cmd_halt(),
+        "font" => cmd_font(args),
         unknown => {
-            println!("zsh: command not found: {}. Type 'help' for available CosmicOS commands.", unknown);
+            println!("sublimesh: command not found: '{}'. Type 'help' for available SublimeOS commands.", unknown);
         }
     }
 }
 
+fn cmd_system(args: &[&str]) {
+    let sub = args.first().copied().unwrap_or("info");
+    match sub {
+        "info" | "status" | "" => cmd_system_info(),
+        "hardware" | "hw" | "profiler" => cmd_system_profiler(),
+        "config" | "sysctl" => cmd_sysctl(&args[1..]),
+        "version" | "vers" => cmd_sw_vers(),
+        "uptime" => cmd_uptime(),
+        "date" | "time" => cmd_date(),
+        "memory" | "mem" => cmd_mem(),
+        "restart" | "reboot" => cmd_reboot(),
+        "shutdown" | "halt" | "poweroff" => cmd_halt(),
+        "usb" | "devices" => cmd_usb(),
+        _ => {
+            println!("Usage: system [info | hardware | usb | config | version | memory | uptime | date | restart | shutdown]");
+        }
+    }
+}
+
+fn cmd_system_info() {
+    let hw = crate::drivers::platform::smbios::get_hardware_telemetry();
+    println!("\x1b[36m┌────────────────────────────────────────────────────────┐\x1b[0m");
+    println!("\x1b[36m│\x1b[0m  \x1b[1;37mSublimeOS\x1b[0m — \x1b[35mKiteKernel 1.0.0 (x86_64)\x1b[0m            \x1b[36m│\x1b[0m");
+    println!("\x1b[36m├────────────────────────────────────────────────────────┤\x1b[0m");
+    println!("\x1b[36m│\x1b[0m  \x1b[33mModel:\x1b[0m     {:<42}\x1b[36m│\x1b[0m", hw.model_name);
+    println!("\x1b[36m│\x1b[0m  \x1b[33mProcessor:\x1b[0m {:<42}\x1b[36m│\x1b[0m", hw.chip);
+    println!("\x1b[36m│\x1b[0m  \x1b[33mCores:\x1b[0m     {:<42}\x1b[36m│\x1b[0m", hw.cores_threads);
+    println!("\x1b[36m│\x1b[0m  \x1b[33mMemory:\x1b[0m    {:<42}\x1b[36m│\x1b[0m", hw.memory_summary);
+    let ticks = crate::arch::x86_64::pit::get_ticks();
+    println!("\x1b[36m│\x1b[0m  \x1b[33mUptime:\x1b[0m    {}s                                      \x1b[36m│\x1b[0m", ticks / 1000);
+    let dt = crate::arch::x86_64::rtc::get_system_datetime();
+    println!("\x1b[36m│\x1b[0m  \x1b[33mClock:\x1b[0m     {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC              \x1b[36m│\x1b[0m", dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+    let (fb_w, fb_h) = crate::drivers::vbe::dimensions();
+    println!("\x1b[36m│\x1b[0m  \x1b[33mDisplay:\x1b[0m   {}x{} (32bpp)                           \x1b[36m│\x1b[0m", fb_w, fb_h);
+    println!("\x1b[36m└────────────────────────────────────────────────────────┘\x1b[0m");
+}
+
+fn cmd_tasks(args: &[&str]) {
+    let sub = args.first().copied().unwrap_or("list");
+    match sub {
+        "list" | "ps" | "" => cmd_ps(),
+        "top" | "monitor" => cmd_top(),
+        "run" | "exec" => cmd_exec(&args[1..]),
+        "kill" | "end" => {
+            if let Some(pid_str) = args.get(1) {
+                if let Ok(pid) = pid_str.parse::<i32>() {
+                    crate::task::process::sys_kill(pid, 9);
+                    println!("Sent termination signal (SIGKILL) to task PID {}", pid);
+                } else {
+                    println!("Usage: tasks kill <pid>");
+                }
+            } else {
+                println!("Usage: tasks kill <pid>");
+            }
+        }
+        "jobs" => crate::shell::job::cmd_jobs(),
+        _ => {
+            println!("Usage: tasks [list | top | run <binary> | kill <pid> | jobs]");
+        }
+    }
+}
+
+fn cmd_storage(args: &[&str]) {
+    let sub = args.first().copied().unwrap_or("list");
+    match sub {
+        "list" | "disks" | "" => cmd_diskutil(&["list"]),
+        "mounts" | "mount" => cmd_mount(),
+        "cache" => {
+            let (cached_blocks, hits, misses, writes) = crate::fs::bcache::BLOCK_CACHE.lock().stats();
+            let total = hits + misses;
+            let ratio = if total > 0 { (hits * 100) / total } else { 0 };
+            println!("Unified Block Cache (Buffer Cache):");
+            println!("  Cached Sectors:   {} / 1024 ({} KiB)", cached_blocks, (cached_blocks * 512) / 1024);
+            println!("  Cache Hits:       {} ({}%)", hits, ratio);
+            println!("  Cache Misses:     {}", misses);
+            println!("  Sector Writes:    {}", writes);
+        }
+        "sync" | "flush" => {
+            let _ = crate::fs::bcache::BLOCK_CACHE.lock().flush_all();
+            println!("Storage cache synced.");
+        }
+        _ => {
+            println!("Usage: storage [list | mounts | cache | sync]");
+        }
+    }
+}
+
+fn cmd_network(args: &[&str]) {
+    let sub = args.first().copied().unwrap_or("status");
+    match sub {
+        "status" | "devices" | "info" | "" => cmd_ifconfig(),
+        "ping" => cmd_ping(&args[1..]),
+        "resolve" | "lookup" | "dns" => cmd_nslookup(&args[1..]),
+        "fetch" | "get" | "http" => cmd_curl(&args[1..]),
+        "wifi" => cmd_wifi(&args[1..]),
+        "lease" | "dhcp" => cmd_dhcp(&args[1..]),
+        "sync" | "time" | "ntp" => cmd_ntp(&args[1..]),
+        "server" => {
+            let srv = args.get(1).copied().unwrap_or("status");
+            match srv {
+                "http" | "httpd" => cmd_httpd(&args[2..]),
+                "telnet" | "telnetd" => cmd_telnetd(&args[2..]),
+                "ssh" | "sshd" => cmd_sshd(&args[2..]),
+                _ => println!("Usage: network server [http | telnet | ssh]"),
+            }
+        }
+        _ => {
+            println!("Usage: network [status | ping <host> | resolve <host> | fetch <url> | wifi | lease | sync | server]");
+        }
+    }
+}
+
+fn cmd_audio(args: &[&str]) {
+    let sub = args.first().copied().unwrap_or("chime");
+    match sub {
+        "chime" => cmd_chime(),
+        "tone" | "beep" => cmd_beep(&args[1..]),
+        "play" => cmd_play(&args[1..]),
+        "speak" | "say" => cmd_say(&args[1..]),
+        _ => println!("Usage: audio [chime | tone [freq] [ms] | play <file.wav> | speak <text>]"),
+    }
+}
+
 fn cmd_sw_vers() {
-    println!("ProductName:\t\tCosmicOS");
+    println!("ProductName:\t\tSublimeOS");
     println!("ProductVersion:\t\t1.0");
     println!("BuildVersion:\t\t1A01");
-    println!("KernelVersion:\t\tSublime Kernel 1.0.0");
+    println!("KernelVersion:\t\tKiteKernel 1.0.0");
+    println!("Author:\t\t\tNader Mahbub Khan");
+    println!("Copyright:\t\tCopyright (c) 2026 Nader Mahbub Khan");
 }
 
 fn cmd_system_profiler() {
-    println!("\x1b[1mHardware:\x1b[0m\n");
-    println!("    \x1b[1mHardware Overview:\x1b[0m\n");
-    println!("      Model Name:            CosmicStation Pro");
-    println!("      Model Identifier:      CosmicStation1,1");
-    println!("      Model Number:          CS-2026");
-    println!("      Chip:                  Sublime Multi-Core Architecture (AMD64 / x86_64)");
-    println!("      Total Number of Cores: 1 Performance");
-    println!("      Memory:                128 MB Unified RAM");
-    println!("      System Firmware:       1.0.0");
-    println!("      OS Loader:             Sublime Bootloader");
-    println!("      Serial Number (system):CS1000SUBX64");
-    println!("      Hardware UUID:         4C4C4544-0051-5010-8043-B5C04F345233\n");
+    let hw = crate::drivers::platform::smbios::get_hardware_telemetry();
+    println!("\x1b[1mHardware Overview:\x1b[0m\n");
+    println!("  Model Name:            {}", hw.model_name);
+    println!("  Model Identifier:      {}", hw.model_identifier);
+    println!("  Processor Name:        {}", hw.chip);
+    println!("  Total Cores:           {}", hw.cores_threads);
+    println!("  Memory:                {}", hw.memory_summary);
+    println!("  System Firmware:       {}", hw.system_firmware);
+    println!("  Serial Number:         {}", hw.serial_number);
+    println!("  Hardware UUID:         {}\n", hw.hardware_uuid);
 }
 
 fn cmd_sysctl(args: &[&str]) {
+    let hw = crate::drivers::platform::smbios::get_hardware_telemetry();
     let key = args.first().copied().unwrap_or("-a");
     match key {
-        "hw.model" => println!("hw.model: CosmicStation1,1"),
-        "hw.ncpu" => println!("hw.ncpu: 1"),
+        "hw.model" => println!("hw.model: {}", hw.model_identifier),
+        "hw.machine" => println!("hw.machine: x86_64"),
+        "hw.ncpu" => {
+            let (_, threads) = crate::arch::x86_64::registers::get_cpu_cores_and_threads();
+            println!("hw.ncpu: {}", threads);
+        }
         "hw.memsize" => {
-            let (total_frames, _, _) = crate::mm::pmm::PMM.lock().stats();
-            println!("hw.memsize: {}", total_frames * 4096);
+            let bytes = crate::mm::pmm::PMM.lock().usable_ram_bytes();
+            println!("hw.memsize: {}", bytes);
         }
         "hw.pagesize" => println!("hw.pagesize: 4096"),
-        "kern.ostype" => println!("kern.ostype: CosmicOS"),
+        "kern.ostype" => println!("kern.ostype: SublimeOS"),
         "kern.osrelease" => println!("kern.osrelease: 1.0.0"),
-        "kern.version" => println!("kern.version: Sublime Kernel Version 1.0.0: sublime-release/RELEASE_X86_64"),
+        "kern.version" => println!("kern.version: KiteKernel 1.0.0: sublime-release/RELEASE_X86_64"),
         "-a" | "all" => {
-            println!("kern.ostype = CosmicOS");
+            println!("kern.ostype = SublimeOS");
             println!("kern.osrelease = 1.0.0");
-            println!("kern.osrevision = 199506");
-            println!("kern.version = Sublime Kernel Version 1.0.0: root:sublime/RELEASE_X86_64");
-            println!("hw.model = CosmicStation1,1");
-            println!("hw.ncpu = 1");
+            println!("kern.osrevision = 202601");
+            println!("kern.version = KiteKernel 1.0.0: root:sublime/RELEASE_X86_64");
+            println!("hw.model = {}", hw.model_identifier);
+            let (_, threads) = crate::arch::x86_64::registers::get_cpu_cores_and_threads();
+            println!("hw.ncpu = {}", threads);
             println!("hw.byteorder = 1234");
             println!("hw.pagesize = 4096");
-            let (total_frames, _, _) = crate::mm::pmm::PMM.lock().stats();
-            println!("hw.memsize = {}", total_frames * 4096);
+            let bytes = crate::mm::pmm::PMM.lock().usable_ram_bytes();
+            println!("hw.memsize = {}", bytes);
         }
         _ => println!("sysctl: unknown oid '{}'", key),
     }
@@ -343,53 +532,38 @@ fn cmd_top() {
 }
 
 fn cmd_help() {
-    println!("\x1b[36mCosmicOS (Sublime Kernel) Shell Commands:\x1b[0m");
-    println!("  sw_vers         Display CosmicOS product and build version");
-    println!("  system_profiler Display hardware system overview");
-    println!("  sysctl [-a]     Get kernel and hardware state (hw.model, hw.memsize)");
-    println!("  diskutil [list] Manage CosmicFS containers and disk volumes");
-    println!("  mount           List mounted filesystems (FAT32, exFAT, ext4, NTFS)");
-    println!("  wifi [subcmd]   802.11 Wi-Fi manager (scan, connect, status, disconnect)");
-    println!("  dhcp [subcmd]   DHCP client manager (status, discover, release)");
-    println!("  ntp [subcmd]    Network Time Protocol synchronization (status, sync, set)");
-    println!("  ifconfig        Display network interface configuration (lo0, en0, wlan0)");
-    println!("  ping <target>   Send ICMP ECHO_REQUEST packets to network hosts");
-    println!("  nslookup <host> Query DNS nameservers for IPv4 host address");
-    println!("  curl [-i] <url> Fetch web pages & REST APIs over TCP / HTTP");
-    println!("  httpd [status]  CosmicOS Embedded Web Server dashboard");
-    println!("  open <app/path> Open application or document (e.g. 'open Finder.app')");
-    println!("  say <text>      Speech synthesis simulated audio banner");
-    println!("  beep [freq] [ms]Play audio tone via Intel HDA / PC Speaker");
-    println!("  chime           Play CosmicOS Sublime Startup Chime (F-Major chord)");
-    println!("  play <file.wav> Play RIFF/WAVE PCM audio file");
-    println!("  exec <binary>   Execute 64-bit ELF user binary in Ring 3 user space");
-    println!("  defaults [read] Access CosmicOS user preferences and defaults");
-    println!("  top             Display live Sublime tasks & memory stats");
-    println!("  ps              List active Sublime tasks and kernel threads");
-    println!("  jobs            List active and suspended background jobs");
-    println!("  fg [%n]         Bring job to foreground with SIGCONT");
-    println!("  bg [%n]         Resume stopped job in background");
-    println!("  uname           Print Sublime kernel version info");
-    println!("  uptime          Show system uptime in seconds");
-    println!("  date            Current UTC hardware clock timestamp");
-    println!("  mem             Memory usage (Physical Unified RAM & Heap)");
-    println!("  lspci           Enumerate PCI Express controller devices");
-    println!("  ls [path]       List contents of a directory (default '/')");
-    println!("  cat <path>      Read file content");
-    println!("  mkdir <path>    Create directory");
-    println!("  touch <path>    Create empty file");
-    println!("  rm <path>       Remove file");
-    println!("  nano <path>     In-terminal full screen text editor (alias 'edit')");
-    println!("  grep <pattern>  Filter lines matching regular text pattern (-i, -v)");
-    println!("  wc [opts]       Count lines, words, and bytes (-l, -w, -c)");
-    println!("  head [-n N]     Print first N lines of input");
-    println!("  tail [-n N]     Print last N lines of input");
-    println!("  sort [-r]       Sort lines of text alphabetically or reversed");
-    println!("  uniq            Filter adjacent duplicate lines");
-    println!("  Pipelines & I/O:Use '|' for pipelines, '>' and '>>' for file redirect, '<' for input");
-    println!("  clear           Clear the terminal screen");
-    println!("  reboot          Restart computer");
-    println!("  halt            Shut down computer");
+    println!("\x1b[1;36mSublimeOS Command Center\x1b[0m — \x1b[35mKiteKernel 1.0.0\x1b[0m");
+    println!("Developer: Nader Mahbub Khan | Copyright (c) 2026\n");
+    println!("  \x1b[1;33mFILES & WORKSPACE\x1b[0m");
+    println!("    \x1b[32mlist\x1b[0m [path]                       List directory contents");
+    println!("    \x1b[32mview\x1b[0m <file>                       Display file contents");
+    println!("    \x1b[32mprint\x1b[0m [text...]                   Print text to screen");
+    println!("    \x1b[32mfind\x1b[0m <pattern> [file]             Search text matching pattern");
+    println!("    \x1b[32mcount\x1b[0m <file>                      Count lines, words, and characters");
+    println!("    \x1b[32medit\x1b[0m <file>                       Full-screen text editor");
+    println!("    \x1b[32mcreate\x1b[0m <file>                     Create new file");
+    println!("    \x1b[32mdelete\x1b[0m <file>                     Remove file");
+    println!("    \x1b[32mmake folder\x1b[0m <path>                Create directory");
+    println!();
+    println!("  \x1b[1;33mSYSTEM & DEVICE\x1b[0m");
+    println!("    \x1b[32mabout\x1b[0m                             System & kernel release information");
+    println!("    \x1b[32mhardware\x1b[0m                          Silicon hardware & firmware specifications");
+    println!("    \x1b[32msystem\x1b[0m [info|config|uptime]        System status dashboard");
+    println!("    \x1b[32mtasks\x1b[0m [list|top|run <bin>|kill]   Process manager & task control");
+    println!("    \x1b[32mdisplay\x1b[0m [1|2]                     Console font scale & HiDPI (Ctrl+= / Ctrl+-)");
+    println!("    \x1b[32mpath\x1b[0m                              Print current working directory");
+    println!("    \x1b[32mpower\x1b[0m [off|restart]               Safely shut down or restart computer");
+    println!("    \x1b[32mclear\x1b[0m                             Clear screen");
+    println!();
+    println!("  \x1b[1;33mSTORAGE & CONNECTIVITY\x1b[0m");
+    println!("    \x1b[32mstorage\x1b[0m [list|sync]               Storage drives, partitions, and cache");
+    println!("    \x1b[32mnetwork\x1b[0m [status|wifi|ping]        Network interfaces, Wi-Fi scanner, ping");
+    println!("    \x1b[32maudio\x1b[0m [chime|play]                Audio chime and sound playback");
+    println!();
+    println!("  \x1b[1;33mAPPLICATIONS\x1b[0m");
+    println!("    \x1b[32mdesktop\x1b[0m                           Aqua graphical window compositor");
+    println!("    \x1b[32mcalc\x1b[0m                              64-bit expression calculator");
+    println!("    \x1b[32msnake\x1b[0m                             Classic arcade game");
 }
 
 fn cmd_gui() {
@@ -471,7 +645,7 @@ fn cmd_clear() {
 }
 
 fn cmd_uname() {
-    println!("CosmicOS CosmicOS.local 1.0.0 Sublime Kernel Version 1.0.0 x86_64");
+    println!("SublimeOS sublimeos.local 1.0.0 KiteKernel Version 1.0.0 x86_64 (by Nader Mahbub Khan, c 2026)");
 }
 
 fn cmd_uptime() {
@@ -491,17 +665,31 @@ fn cmd_mem() {
     let (total_frames, used_frames, free_frames) = crate::mm::pmm::PMM.lock().stats();
     let (heap_total, heap_allocated, heap_free) = crate::mm::heap::HEAP_ALLOCATOR.stats();
 
-    println!("Unified Memory:    {} MB Total", (total_frames * 4096) / (1024 * 1024));
-    println!("Wired Memory:      {} KB Used", (used_frames * 4096) / 1024);
-    println!("Free Memory:       {} KB Free", (free_frames * 4096) / 1024);
-    println!("XNU Kernel Heap:   {} KB Total ({} KB Allocated, {} KB Free)", heap_total / 1024, heap_allocated / 1024, heap_free / 1024);
+    println!("Unified Memory:      {} MB Total", (total_frames * 4096) / (1024 * 1024));
+    println!("Wired Memory:        {} KB Used", (used_frames * 4096) / 1024);
+    println!("Free Memory:         {} KB Free", (free_frames * 4096) / 1024);
+    println!("Sublime Kernel Heap: {} KB Total ({} KB Allocated, {} KB Free)", heap_total / 1024, heap_allocated / 1024, heap_free / 1024);
 }
 
 fn cmd_ps() {
-    println!("  PID TTY           TIME CMD");
-    println!("    0 ttys000    0:00.02 kernel_idle");
-    println!("    1 ttys000    0:00.08 launchd");
-    println!("    2 ttys000    0:00.05 zsh");
+    let tasks = crate::task::scheduler::get_task_list();
+    println!("  PID  STATE       TICKS  NAME");
+    if !tasks.is_empty() {
+        for (tid, name, state, ticks) in tasks {
+            let state_str = match state {
+                crate::task::thread::ThreadState::Running => "Running ",
+                crate::task::thread::ThreadState::Ready => "Ready   ",
+                crate::task::thread::ThreadState::Blocked => "Blocked ",
+                crate::task::thread::ThreadState::Sleeping(_) => "Sleeping",
+                crate::task::thread::ThreadState::Dead => "Dead    ",
+            };
+            println!("{:5}  {:10}  {:5}  {}", tid, state_str, ticks, name);
+        }
+    } else {
+        println!("    0  Running        10  kernel_idle");
+        println!("    1  Ready          25  launchd");
+        println!("    2  Running        45  cosmicsh");
+    }
 }
 
 fn cmd_lspci() {
@@ -513,6 +701,98 @@ fn cmd_lspci() {
             dev.bus, dev.device, dev.function, dev.class_name(), dev.class_code, dev.subclass, dev.vendor_id, dev.device_id, dev.bar0
         );
     }
+}
+
+fn cmd_usb() {
+    println!("\x1b[1;36mCosmicOS USB Subsystem & Device Topology\x1b[0m\n");
+
+    let usb = crate::drivers::usb::USB.lock();
+
+    // 1. xHCI Controllers
+    for (idx, xhci) in usb.xhci_controllers.iter().enumerate() {
+        println!(
+            "  \x1b[1mController #{}: xHCI USB 3.0 / Extensible Host Controller\x1b[0m",
+            idx + 1
+        );
+        println!(
+            "    PCI: {:02x}:{:02x}.{} | BAR0: 0x{:08X} | Ports: {} | Slots: {}",
+            xhci.pci.bus, xhci.pci.device, xhci.pci.function, xhci.pci.bar0, xhci.max_ports, xhci.max_slots
+        );
+        for &port in &xhci.connected_devices {
+            println!("    └── Root Port {}: Connected (Active Slot)", port);
+        }
+        println!();
+    }
+
+    // 2. EHCI Controllers & Topology Tree
+    for (idx, ehci) in usb.ehci_controllers.iter().enumerate() {
+        println!(
+            "  \x1b[1mController #{}: EHCI USB 2.0 / Enhanced Host Controller\x1b[0m",
+            usb.xhci_controllers.len() + idx + 1
+        );
+        println!(
+            "    PCI: {:02x}:{:02x}.{} | BAR0: 0x{:08X} | Root Ports: {}",
+            ehci.pci.bus, ehci.pci.device, ehci.pci.function, ehci.pci.bar0, ehci.num_ports
+        );
+
+        if ehci.discovered_devices.is_empty() {
+            println!("    (No USB 2.0 devices enumerated)");
+        } else {
+            for dev in &ehci.discovered_devices {
+                if dev.is_hub {
+                    println!(
+                        "    └── Root Port {}: \x1b[33mHub\x1b[0m (Addr {}, {} ports, {:?}) [VID:PID {:04X}:{:04X}] - {}",
+                        dev.root_port,
+                        dev.address,
+                        dev.hub_ports.unwrap_or(0),
+                        dev.speed,
+                        dev.vendor_id,
+                        dev.product_id,
+                        dev.name
+                    );
+                    for child in &ehci.discovered_devices {
+                        if let Some((p_addr, p_port)) = child.parent_hub {
+                            if p_addr == dev.address && !child.is_hub {
+                                println!(
+                                    "        └── Port {}: \x1b[32mDevice\x1b[0m (Addr {}, {:?}) [VID:PID {:04X}:{:04X}] - {}",
+                                    p_port,
+                                    child.address,
+                                    child.speed,
+                                    child.vendor_id,
+                                    child.product_id,
+                                    child.name
+                                );
+                            }
+                        }
+                    }
+                } else if dev.parent_hub.is_none() {
+                    println!(
+                        "    └── Root Port {}: \x1b[32mDevice\x1b[0m (Addr {}, {:?}) [VID:PID {:04X}:{:04X}] - {}",
+                        dev.root_port,
+                        dev.address,
+                        dev.speed,
+                        dev.vendor_id,
+                        dev.product_id,
+                        dev.name
+                    );
+                }
+            }
+        }
+        println!();
+    }
+
+    // 3. Registered USB HID Input Devices
+    let hid = crate::drivers::usb::hid::USB_HID.lock();
+    println!("  \x1b[1mActive USB Human Interface Devices (HID):\x1b[0m");
+    if hid.devices.is_empty() {
+        println!("    (None registered)");
+    } else {
+        for dev_arc in &hid.devices {
+            let dev = dev_arc.lock();
+            println!("    • {} ({:?})", dev.name, dev.dev_type);
+        }
+    }
+    println!();
 }
 
 fn cmd_ls(args: &[&str]) {
@@ -636,21 +916,89 @@ fn cmd_rm(args: &[&str]) {
 }
 
 fn cmd_reboot() {
-    println!("\x1b[31mRestarting CosmicOS...\x1b[0m");
+    println!("\x1b[31mRestarting SublimeOS...\x1b[0m");
+    for _ in 0..500_000 {
+        core::hint::spin_loop();
+    }
     crate::arch::x86_64::acpi::reboot();
 }
 
 fn cmd_halt() {
-    println!("\x1b[31mShutting down CosmicOS...\x1b[0m");
+    println!("\x1b[31mShutting down SublimeOS...\x1b[0m");
+    for _ in 0..500_000 {
+        core::hint::spin_loop();
+    }
     crate::arch::x86_64::acpi::poweroff();
+}
+
+fn cmd_shutdown(args: &[&str]) {
+    if args.iter().any(|&a| a == "-r" || a == "--reboot" || a == "reboot") {
+        cmd_reboot();
+    } else {
+        cmd_halt();
+    }
+}
+
+fn cmd_font(args: &[&str]) {
+    use crate::drivers::gop_console::GOP_CONSOLE;
+    if let Some(mut con) = GOP_CONSOLE.try_lock() {
+        if args.is_empty() {
+            println!("SublimeOS Console Typography Engine");
+            println!("------------------------------------");
+            println!("  Display Resolution: {}x{} ({} bpp, Pitch: {} B)", con.width, con.height, con.bpp, con.pitch);
+            println!("  Character Grid:     {} cols x {} rows", con.cols, con.rows);
+            println!("  Font Scale:         {}x ({}x{} pixels/cell)", con.font_scale, con.cell_w(), con.cell_h());
+            println!("  Anti-Aliasing:      {}", if con.anti_alias { "Enabled (Morphological Subpixel Smoothing)" } else { "Disabled (Crisp 1-bit Binary)" });
+            println!("  Screen Margins:     {}px horizontal, {}px vertical", con.margin_x, con.margin_y);
+            println!();
+            println!("Usage:");
+            println!("  font scale 1        Switch to 8x16 font (maximum density)");
+            println!("  font scale 2        Switch to 16x32 font (HiDPI / large comfort)");
+            println!("  font aa on          Enable subpixel curve anti-aliasing");
+            println!("  font aa off         Disable anti-aliasing (pure 1-bit)");
+            println!("Hotkeys: Ctrl+= / Ctrl+- (change font scale)");
+        } else if args[0] == "scale" && args.len() >= 2 {
+            match args[1] {
+                "1" => {
+                    con.set_font_scale(1);
+                    println!("Font scale set to 1x (8x16). Grid is now {} cols x {} rows.", con.cols, con.rows);
+                }
+                "2" => {
+                    con.set_font_scale(2);
+                    println!("Font scale set to 2x (16x32). Grid is now {} cols x {} rows.", con.cols, con.rows);
+                }
+                _ => println!("Invalid scale. Supported scales: 1, 2"),
+            }
+        } else if args[0] == "aa" && args.len() >= 2 {
+            match args[1] {
+                "on" | "true" | "1" => {
+                    con.set_anti_alias(true);
+                    println!("Font anti-aliasing enabled.");
+                }
+                "off" | "false" | "0" => {
+                    con.set_anti_alias(false);
+                    println!("Font anti-aliasing disabled.");
+                }
+                _ => println!("Usage: font aa on | font aa off"),
+            }
+        } else {
+            println!("Usage: font [scale 1|2] | [aa on|off]");
+        }
+    } else {
+        println!("Display console lock busy.");
+    }
 }
 
 fn cmd_wifi(args: &[&str]) {
     let sub = args.first().copied().unwrap_or("help");
     match sub {
         "scan" => {
-            println!("Scanning 2.4 GHz and 5 GHz wireless spectrum for 802.11 beacons...");
+            println!("Scanning 2.4 GHz and 5 GHz wireless spectrum via PCIe 802.11 hardware...");
             let aps = crate::net::wifi::WIFI_MANAGER.lock().scan().to_vec();
+            if aps.is_empty() {
+                println!("  No 802.11 access points detected (no physical Wi-Fi radio attached or no beacons received).");
+                return;
+            }
             println!("{:<20} {:<18} {:<8} {:<4} {:<12} {:<12}", "SSID", "BSSID", "RSSI", "CH", "SECURITY", "SIGNAL");
             println!("{:-<20} {:-<18} {:-<8} {:-<4} {:-<12} {:-<12}", "", "", "", "", "", "");
             for ap in aps {
@@ -668,11 +1016,19 @@ fn cmd_wifi(args: &[&str]) {
             }
             let ssid = args[1];
             let pass = args.get(2).copied();
-            println!("\x1b[36mInitiating association with '{}'...\x1b[0m", ssid);
+            let ifname = crate::net::device::NET_MANAGER
+                .lock()
+                .devices
+                .iter()
+                .find(|(d, _)| d.device_type() == crate::net::device::NetDeviceType::Wireless80211)
+                .map(|(d, _)| alloc::string::String::from(d.name()))
+                .unwrap_or_else(|| alloc::string::String::from("wlan0"));
+
+            println!("\x1b[36mInitiating 802.11 association with '{}'...\x1b[0m", ssid);
             match crate::net::wifi::WIFI_MANAGER.lock().connect(ssid, pass) {
                 Ok(()) => {
-                    println!("\x1b[32m[OK] Connected to '{}' via WPA2-PSK (AES-CCMP)\x1b[0m", ssid);
-                    println!("Interface: wlan0 (IPv4: 192.168.1.120, Netmask: 255.255.255.0, Gateway: 192.168.1.1)");
+                    println!("\x1b[32m[OK] Associated with '{}' via 802.11 MAC\x1b[0m", ssid);
+                    println!("Interface: {} (run 'dhcp' or configure IPv4 after 4-way handshake)", ifname);
                 }
                 Err(e) => {
                     println!("\x1b[31mwifi connect error: {}\x1b[0m", e);
@@ -680,19 +1036,27 @@ fn cmd_wifi(args: &[&str]) {
             }
         }
         "status" => {
+            let ifname = crate::net::device::NET_MANAGER
+                .lock()
+                .devices
+                .iter()
+                .find(|(d, _)| d.device_type() == crate::net::device::NetDeviceType::Wireless80211)
+                .map(|(d, _)| alloc::string::String::from(d.name()))
+                .unwrap_or_else(|| alloc::string::String::from("wlan0"));
+
             let mgr = crate::net::wifi::WIFI_MANAGER.lock();
             if mgr.is_connected {
                 let b = mgr.current_bssid.unwrap_or([0; 6]);
                 println!("Wi-Fi Status: \x1b[32mConnected\x1b[0m");
-                println!("  Interface:    wlan0 (IEEE 802.11ac SoftMAC)");
+                println!("  Interface:    {} (IEEE 802.11n/ac)", ifname);
                 println!("  SSID:         {}", mgr.current_ssid.as_deref().unwrap_or("Unknown"));
                 println!("  BSSID:        {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", b[0], b[1], b[2], b[3], b[4], b[5]);
                 println!("  Channel:      {}", mgr.current_channel);
                 println!("  Tx Rate:      {} Mbps", mgr.link_speed_mbps);
                 println!("  Security:     WPA2-Personal (PBKDF2-SHA1 Key Derivation)");
             } else {
-                println!("Wi-Fi Status: \x1b[33mDisconnected\x1b[0m (wlan0 inactive)");
-                println!("Type 'wifi scan' to search for available wireless networks.");
+                println!("Wi-Fi Status: \x1b[33mDisconnected\x1b[0m ({} inactive)", ifname);
+                println!("Type 'wifi scan' or 'wifi connect <SSID> [password]' to associate.");
             }
         }
         "disconnect" => {

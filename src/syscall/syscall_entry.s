@@ -12,13 +12,19 @@ syscall_entry:
     push r11
     push rcx
 
-    /* Push general purpose registers */
+    /* Push all general purpose registers to preserve user state across syscall */
     push rbp
     push rbx
     push r12
     push r13
     push r14
     push r15
+    push rdi
+    push rsi
+    push rdx
+    push r10
+    push r8
+    push r9
 
     /*
      * AMD64 syscall calling convention:
@@ -50,7 +56,13 @@ syscall_entry:
     call syscall_dispatcher
     add rsp, 8
 
-    /* Restore registers */
+    /* Restore all user general purpose registers */
+    pop r9
+    pop r8
+    pop r10
+    pop rdx
+    pop rsi
+    pop rdi
     pop r15
     pop r14
     pop r13
@@ -61,5 +73,5 @@ syscall_entry:
     pop rcx
     pop r11
 
-    /* Return to user space */
+    /* Return to user space (RAX holds syscall return code) */
     sysretq

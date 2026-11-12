@@ -45,16 +45,26 @@ impl StorageManager {
 pub static STORAGE_MANAGER: IrqSafeSpinlock<StorageManager> =
     IrqSafeSpinlock::new(StorageManager::new());
 
-/// Initialize physical storage subsystems (ATA/IDE and AHCI SATA controllers).
+/// Initialize physical storage subsystems (PCIe NVMe, AHCI SATA, and conditional PCI IDE).
 pub fn init() {
-    kinfo!("Scanning storage controllers (ATA/IDE and AHCI SATA)...");
+    kinfo!("Scanning storage controllers (NVMe, AHCI SATA, conditional PCI IDE)...");
 
-    // 1. Scan ATA/IDE primary and secondary buses
-    ata::init();
+    // 1. Scan PCIe NVMe controllers via PCI first
+    nvme::init();
 
     // 2. Scan AHCI SATA controllers via PCI
     ahci::init();
 
-    // 3. Scan PCIe NVMe controllers via PCI
-    nvme::init();
+    // 3. Only invoke legacy ATA/IDE when PCI explicitly enumerated a Mass Storage IDE controller (0x01:0x01)
+    let has_pci_ide = crate::drivers::pci::PCI
+        .lock()
+        .devices
+        .iter()
+        .any(|d| d.class_code == 0x01 && d.subclass == 0x01);
+
+    if has_pci_ide {
+        ata::init();
+    } else {
+        kinfo!("Storage: No PCI IDE controller present; legacy ATA/PATA channels skipped.");
+    }
 }
