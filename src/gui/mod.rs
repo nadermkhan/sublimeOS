@@ -11,7 +11,6 @@ pub mod window;
 use alloc::vec::Vec;
 use crate::arch::x86_64::pit::sleep_ms;
 use crate::arch::x86_64::serial::read_rx_char;
-use crate::serial_println;
 use crate::drivers::keyboard::read_char;
 use crate::drivers::mouse::MOUSE;
 use crate::drivers::vbe::{self, VBE};
@@ -450,8 +449,9 @@ impl DesktopManager {
     }
 
     pub fn render_frame(&mut self) {
-        let now_sec = crate::arch::x86_64::rtc::read_datetime().second;
-        let blink = (crate::arch::x86_64::pit::get_ticks() / 500) % 2;
+        let ticks = crate::arch::x86_64::pit::get_ticks();
+        let now_sec = (ticks / 1000) as u8;
+        let blink = ((ticks / 500) % 2) as u64;
         let needs_render = self.dirty || now_sec != self.last_sec || blink != self.last_blink;
         if !needs_render {
             return;
@@ -558,11 +558,24 @@ pub fn launch_desktop() {
     kinfo!("Initializing UEFI GOP / Multiboot Linear Framebuffer for Aqua Desktop...");
 
     if let Err(e) = vbe::init(1024, 768) {
-        kinfo!("GUI launch aborted: {}", e);
+        crate::kerror!("GUI launch aborted: {}", e);
         return;
     }
 
-    let (w, h) = vbe::dimensions();
+    if vbe::is_text_mode_fallback() {
+        crate::kerror!("Cannot launch Aqua Desktop: Hardware is running in VGA Text Mode (no UEFI GOP / Multiboot LFB active).");
+        return;
+    }
+
+    // Ensure CPU interrupts are active (syscalls via FMASK / int 0x80 clear IF)
+    crate::arch::x86_64::registers::enable_interrupts();
+
+    // Copy needed display metadata out of VBE lock guard immediately
+    let (w, h, pitch, bpp) = {
+        let vbe = crate::drivers::vbe::VBE.lock();
+        (vbe.width, vbe.height, vbe.pitch, vbe.bpp)
+    };
+
     crate::drivers::mouse::set_bounds(w as i32, h as i32);
     let mut desktop_mgr = DesktopManager::new(w, h);
 
@@ -570,14 +583,16 @@ pub fn launch_desktop() {
     desktop_mgr.open_app(DesktopAppId::Terminal);
     desktop_mgr.open_app(DesktopAppId::Sysmon);
 
-    serial_println!("[INFO] Sublime Graphical Desktop is now running!");
-    serial_println!("[INFO] Type in serial terminal or graphical window to interact with SublimeSH.");
-    serial_println!("[INFO] Press F12 or click 'Exit to Shell' in Start Menu to return to text console.");
+    kinfo!("Sublime Aqua Desktop online: {}x{}@{}bpp (Pitch: {} B)", w, h, bpp, pitch);
 
     let mut running = true;
     crate::drivers::gop_console::set_gui_active(true);
 
     while running {
+        // Poll input hardware directly per frame
+        crate::drivers::keyboard::poll_ps2_controller();
+        crate::drivers::usb::poll_hid_nonblocking();
+
         // 1. Poll mouse input
         let (mx, my, left_btn) = {
             let m = MOUSE.lock();

@@ -116,7 +116,7 @@ pub fn set_cursor_position(x: i32, y: i32) {
         Some(g) => g,
         None => return,
     };
-    if !gpu.active || gpu.mmio_base == 0 {
+    if !gpu.active || !gpu.cursor_enabled || gpu.mmio_base == 0 {
         return;
     }
 
@@ -139,16 +139,10 @@ pub fn set_cursor_position(x: i32, y: i32) {
 }
 
 /// Enable Intel hardware cursor plane pointing to `cursor_base_phys` (64x64 32bpp ARGB buffer).
-pub fn enable_cursor(cursor_base_phys: u32) {
-    let mut gpu = INTEL_I915.lock();
-    if !gpu.active || gpu.mmio_base == 0 {
-        return;
-    }
-    unsafe {
-        gpu.write_reg(I915_CURABASE, cursor_base_phys);
-        gpu.write_reg(I915_CURACNTR, CURSOR_MODE_64X64_ARGB | CURSOR_ENABLE_BIT);
-    }
-    gpu.cursor_enabled = true;
+pub fn enable_cursor(_cursor_base_phys: u32) {
+    // Do not write raw host physical addresses to CURABASE; doing so without a GTT mapping
+    // freezes scanout on Intel Gen6+ hardware. Keep hardware cursor plane disabled and rely
+    // on software cursor rasterization.
 }
 
 /// Disable hardware cursor plane.
@@ -164,17 +158,10 @@ pub fn disable_cursor() {
 }
 
 /// Perform an atomic hardware page flip by updating Display Plane A Surface Base (`DSPASURF 0x7019C`).
-pub fn page_flip(surface_phys: u32) {
-    let gpu = match INTEL_I915.try_lock() {
-        Some(g) => g,
-        None => return,
-    };
-    if !gpu.active || gpu.mmio_base == 0 {
-        return;
-    }
-    unsafe {
-        gpu.write_reg(I915_DSPASURF, surface_phys);
-    }
+pub fn page_flip(_surface_phys: u32) {
+    // Do not overwrite UEFI GOP's GTT offset in DSPASURF (0x7019C) with a raw
+    // PMM or BAR2 physical address; doing so freezes scanout on Intel hardware.
+    // Software blitting into FRAMEBUFFER_VIRT_BASE (0xFFFFFFFFD0000000) is used instead.
 }
 
 /// Bounded spin wait for next vertical blank event on Pipe A via `DEISR 0x44000`.

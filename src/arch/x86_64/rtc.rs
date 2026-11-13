@@ -126,7 +126,12 @@ pub fn is_time_synchronized() -> bool {
 fn get_update_in_progress_flag() -> bool {
     unsafe {
         outb(CMOS_ADDR, 0x0A);
-        (inb(CMOS_DATA) & 0x80) != 0
+        let val = inb(CMOS_DATA);
+        // On Apple hardware / modern UEFI, port 0x71 may return 0xFF (floating bus)
+        if val == 0xFF {
+            return false;
+        }
+        (val & 0x80) != 0
     }
 }
 
@@ -141,10 +146,15 @@ fn bcd_to_bin(bcd: u8) -> u8 {
     ((bcd >> 4) * 10) + (bcd & 0x0F)
 }
 
-/// Read current UTC date and time from the CMOS Real-Time Clock.
+/// Read current UTC date and time from the CMOS Real-Time Clock with bounded spin limit.
 pub fn read_datetime() -> DateTime {
+    let mut spins = 0;
     while get_update_in_progress_flag() {
         core::hint::spin_loop();
+        spins += 1;
+        if spins > 1000 {
+            break;
+        }
     }
 
     let mut second = read_rtc_register(0x00);

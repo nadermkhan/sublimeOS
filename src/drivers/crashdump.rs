@@ -80,6 +80,7 @@ pub struct CrashDumpTarget {
 pub static CRASH_DUMP_TARGET: IrqSafeSpinlock<Option<CrashDumpTarget>> = IrqSafeSpinlock::new(None);
 static DUMP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static DUMP_BUF: IrqSafeSpinlock<[u8; MAX_DUMP_SIZE]> = IrqSafeSpinlock::new([0; MAX_DUMP_SIZE]);
+static LOG_SLICE_BUF: IrqSafeSpinlock<[u8; 16384]> = IrqSafeSpinlock::new([0; 16384]);
 
 /// Register a pre-allocated file target (e.g. `PANIC.LOG`) discovered at boot.
 pub fn register_target(
@@ -184,7 +185,11 @@ pub fn write_panic_dump(
     // Append recent log buffer
     let remaining = target.max_bytes.saturating_sub(writer.offset).saturating_sub(256);
     if remaining > 0 {
-        let mut log_slice = [0u8; 16384];
+        if is_panicked {
+            unsafe { LOG_SLICE_BUF.force_unlock(); }
+        }
+        let mut log_slice = LOG_SLICE_BUF.lock();
+        log_slice.fill(0);
         let extracted = if let Some(ring) = LOG_RING.try_lock() {
             ring.extract_recent(&mut log_slice[..remaining.min(16384)])
         } else {

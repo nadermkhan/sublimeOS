@@ -1,21 +1,51 @@
-use alloc::vec::Vec;
 use crate::gui::color::Color;
+use crate::mm::PAGE_SIZE;
+use crate::mm::pmm::PMM;
+
+pub const GUI_BACKBUFFER_VIRT: u64 = 0xFFFFFFFFD8000000;
 
 pub struct Canvas {
     pub width: u32,
     pub height: u32,
-    pub buffer: Vec<u32>,
+    pub buffer: &'static mut [u32],
+    allocated_pages: usize,
+    contiguous_phys: Option<u64>,
+    mapped_virt: bool,
 }
 
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
-        let size = (width * height) as usize;
-        let mut buffer = Vec::with_capacity(size);
-        buffer.resize(size, Color::BLACK.to_u32());
+        let total_pixels = (width as usize) * (height as usize);
+        let total_bytes = total_pixels * 4;
+        let total_pages = (total_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        // 1. First attempt fast contiguous physical RAM allocation via PMM
+        let (virt_ptr, contiguous_phys, mapped_virt) = if let Some(phys) = PMM.lock().alloc_contiguous_frames(total_pages) {
+            let virt = crate::mm::phys_to_virt(phys) as *mut u32;
+            (virt, Some(phys), false)
+        } else {
+            // 2. Fallback: map individual 4 KiB frames page-by-page into dedicated virtual window
+            let vmm = crate::mm::vmm::VMM.lock();
+            let kernel_pml4 = vmm.get_kernel_pml4();
+            let flags = crate::mm::vmm::PAGE_PRESENT | crate::mm::vmm::PAGE_WRITABLE | crate::mm::vmm::PAGE_WRITE_COMBINING;
+            for p in 0..total_pages {
+                let virt = GUI_BACKBUFFER_VIRT + (p * PAGE_SIZE) as u64;
+                let phys = PMM.lock().alloc_frame().unwrap_or(0);
+                let _ = vmm.map_page(kernel_pml4, virt, phys, flags);
+            }
+            (GUI_BACKBUFFER_VIRT as *mut u32, None, true)
+        };
+
+        let buffer = unsafe { core::slice::from_raw_parts_mut(virt_ptr, total_pixels) };
+        buffer.fill(Color::BLACK.to_u32());
+
         Self {
             width,
             height,
             buffer,
+            allocated_pages: total_pages,
+            contiguous_phys,
+            mapped_virt,
         }
     }
 
@@ -329,17 +359,37 @@ impl Canvas {
 
         let dst_bytes = fb_ptr as *mut u8;
         if bpp == 32 {
-            for y in 0..h {
-                let dst_row = unsafe { dst_bytes.add(y * stride) as *mut u32 };
-                let src_base = y * w;
-                for x in 0..w {
-                    let argb = self.buffer[src_base + x];
-                    let r = (argb >> 16) & 0xFF;
-                    let g = (argb >> 8) & 0xFF;
-                    let b = argb & 0xFF;
-                    let packed = (r << red_pos) | (g << green_pos) | (b << blue_pos);
+            if red_pos == 0 && green_pos == 8 && blue_pos == 16 {
+                // High-performance line-buffered conversion using PCIe burst copy
+                let mut row_buf = [0u32; 2560];
+                let line_len = w.min(2560);
+                for y in 0..h {
+                    let dst_row = unsafe { dst_bytes.add(y * stride) as *mut u32 };
+                    let src_base = y * w;
+                    for x in 0..line_len {
+                        let argb = self.buffer[src_base + x];
+                        let r = (argb >> 16) & 0xFF;
+                        let g = (argb >> 8) & 0xFF;
+                        let b = argb & 0xFF;
+                        row_buf[x] = r | (g << 8) | (b << 16);
+                    }
                     unsafe {
-                        core::ptr::write_volatile(dst_row.add(x), packed);
+                        core::ptr::copy_nonoverlapping(row_buf.as_ptr(), dst_row, line_len);
+                    }
+                }
+            } else {
+                for y in 0..h {
+                    let dst_row = unsafe { dst_bytes.add(y * stride) as *mut u32 };
+                    let src_base = y * w;
+                    for x in 0..w {
+                        let argb = self.buffer[src_base + x];
+                        let r = (argb >> 16) & 0xFF;
+                        let g = (argb >> 8) & 0xFF;
+                        let b = argb & 0xFF;
+                        let packed = (r << red_pos) | (g << green_pos) | (b << blue_pos);
+                        unsafe {
+                            *dst_row.add(x) = packed;
+                        }
                     }
                 }
             }
@@ -365,6 +415,28 @@ impl Canvas {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+impl Drop for Canvas {
+    fn drop(&mut self) {
+        if let Some(phys) = self.contiguous_phys {
+            let mut pmm = PMM.lock();
+            for p in 0..self.allocated_pages {
+                pmm.free_frame(phys + (p * PAGE_SIZE) as u64);
+            }
+        } else if self.mapped_virt {
+            let vmm = crate::mm::vmm::VMM.lock();
+            let kernel_pml4 = vmm.get_kernel_pml4();
+            let mut pmm = PMM.lock();
+            for p in 0..self.allocated_pages {
+                let virt = GUI_BACKBUFFER_VIRT + (p * PAGE_SIZE) as u64;
+                if let Some(phys) = vmm.translate(kernel_pml4, virt) {
+                    pmm.free_frame(phys);
+                }
+                vmm.unmap_page(kernel_pml4, virt);
             }
         }
     }

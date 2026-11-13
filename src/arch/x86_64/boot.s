@@ -8,12 +8,17 @@
 .align 4
 /* Multiboot 1 Header */
 .set MB1_MAGIC,    0x1BADB002
-.set MB1_FLAGS,    0x00000003 /* ALIGN (4K) | MEMINFO */
+.set MB1_FLAGS,    0x00000007 /* ALIGN (4K) | MEMINFO | VIDEO_MODE */
 .set MB1_CHECKSUM, -(MB1_MAGIC + MB1_FLAGS)
 
 .long MB1_MAGIC
 .long MB1_FLAGS
 .long MB1_CHECKSUM
+.long 0, 0, 0, 0, 0 /* unused header addresses for ELF */
+.long 0             /* mode_type: 0 = linear graphics mode */
+.long 1024          /* width */
+.long 768           /* height */
+.long 32            /* depth */
 
 .align 8
 /* Multiboot 2 Header */

@@ -1,5 +1,5 @@
 use alloc::string::String;
-use crate::arch::x86_64::rtc::read_datetime;
+use crate::arch::x86_64::rtc::get_system_datetime;
 use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
 use crate::gui::desktop::DesktopAppId;
@@ -135,7 +135,7 @@ impl Taskbar {
         draw_char(canvas, spot_x + 6, 5, '?', Color::WHITE);
 
         // RTC Clock
-        let time = read_datetime();
+        let time = get_system_datetime();
         let mut clock_str = String::new();
         push_2digits(&mut clock_str, time.hour);
         clock_str.push(':');

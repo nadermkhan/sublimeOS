@@ -37,13 +37,13 @@ impl TaskStateSegment {
 
 #[repr(C, align(16))]
 struct IstStacks {
-    double_fault_stack: [u8; 16384],
-    page_fault_stack: [u8; 16384],
+    double_fault_stack: [u8; 65536],
+    page_fault_stack: [u8; 65536],
 }
 
 static mut IST_STACKS: IstStacks = IstStacks {
-    double_fault_stack: [0; 16384],
-    page_fault_stack: [0; 16384],
+    double_fault_stack: [0; 65536],
+    page_fault_stack: [0; 65536],
 };
 
 pub static mut TSS: TaskStateSegment = TaskStateSegment::new();
