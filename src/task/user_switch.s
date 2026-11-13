@@ -10,6 +10,12 @@
 .global exit_user_mode_asm
 .type exit_user_mode_asm, @function
 
+.global user_thread_trampoline
+.type user_thread_trampoline, @function
+
+.global fork_child_trampoline
+.type fork_child_trampoline, @function
+
 .section .data
 .align 8
 NEST_DEPTH:
@@ -56,6 +62,9 @@ enter_user_mode_asm:
 
     inc r8
     mov [rip + NEST_DEPTH], r8
+
+    /* Disable interrupts atomically across CR3, user segments, and iretq transition */
+    cli
 
     /* 3. Switch to user address space (CR3) */
     mov cr3, rdx
@@ -128,3 +137,51 @@ exit_user_mode_asm:
 
     /* 7. Return cleanly to the caller of enter_user_mode_asm */
     ret
+
+/*
+ * void user_thread_trampoline(void);
+ * Entered via sublime_context_switch with RBX = user_rip, RBP = user_rsp, IF = 0,
+ * and CR3 + TSS.RSP0 + CpuSyscallContext already configured by scheduler.
+ */
+user_thread_trampoline:
+    cli
+    mov ax, 0x1B
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    push 0x1B        /* SS: User Data Segment (DPL 3) */
+    push rbp         /* RSP: User Stack Pointer */
+    push 0x202       /* RFLAGS: IF=1, reserved bit 1 = 1 */
+    push 0x23        /* CS: User Code Segment (DPL 3) */
+    push rbx         /* RIP: User Entry Point */
+    iretq
+
+/*
+ * void fork_child_trampoline(void);
+ * Entered via sublime_context_switch for a forked child Ring 3 process.
+ * Expects 12 saved GP registers followed by a 5-qword iretq frame on the stack.
+ */
+fork_child_trampoline:
+    cli
+    mov ax, 0x1B
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    pop r9
+    pop r8
+    pop r10
+    pop rdx
+    pop rsi
+    pop rdi
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    xor rax, rax     /* Child receives 0 from fork() */
+    iretq

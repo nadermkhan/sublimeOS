@@ -88,27 +88,50 @@ pub fn handle_demand_fault(pml4_phys: u64, fault_vaddr: u64, is_write: bool) -> 
         return Ok(());
     }
 
-    // 3. Check active user process address space VMAs
-    let user_space = crate::task::user::CURRENT_USER_ADDRESS_SPACE.lock();
-    if let Some(ref space) = *user_space {
-        if space.pml4_phys == pml4_phys {
-            for vma in &space.vmas {
-                if fault_vaddr >= vma.start && fault_vaddr < vma.end {
-                    let frame = PMM.lock().alloc_frame().ok_or("Out of memory for user demand fault")?;
-                    let virt_frame = phys_to_virt(frame) as *mut u8;
-                    unsafe {
-                        core::ptr::write_bytes(virt_frame, 0, 4096);
+    // 3. Check active user process address space VMAs (scheduled PCB first, then fallback slot)
+    let mut matched_vma_flags: Option<u64> = None;
+    let cur_pid = crate::task::process::get_current_pid();
+    if let Some(proc) = crate::task::process::get_process(cur_pid) {
+        let p = proc.lock();
+        if let Some(ref space) = p.address_space {
+            if space.pml4_phys == pml4_phys {
+                for vma in &space.vmas {
+                    if fault_vaddr >= vma.start && fault_vaddr < vma.end {
+                        matched_vma_flags = Some(vma.flags);
+                        break;
                     }
-                    let mut map_flags = PAGE_PRESENT | PAGE_USER;
-                    if (vma.flags & 2) != 0 || is_write {
-                        map_flags |= PAGE_WRITABLE;
-                    }
-                    let pml4 = unsafe { &mut *(phys_to_virt(pml4_phys) as *mut PageTable) };
-                    VMM.lock().map_page(pml4, aligned_vaddr, frame, map_flags)?;
-                    return Ok(());
                 }
             }
         }
+    }
+
+    if matched_vma_flags.is_none() {
+        let user_space = crate::task::user::CURRENT_USER_ADDRESS_SPACE.lock();
+        if let Some(ref space) = *user_space {
+            if space.pml4_phys == pml4_phys {
+                for vma in &space.vmas {
+                    if fault_vaddr >= vma.start && fault_vaddr < vma.end {
+                        matched_vma_flags = Some(vma.flags);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(vma_flags) = matched_vma_flags {
+        let frame = PMM.lock().alloc_frame().ok_or("Out of memory for user demand fault")?;
+        let virt_frame = phys_to_virt(frame) as *mut u8;
+        unsafe {
+            core::ptr::write_bytes(virt_frame, 0, 4096);
+        }
+        let mut map_flags = PAGE_PRESENT | PAGE_USER;
+        if (vma_flags & 2) != 0 || is_write {
+            map_flags |= PAGE_WRITABLE;
+        }
+        let pml4 = unsafe { &mut *(phys_to_virt(pml4_phys) as *mut PageTable) };
+        VMM.lock().map_page(pml4, aligned_vaddr, frame, map_flags)?;
+        return Ok(());
     }
 
     Err("Address not found in demand-paged VMA regions")

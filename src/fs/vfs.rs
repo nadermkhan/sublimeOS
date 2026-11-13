@@ -97,9 +97,14 @@ pub struct File {
 
 impl File {
     pub fn new(inode: Arc<IrqSafeSpinlock<dyn InodeOperations>>, flags: u32) -> Self {
+        let init_offset = if (flags & 0x400) != 0 {
+            inode.lock().stat().size as usize
+        } else {
+            0
+        };
         Self {
             inode,
-            offset: IrqSafeSpinlock::new(0),
+            offset: IrqSafeSpinlock::new(init_offset),
             flags,
         }
     }
@@ -113,6 +118,9 @@ impl File {
 
     pub fn write(&self, buf: &[u8]) -> Result<usize, &'static str> {
         let mut off = self.offset.lock();
+        if (self.flags & 0x400) != 0 {
+            *off = self.inode.lock().stat().size as usize;
+        }
         let bytes_written = self.inode.lock().write(*off, buf)?;
         *off += bytes_written;
         Ok(bytes_written)

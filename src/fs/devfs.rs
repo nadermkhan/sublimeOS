@@ -128,8 +128,8 @@ impl InodeOperations for TtyDev {
         if buf.is_empty() {
             return Ok(0);
         }
-        // Read character from keyboard buffer if available
-        if let Some(ch) = crate::drivers::keyboard::read_char() {
+        // Read character from keyboard or serial input stream
+        if let Some(ch) = crate::shell::get_next_input_char() {
             buf[0] = ch;
             Ok(1)
         } else {

@@ -42,6 +42,7 @@ pub const SYS_FTRUNCATE: u64 = 77;
 pub const SYS_GETCWD: u64 = 79;
 pub const SYS_CHDIR: u64 = 80;
 pub const SYS_MKDIR: u64 = 83;
+pub const SYS_UNLINK: u64 = 87;
 pub const SYS_GETTIMEOFDAY: u64 = 96;
 pub const SYS_SETPGID: u64 = 109;
 pub const SYS_GETPGRP: u64 = 111;
@@ -55,6 +56,7 @@ pub const SYS_SCHED_SETAFFINITY: u64 = 203;
 pub const SYS_SCHED_GETAFFINITY: u64 = 204;
 pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_SYSCOMMAND: u64 = 400;
+pub const SYS_SPAWN_ASYNC: u64 = 401;
 
 pub const SYS_SEM_OPEN: u64 = 240;
 pub const SYS_SEM_CLOSE: u64 = 241;

@@ -82,8 +82,7 @@ pub fn sys_read(fd: usize, buf: *mut u8, count: usize) -> isize {
             if read_bytes > 0 {
                 return read_bytes as isize;
             }
-            crate::arch::x86_64::registers::enable_interrupts();
-            crate::task::scheduler::yield_now();
+            crate::task::scheduler::sleep_ms(5);
         }
     }
 

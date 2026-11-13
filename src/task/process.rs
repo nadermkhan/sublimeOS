@@ -9,7 +9,7 @@ use crate::sync::IrqSafeSpinlock;
 
 pub type ProcessId = u64;
 
-static NEXT_PID: AtomicU64 = AtomicU64::new(1);
+static NEXT_PID: AtomicU64 = AtomicU64::new(2);
 static CURRENT_PID: AtomicU64 = AtomicU64::new(1);
 
 pub static PROCESS_TABLE: IrqSafeSpinlock<Vec<Arc<IrqSafeSpinlock<ProcessControlBlock>>>> =
@@ -48,6 +48,15 @@ pub struct ProcessControlBlock {
 
 impl ProcessControlBlock {
     pub fn new(pid: ProcessId, ppid: ProcessId, name: &str) -> Self {
+        Self::new_with_space(pid, ppid, name, AddressSpace::new())
+    }
+
+    pub fn new_with_space(
+        pid: ProcessId,
+        ppid: ProcessId,
+        name: &str,
+        address_space: Option<AddressSpace>,
+    ) -> Self {
         let mut fd_table = Vec::with_capacity(16);
         for _ in 0..16 {
             fd_table.push(None);
@@ -60,7 +69,7 @@ impl ProcessControlBlock {
             sid: if ppid > 0 { ppid } else { pid },
             name: String::from(name),
             state: ProcessState::Running,
-            address_space: AddressSpace::new(),
+            address_space,
             children: Vec::new(),
             fd_table,
             exit_code: 0,
@@ -103,6 +112,15 @@ impl ProcessControlBlock {
     }
 }
 
+/// Initialize the bootstrap kernel PID 1 slot before `/bin/init` takes over PID 1.
+pub fn init() {
+    let mut table = PROCESS_TABLE.lock();
+    if !table.iter().any(|p| p.lock().pid == 1) {
+        let pcb = Arc::new(IrqSafeSpinlock::new(ProcessControlBlock::new(1, 0, "kernel_boot")));
+        table.push(pcb);
+    }
+}
+
 /// Allocate and register a new process in the process table.
 pub fn alloc_process(name: &str) -> ProcessId {
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
@@ -112,11 +130,42 @@ pub fn alloc_process(name: &str) -> ProcessId {
     pid
 }
 
+/// Allocate and register a new process with a pre-built AddressSpace (avoids extra PML4 allocation).
+pub fn alloc_process_with_space(name: &str, ppid: ProcessId, space: AddressSpace) -> ProcessId {
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let mut pcb = ProcessControlBlock::new_with_space(pid, ppid, name, Some(space));
+    if ppid != 0 {
+        if let Some(parent_proc) = get_process(ppid) {
+            let mut p = parent_proc.lock();
+            p.children.push(pid);
+            pcb.pgid = p.pgid;
+            pcb.sid = p.sid;
+            pcb.fd_table = p.fd_table.clone();
+        }
+    }
+    PROCESS_TABLE.lock().push(Arc::new(IrqSafeSpinlock::new(pcb)));
+    pid
+}
+
 /// Allocate and initialize the master init process strictly as PID 1.
 pub fn alloc_init_process() -> ProcessId {
     let mut table = PROCESS_TABLE.lock();
     table.retain(|p| p.lock().pid != 1);
     let pcb = Arc::new(IrqSafeSpinlock::new(ProcessControlBlock::new(1, 0, "init")));
+    table.push(pcb);
+    1
+}
+
+/// Allocate and initialize the master init process strictly as PID 1 with a pre-built AddressSpace.
+pub fn alloc_init_process_with_space(space: AddressSpace) -> ProcessId {
+    let mut table = PROCESS_TABLE.lock();
+    table.retain(|p| p.lock().pid != 1);
+    let pcb = Arc::new(IrqSafeSpinlock::new(ProcessControlBlock::new_with_space(
+        1,
+        0,
+        "init",
+        Some(space),
+    )));
     table.push(pcb);
     1
 }
@@ -132,7 +181,7 @@ pub fn get_process(pid: ProcessId) -> Option<Arc<IrqSafeSpinlock<ProcessControlB
     None
 }
 
-/// Mark a process as a Zombie with the given exit code.
+/// Mark a process as a Zombie with the given exit code and wake any waiting parent.
 pub fn exit_process(pid: ProcessId, code: i32) {
     let ppid = if let Some(proc) = get_process(pid) {
         let mut p = proc.lock();
@@ -147,35 +196,78 @@ pub fn exit_process(pid: ProcessId, code: i32) {
         if let Some(parent) = get_process(ppid) {
             parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
         }
+        crate::task::scheduler::wake_pid(ppid);
     }
 }
 
-/// POSIX sys_fork (Syscall 57): Clones the active address space with Copy-on-Write
-/// and creates a child process inheriting file descriptors and credentials.
-pub fn sys_fork() -> i32 {
+/// POSIX sys_fork (Syscall 57): Clones the active address space with Copy-on-Write,
+/// creates a child process inheriting descriptors/credentials, and schedules a forked
+/// Ring 3 thread when invoked from `syscall` with a captured `SyscallFrame`.
+pub fn sys_fork_with_frame(frame: Option<&crate::task::thread::SyscallFrame>) -> i32 {
     let parent_pid = get_current_pid();
-    let mut space_guard = crate::task::user::CURRENT_USER_ADDRESS_SPACE.lock();
-    if let Some(ref mut parent_space) = *space_guard {
-        if let Some(child_space) = parent_space.clone_cow() {
-            let child_pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
-            let mut child_pcb = ProcessControlBlock::new(child_pid, parent_pid, "fork_child");
-            child_pcb.address_space = Some(child_space);
+    let parent_proc = get_process(parent_pid);
 
-            // Inherit signals, process group, session, and record child in parent PCB
-            if let Some(parent_proc) = get_process(parent_pid) {
-                let mut p = parent_proc.lock();
-                p.children.push(child_pid);
-                child_pcb.pgid = p.pgid;
-                child_pcb.sid = p.sid;
-                child_pcb.sigactions = p.sigactions;
-                child_pcb.signal_state.blocked = p.signal_state.blocked;
-            }
+    let mut child_space_opt = None;
+    let mut inherited_name = String::from("fork_child");
+    let mut inherited_pgid = parent_pid;
+    let mut inherited_sid = parent_pid;
+    let mut inherited_sigactions = [crate::ipc::signal::SigAction::default(); 32];
+    let mut inherited_blocked = 0u64;
+    let mut inherited_fds = Vec::new();
 
-            PROCESS_TABLE.lock().push(Arc::new(IrqSafeSpinlock::new(child_pcb)));
-            return child_pid as i32;
+    if let Some(ref pproc) = parent_proc {
+        let mut p = pproc.lock();
+        inherited_name = alloc::format!("{}_child", p.name);
+        inherited_pgid = p.pgid;
+        inherited_sid = p.sid;
+        inherited_sigactions = p.sigactions;
+        inherited_blocked = p.signal_state.blocked;
+        inherited_fds = p.fd_table.clone();
+        if let Some(ref mut space) = p.address_space {
+            child_space_opt = space.clone_cow();
         }
     }
-    -1 // -EAGAIN / -ENOMEM
+
+    if child_space_opt.is_none() {
+        let mut space_guard = crate::task::user::CURRENT_USER_ADDRESS_SPACE.lock();
+        if let Some(ref mut parent_space) = *space_guard {
+            child_space_opt = parent_space.clone_cow();
+        }
+    }
+
+    let child_space = match child_space_opt {
+        Some(s) => s,
+        None => return -1, // -EAGAIN / -ENOMEM
+    };
+
+    let child_cr3 = child_space.pml4_phys;
+    let child_pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let mut child_pcb =
+        ProcessControlBlock::new_with_space(child_pid, parent_pid, &inherited_name, Some(child_space));
+    child_pcb.pgid = inherited_pgid;
+    child_pcb.sid = inherited_sid;
+    child_pcb.sigactions = inherited_sigactions;
+    child_pcb.signal_state.blocked = inherited_blocked;
+    if !inherited_fds.is_empty() {
+        child_pcb.fd_table = inherited_fds;
+    }
+
+    if let Some(ref pproc) = parent_proc {
+        pproc.lock().children.push(child_pid);
+    }
+
+    PROCESS_TABLE.lock().push(Arc::new(IrqSafeSpinlock::new(child_pcb)));
+
+    if let Some(f) = frame {
+        crate::task::scheduler::spawn_forked_user_thread(child_pid, &inherited_name, child_cr3, f);
+    }
+
+    child_pid as i32
+}
+
+/// POSIX sys_fork compatibility entry point for kernel-side tests.
+pub fn sys_fork() -> i32 {
+    sys_fork_with_frame(None)
 }
 
 pub const WNOHANG: i32 = 1;
@@ -185,6 +277,10 @@ pub const WCONTINUED: i32 = 8;
 /// POSIX sys_waitpid (Syscall 61): Waits for child process termination or state change.
 pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, options: i32) -> i32 {
     let current_pid = get_current_pid();
+    let current_pgid = get_process(current_pid)
+        .map(|cp| cp.lock().pgid)
+        .unwrap_or(current_pid);
+
     loop {
         let mut target_child = None;
         let mut target_stopped = None;
@@ -199,8 +295,6 @@ pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, options: i32) -> i32 {
                 } else if pid < -1 {
                     proc.pgid == (-pid) as u64
                 } else {
-                    // pid == 0: same process group
-                    let current_pgid = get_process(current_pid).map(|cp| cp.lock().pgid).unwrap_or(current_pid);
                     proc.pgid == current_pgid
                 };
 
@@ -255,7 +349,6 @@ pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, options: i32) -> i32 {
                 } else if pid < -1 {
                     proc.pgid == (-pid) as u64
                 } else {
-                    let current_pgid = get_process(current_pid).map(|cp| cp.lock().pgid).unwrap_or(current_pid);
                     proc.pgid == current_pgid
                 }
             })
@@ -269,11 +362,32 @@ pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, options: i32) -> i32 {
             return 0; // Child is still running, non-blocking return
         }
 
-        // Yield to let child run
-        crate::task::scheduler::yield_now();
-        break;
+        // Sleep briefly (woken early by exit_process via scheduler::wake_pid)
+        crate::task::scheduler::sleep_ms(5);
     }
-    0
+}
+
+/// Block until `child_pid` terminates, reap its zombie PCB, and return its raw exit code.
+pub fn wait_for_child_exit(child_pid: ProcessId) -> i32 {
+    loop {
+        let zombie_code = if let Some(proc) = get_process(child_pid) {
+            let p = proc.lock();
+            match p.state {
+                ProcessState::Zombie(code) => Some(code),
+                _ => None,
+            }
+        } else {
+            return -10; // -ECHILD
+        };
+
+        if let Some(code) = zombie_code {
+            let mut table = PROCESS_TABLE.lock();
+            table.retain(|p| p.lock().pid != child_pid);
+            return code;
+        }
+
+        crate::task::scheduler::sleep_ms(5);
+    }
 }
 
 /// POSIX sys_execve (Syscall 59): Replaces the process image with a new executable.
@@ -403,10 +517,12 @@ pub fn sys_kill(pid: i32, sig: i32) -> i32 {
                 p.exit_code = 128 + sig;
                 let ppid = p.ppid;
                 drop(p);
+                crate::task::scheduler::kill_process_threads(target_pid);
                 if ppid != 0 {
                     if let Some(parent) = get_process(ppid) {
                         parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
                     }
+                    crate::task::scheduler::wake_pid(ppid);
                 }
                 continue;
             }
@@ -432,10 +548,12 @@ pub fn sys_kill(pid: i32, sig: i32) -> i32 {
                         p.exit_code = 128 + sig;
                         let ppid = p.ppid;
                         drop(p);
+                        crate::task::scheduler::kill_process_threads(target_pid);
                         if ppid != 0 {
                             if let Some(parent) = get_process(ppid) {
                                 parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
                             }
+                            crate::task::scheduler::wake_pid(ppid);
                         }
                     }
                     crate::ipc::signal::Signal::SIGTSTP | crate::ipc::signal::Signal::SIGSTOP => {
@@ -1068,6 +1186,161 @@ pub fn sys_close(fd: usize) -> i64 {
     -9 // -EBADF
 }
 
+pub fn sys_dup(oldfd: usize) -> i64 {
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let mut p = proc.lock();
+        if oldfd < p.fd_table.len() && p.fd_table[oldfd].is_none() && oldfd < 3 {
+            if let Ok(file) = crate::fs::vfs::VFS.lock().open("/dev/console", if oldfd == 0 { 0 } else { 1 }) {
+                p.fd_table[oldfd] = Some(file);
+            }
+        }
+        if oldfd < p.fd_table.len() {
+            if let Some(ref file) = p.fd_table[oldfd] {
+                let f = file.clone();
+                if let Some(newfd) = p.alloc_fd(f) {
+                    return newfd as i64;
+                } else {
+                    return -24; // -EMFILE
+                }
+            }
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_dup2(oldfd: usize, newfd: usize) -> i64 {
+    if newfd >= 256 {
+        return -9; // -EBADF
+    }
+    let current_pid = get_current_pid();
+    if oldfd == newfd {
+        if let Some(proc) = get_process(current_pid) {
+            let p = proc.lock();
+            if oldfd < p.fd_table.len() && p.fd_table[oldfd].is_some() {
+                return newfd as i64;
+            }
+        }
+        return -9; // -EBADF
+    }
+
+    if let Some(proc) = get_process(current_pid) {
+        let mut p = proc.lock();
+        if oldfd < p.fd_table.len() && p.fd_table[oldfd].is_none() && oldfd < 3 {
+            if let Ok(file) = crate::fs::vfs::VFS.lock().open("/dev/console", if oldfd == 0 { 0 } else { 1 }) {
+                p.fd_table[oldfd] = Some(file);
+            }
+        }
+        if oldfd < p.fd_table.len() {
+            if let Some(ref file) = p.fd_table[oldfd] {
+                let f = file.clone();
+                while p.fd_table.len() <= newfd {
+                    p.fd_table.push(None);
+                }
+                p.fd_table[newfd] = Some(f);
+                return newfd as i64;
+            }
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_pipe(pipefd_ptr: *mut i32) -> i64 {
+    if pipefd_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let (r_inode, w_inode) = crate::ipc::pipe::create_pipe();
+    let r_file = Arc::new(crate::fs::vfs::File::new(r_inode, 0));
+    let w_file = Arc::new(crate::fs::vfs::File::new(w_inode, 1));
+
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let mut p = proc.lock();
+        if let Some(fd0) = p.alloc_fd(r_file) {
+            if let Some(fd1) = p.alloc_fd(w_file) {
+                unsafe {
+                    *pipefd_ptr = fd0 as i32;
+                    *pipefd_ptr.add(1) = fd1 as i32;
+                }
+                return 0;
+            } else {
+                p.fd_table[fd0] = None;
+                return -24; // -EMFILE
+            }
+        }
+    }
+    -24 // -EMFILE
+}
+
+pub fn sys_unlink(path_ptr: *const u8) -> i64 {
+    if path_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *path_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let path_str = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(path_ptr, len) }) {
+        Ok(s) => s,
+        Err(_) => return -22, // -EINVAL
+    };
+    let (parent_path, filename) = match path_str.rfind('/') {
+        Some(pos) => {
+            let p = if pos == 0 { "/" } else { &path_str[..pos] };
+            let f = &path_str[pos + 1..];
+            (p, f)
+        }
+        None => ("/", path_str),
+    };
+    let vfs = crate::fs::vfs::VFS.lock();
+    let parent = match vfs.resolve_path(parent_path) {
+        Ok(node) => node,
+        Err(_) => return -2, // -ENOENT
+    };
+    drop(vfs);
+    let res = parent.lock().unlink(filename);
+    match res {
+        Ok(()) => 0,
+        Err(_) => -2, // -ENOENT
+    }
+}
+
+pub fn sys_mkdir(path_ptr: *const u8, _mode: u32) -> i64 {
+    if path_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *path_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let path_str = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(path_ptr, len) }) {
+        Ok(s) => s,
+        Err(_) => return -22, // -EINVAL
+    };
+    let (parent_path, dir_name) = match path_str.rfind('/') {
+        Some(pos) => {
+            let p = if pos == 0 { "/" } else { &path_str[..pos] };
+            let d = &path_str[pos + 1..];
+            (p, d)
+        }
+        None => ("/", path_str),
+    };
+    if dir_name.is_empty() {
+        return -17; // -EEXIST
+    }
+    let vfs = crate::fs::vfs::VFS.lock();
+    let parent = match vfs.resolve_path(parent_path) {
+        Ok(node) => node,
+        Err(_) => return -2, // -ENOENT
+    };
+    drop(vfs);
+    let res = parent.lock().create(dir_name, crate::fs::vfs::FileType::Directory);
+    match res {
+        Ok(_) => 0,
+        Err(_) => -13, // -EACCES
+    }
+}
+
 pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> i64 {
     let current_pid = get_current_pid();
     let file = if let Some(proc) = get_process(current_pid) {
@@ -1529,20 +1802,17 @@ pub fn sys_clone(flags: u64, _stack: *mut u8, ptid: *mut i32, ctid: *mut i32, _t
     };
 
     let new_tid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
-    let mut child_pcb = ProcessControlBlock::new(new_tid, parent_pid, "thread");
+    let mut child_pcb = ProcessControlBlock::new_with_space(new_tid, parent_pid, "thread", None);
 
-    let p = parent_proc.lock();
+    let mut p = parent_proc.lock();
     child_pcb.pgid = p.pgid;
     child_pcb.sid = p.sid;
 
     // CLONE_VM: share address space
     if (flags & CLONE_VM) != 0 {
         child_pcb.address_space = p.address_space.clone();
-    } else {
-        let mut space_guard = crate::task::user::CURRENT_USER_ADDRESS_SPACE.lock();
-        if let Some(ref mut parent_space) = *space_guard {
-            child_pcb.address_space = parent_space.clone_cow();
-        }
+    } else if let Some(ref mut parent_space) = p.address_space {
+        child_pcb.address_space = parent_space.clone_cow();
     }
 
     // CLONE_FILES: share file descriptor table
@@ -1556,6 +1826,13 @@ pub fn sys_clone(flags: u64, _stack: *mut u8, ptid: *mut i32, ctid: *mut i32, _t
         child_pcb.signal_state = p.signal_state.clone();
     }
     drop(p);
+
+    if (flags & CLONE_VM) == 0 && child_pcb.address_space.is_none() {
+        let mut space_guard = crate::task::user::CURRENT_USER_ADDRESS_SPACE.lock();
+        if let Some(ref mut parent_space) = *space_guard {
+            child_pcb.address_space = parent_space.clone_cow();
+        }
+    }
 
     if (flags & CLONE_PARENT_SETTID) != 0 && !ptid.is_null() {
         unsafe { *ptid = new_tid as i32; }

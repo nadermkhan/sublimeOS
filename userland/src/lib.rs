@@ -246,11 +246,46 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 }
 
 pub fn open(path: &str, flags: i32, mode: i32) -> isize {
-    unsafe { syscall3(2, path.as_ptr() as u64, flags as u64, mode as u64) as isize }
+    let mut buf = [0u8; 256];
+    let bytes = path.as_bytes();
+    let len = bytes.len().min(255);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf[len] = 0;
+    unsafe { syscall3(2, buf.as_ptr() as u64, flags as u64, mode as u64) as isize }
 }
 
 pub fn close(fd: usize) -> isize {
     unsafe { syscall1(3, fd as u64) as isize }
+}
+
+pub fn dup(oldfd: usize) -> isize {
+    unsafe { syscall1(32, oldfd as u64) as isize }
+}
+
+pub fn dup2(oldfd: usize, newfd: usize) -> isize {
+    unsafe { syscall2(33, oldfd as u64, newfd as u64) as isize }
+}
+
+pub fn pipe(fds: &mut [i32; 2]) -> isize {
+    unsafe { syscall1(22, fds.as_mut_ptr() as u64) as isize }
+}
+
+pub fn unlink(path: &str) -> isize {
+    let mut buf = [0u8; 256];
+    let bytes = path.as_bytes();
+    let len = bytes.len().min(255);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf[len] = 0;
+    unsafe { syscall1(87, buf.as_ptr() as u64) as isize }
+}
+
+pub fn mkdir(path: &str, mode: u32) -> isize {
+    let mut buf = [0u8; 256];
+    let bytes = path.as_bytes();
+    let len = bytes.len().min(255);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf[len] = 0;
+    unsafe { syscall2(83, buf.as_ptr() as u64, mode as u64) as isize }
 }
 
 pub fn getpid() -> usize {
@@ -287,13 +322,21 @@ pub fn sync() {
     }
 }
 
-pub fn spawn(path: &str) -> isize {
+fn spawn_syscall(sysno: u64, path: &str) -> isize {
     let mut buf = [0u8; 256];
     let bytes = path.as_bytes();
     let len = bytes.len().min(255);
     buf[..len].copy_from_slice(&bytes[..len]);
     buf[len] = 0;
-    unsafe { syscall1(58, buf.as_ptr() as u64) as isize }
+    unsafe { syscall1(sysno, buf.as_ptr() as u64) as isize }
+}
+
+pub fn spawn(path: &str) -> isize {
+    spawn_syscall(58, path)
+}
+
+pub fn spawn_bg(path: &str) -> isize {
+    spawn_syscall(401, path)
 }
 
 pub fn syscommand(cmd: &str) -> isize {

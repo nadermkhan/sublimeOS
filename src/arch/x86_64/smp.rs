@@ -155,6 +155,7 @@ pub extern "C" fn ap_kernel_entry(apic_id_arg: u64) -> ! {
         crate::arch::x86_64::gdt::load_kernel_gdt_for_ap();
         crate::arch::x86_64::idt::load_idt();
     }
+    crate::arch::x86_64::syscall::init_ap();
     crate::arch::x86_64::apic::init_ap();
 
     let hw_apic_id = apic::get_apic_id();

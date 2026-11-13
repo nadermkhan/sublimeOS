@@ -68,11 +68,9 @@ pub fn launch_init() -> ! {
     let mut buf = alloc::vec![0u8; 131072];
     let n = file.read(&mut buf).expect("Failed to read /bin/init for PID 1 boot");
 
-    let exit_code = crate::task::user::execute_init_binary(&buf[..n])
-        .expect("Kernel panic: Failed to execute /bin/init (PID 1) in Ring 3");
+    crate::task::user::spawn_init_process(&buf[..n])
+        .expect("Kernel panic: Failed to spawn /bin/init (PID 1) in Ring 3");
 
-    kinfo!("PID 1 (/bin/init) exited with code {}. System halting cleanly.", exit_code);
-    loop {
-        crate::arch::x86_64::registers::hlt();
-    }
+    // Retire the kernel boot thread so the scheduler immediately dispatches PID 1
+    crate::task::scheduler::exit_current_thread(0);
 }
