@@ -17,6 +17,7 @@ pub struct SettingsApp {
     pub current_tab: SettingsTab,
     pub volume_level: u8,
     pub status_feedback: String,
+    pub hw: crate::drivers::platform::smbios::SystemHardwareTelemetry,
 }
 
 impl SettingsApp {
@@ -25,6 +26,7 @@ impl SettingsApp {
             current_tab: SettingsTab::General,
             volume_level: 80,
             status_feedback: String::from("System Settings: Ready"),
+            hw: crate::drivers::platform::smbios::get_hardware_telemetry(),
         }
     }
 
@@ -123,7 +125,7 @@ impl SettingsApp {
         }
 
         // 2. Right Content Panel
-        let hw = crate::drivers::platform::smbios::get_hardware_telemetry();
+        let hw = &self.hw;
         let mut cy = y + 14;
 
         match self.current_tab {

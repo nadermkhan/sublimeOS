@@ -1,12 +1,17 @@
+use crate::drivers::platform::smbios::{get_hardware_telemetry, SystemHardwareTelemetry};
 use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
 use crate::gui::font::{draw_string, draw_string_scaled, FONT_HEIGHT};
 
-pub struct AboutApp;
+pub struct AboutApp {
+    hw: SystemHardwareTelemetry,
+}
 
 impl AboutApp {
     pub fn new() -> Self {
-        Self
+        Self {
+            hw: get_hardware_telemetry(),
+        }
     }
 
     pub fn render(&self, canvas: &mut Canvas, x: i32, y: i32, w: i32, h: i32) {
@@ -35,7 +40,7 @@ impl AboutApp {
         );
         draw_y += FONT_HEIGHT + 4;
 
-        let hw = crate::drivers::platform::smbios::get_hardware_telemetry();
+        let hw = &self.hw;
 
         draw_string(
             canvas,

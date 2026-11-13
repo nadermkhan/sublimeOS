@@ -9,7 +9,6 @@ pub mod taskbar;
 pub mod window;
 
 use alloc::vec::Vec;
-use crate::arch::x86_64::pit::sleep_ms;
 use crate::arch::x86_64::serial::read_rx_char;
 use crate::drivers::keyboard::read_char;
 use crate::drivers::mouse::MOUSE;
@@ -19,7 +18,7 @@ use crate::gui::canvas::Canvas;
 use crate::gui::desktop::{Desktop, DesktopAppId};
 use crate::gui::mouse::{draw_cursor, CursorType};
 use crate::gui::spotlight::{Spotlight, SpotlightTarget};
-use crate::gui::taskbar::{Taskbar, TaskbarAction, TaskbarTab};
+use crate::gui::taskbar::{Taskbar, TaskbarAction};
 use crate::gui::window::{ResizeEdge, Window, WindowApp};
 use crate::kinfo;
 
@@ -30,7 +29,7 @@ pub struct DesktopManager {
     pub spotlight: Spotlight,
     pub windows: Vec<Window>,
     next_window_id: u32,
-    prev_left_down: bool,
+    pub prev_left_down: bool,
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub dirty: bool,
@@ -263,21 +262,8 @@ impl DesktopManager {
                 }
             }
 
-            // Collect tabs info for taskbar click testing
-            let tabs: Vec<TaskbarTab> = self
-                .windows
-                .iter()
-                .map(|w| TaskbarTab {
-                    window_id: w.id,
-                    title: w.title.clone(),
-                    is_active: w.is_active,
-                    is_minimized: w.is_minimized,
-                    app_id: w.app.app_id(),
-                })
-                .collect();
-
             // 3. Check taskbar / start menu click
-            let action = self.taskbar.handle_click(x, y, &tabs, sw, sh);
+            let action = self.taskbar.handle_click(x, y, &self.windows, sw, sh);
             match action {
                 TaskbarAction::FocusWindow(win_id) => {
                     let mut is_active_now = false;
@@ -472,18 +458,7 @@ impl DesktopManager {
         }
 
         // 3. Taskbar, Menus & Dock
-        let tabs: Vec<TaskbarTab> = self
-            .windows
-            .iter()
-            .map(|w| TaskbarTab {
-                window_id: w.id,
-                title: w.title.clone(),
-                is_active: w.is_active,
-                is_minimized: w.is_minimized,
-                app_id: w.app.app_id(),
-            })
-            .collect();
-        self.taskbar.render(&mut self.canvas, &tabs, self.mouse_x, self.mouse_y);
+        self.taskbar.render(&mut self.canvas, &self.windows, self.mouse_x, self.mouse_y);
 
         // 3.5. Spotlight Search Modal Overlay
         self.spotlight.render(&mut self.canvas, sw, sh);
@@ -636,11 +611,26 @@ pub fn launch_desktop() {
             desktop_mgr.handle_key_event(byte as char);
         }
 
+        let frame_start = crate::arch::x86_64::pit::get_ticks();
+
         // 4. Render frame
         desktop_mgr.render_frame();
 
-        // 5. Short sleep to throttle frame rate (~30 FPS)
-        sleep_ms(30);
+        // 5. Throttled frame pacing (~60 FPS target): wait up to 16ms, waking immediately on input/timer interrupts
+        while crate::arch::x86_64::pit::get_ticks().saturating_sub(frame_start) < 16 {
+            if crate::drivers::keyboard::poll_ps2_controller() {
+                break;
+            }
+            crate::drivers::usb::poll_hid_nonblocking();
+            let (mx, my, lbtn) = {
+                let m = MOUSE.lock();
+                (m.x, m.y, m.left_button)
+            };
+            if mx != desktop_mgr.mouse_x || my != desktop_mgr.mouse_y || lbtn != desktop_mgr.prev_left_down {
+                break;
+            }
+            crate::arch::x86_64::registers::enable_interrupts_and_hlt();
+        }
     }
 
     crate::drivers::gop_console::set_gui_active(false);

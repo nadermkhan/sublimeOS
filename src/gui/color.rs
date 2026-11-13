@@ -87,20 +87,22 @@ impl Color {
         self.0
     }
 
-    /// Linear interpolation between two colors by factor t (0..255).
+    /// Linear interpolation between two colors by factor t (0..255) using fast bit shifts.
+    #[inline(always)]
     pub fn lerp(c1: Color, c2: Color, t: u32) -> Color {
         let t = t.min(255);
-        let inv_t = 255 - t;
+        let inv_t = 256 - t;
+        let t_plus = t + 1;
 
-        let a = ((c1.a() as u32 * inv_t + c2.a() as u32 * t) / 255) as u8;
-        let r = ((c1.r() as u32 * inv_t + c2.r() as u32 * t) / 255) as u8;
-        let g = ((c1.g() as u32 * inv_t + c2.g() as u32 * t) / 255) as u8;
-        let b = ((c1.b() as u32 * inv_t + c2.b() as u32 * t) / 255) as u8;
+        let a = ((c1.a() as u32 * inv_t + c2.a() as u32 * t_plus) >> 8) as u8;
+        let r = ((c1.r() as u32 * inv_t + c2.r() as u32 * t_plus) >> 8) as u8;
+        let g = ((c1.g() as u32 * inv_t + c2.g() as u32 * t_plus) >> 8) as u8;
+        let b = ((c1.b() as u32 * inv_t + c2.b() as u32 * t_plus) >> 8) as u8;
 
         Color::argb(a, r, g, b)
     }
 
-    /// Alpha blend source color onto destination color.
+    /// Fast alpha blend source color onto destination color using bit shifts instead of integer division.
     #[inline(always)]
     pub fn blend(src: Color, dst: Color) -> Color {
         let sa = src.a() as u32;
@@ -111,10 +113,11 @@ impl Color {
             return dst;
         }
 
-        let inv_sa = 255 - sa;
-        let r = ((src.r() as u32 * sa + dst.r() as u32 * inv_sa) / 255) as u8;
-        let g = ((src.g() as u32 * sa + dst.g() as u32 * inv_sa) / 255) as u8;
-        let b = ((src.b() as u32 * sa + dst.b() as u32 * inv_sa) / 255) as u8;
+        let inv_sa = 256 - sa;
+        let sa_plus = sa + 1;
+        let r = ((src.r() as u32 * sa_plus + dst.r() as u32 * inv_sa) >> 8) as u8;
+        let g = ((src.g() as u32 * sa_plus + dst.g() as u32 * inv_sa) >> 8) as u8;
+        let b = ((src.b() as u32 * sa_plus + dst.b() as u32 * inv_sa) >> 8) as u8;
 
         Color::argb(255, r, g, b)
     }

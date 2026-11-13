@@ -70,6 +70,7 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     // 7. Enable CPU interrupts now that all subsystems and scheduler are active
     arch::x86_64::registers::enable_interrupts();
     kinfo!("CPU interrupts enabled");
+    arch::x86_64::rtc::init();
 
     // 8. Run Kernel Self-Test Suite to verify all subsystems
     arch::x86_64::pit::IN_KERNEL_TESTS.store(true, core::sync::atomic::Ordering::SeqCst);

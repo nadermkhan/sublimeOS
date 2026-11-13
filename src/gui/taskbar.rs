@@ -4,6 +4,7 @@ use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
 use crate::gui::desktop::DesktopAppId;
 use crate::gui::font::{draw_char, draw_string};
+use crate::gui::window::Window;
 use crate::mm::pmm::PMM;
 
 pub const TOPBAR_HEIGHT: i32 = 26;
@@ -48,7 +49,7 @@ impl Taskbar {
     pub fn render(
         &self,
         canvas: &mut Canvas,
-        tabs: &[TaskbarTab],
+        windows: &[Window],
         mouse_x: i32,
         mouse_y: i32,
     ) {
@@ -70,8 +71,8 @@ impl Taskbar {
         draw_char(canvas, 16, 5, '✦', Color::WHITE);
 
         // Dynamic Active App Title & Menus
-        let active_tab = tabs.iter().find(|t| t.is_active);
-        let (app_title, submenus): (&str, &[&str]) = match active_tab.map(|t| t.app_id) {
+        let active_win = windows.iter().find(|w| w.is_active);
+        let (app_title, submenus): (&str, &[&str]) = match active_win.map(|w| w.app.app_id()) {
             Some(DesktopAppId::Terminal) => ("Terminal", &["Shell", "Edit", "View", "Window", "Help"]),
             Some(DesktopAppId::Calculator) => ("Calculator", &["Edit", "View", "Help"]),
             Some(DesktopAppId::TextEdit) => ("TextEdit", &["File", "Edit", "Format", "View", "Help"]),
@@ -147,8 +148,8 @@ impl Taskbar {
         // ==========================================
         // 2. Floating Frosted Glass Dock (Bottom)
         // ==========================================
-        let min_tabs: alloc::vec::Vec<&TaskbarTab> = tabs.iter().filter(|t| t.is_minimized).collect();
-        let dock_w = 500 + (min_tabs.len() as i32 * 48);
+        let min_count = windows.iter().filter(|w| w.is_minimized).count();
+        let dock_w = 500 + (min_count as i32 * 48);
         let dock_h = 52;
         let dock_x = (sw - dock_w) / 2;
         let dock_y = sh - dock_h - 10;
@@ -189,7 +190,7 @@ impl Taskbar {
             draw_char(canvas, app_x + 14, icon_y + 10, icon_ch, icon_col);
 
             // Active running indicator dot underneath
-            let is_running = tabs.iter().any(|t| t.app_id == app_id && !t.is_minimized);
+            let is_running = windows.iter().any(|w| w.app.app_id() == app_id && !w.is_minimized);
             if is_running {
                 canvas.fill_circle(app_x + 18, dock_y + 46, 2, Color::ACCENT_CYAN);
             }
@@ -202,7 +203,7 @@ impl Taskbar {
         app_x += 16;
 
         // Minimized Windows Section (Right of divider, before Trash)
-        for _min_tab in min_tabs.iter() {
+        for _min_win in windows.iter().filter(|w| w.is_minimized) {
             let is_hover = mouse_x >= app_x - 4
                 && mouse_x <= app_x + 40
                 && mouse_y >= icon_y - 4
@@ -351,7 +352,7 @@ impl Taskbar {
         &mut self,
         x: i32,
         y: i32,
-        _tabs: &[TaskbarTab],
+        windows: &[Window],
         sw: i32,
         sh: i32,
     ) -> TaskbarAction {
@@ -434,8 +435,8 @@ impl Taskbar {
         }
 
         // 6. Check Bottom Floating Dock
-        let min_tabs: alloc::vec::Vec<&TaskbarTab> = _tabs.iter().filter(|t| t.is_minimized).collect();
-        let dock_w = 500 + (min_tabs.len() as i32 * 48);
+        let min_count = windows.iter().filter(|w| w.is_minimized).count();
+        let dock_w = 500 + (min_count as i32 * 48);
         let dock_h = 52;
         let dock_x = (sw - dock_w) / 2;
         let dock_y = sh - dock_h - 10;
@@ -463,9 +464,9 @@ impl Taskbar {
             app_x += 16;
 
             // Check Minimized Window restore clicks
-            for min_tab in min_tabs.iter() {
+            for min_win in windows.iter().filter(|w| w.is_minimized) {
                 if x >= app_x && x <= app_x + 40 {
-                    return TaskbarAction::RestoreWindow(min_tab.window_id);
+                    return TaskbarAction::RestoreWindow(min_win.id);
                 }
                 app_x += 48;
             }

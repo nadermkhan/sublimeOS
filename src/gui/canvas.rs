@@ -24,10 +24,10 @@ impl Canvas {
             let virt = crate::mm::phys_to_virt(phys) as *mut u32;
             (virt, Some(phys), false)
         } else {
-            // 2. Fallback: map individual 4 KiB frames page-by-page into dedicated virtual window
+            // 2. Fallback: map individual 4 KiB frames page-by-page into dedicated virtual window (Write-Back cached)
             let vmm = crate::mm::vmm::VMM.lock();
             let kernel_pml4 = vmm.get_kernel_pml4();
-            let flags = crate::mm::vmm::PAGE_PRESENT | crate::mm::vmm::PAGE_WRITABLE | crate::mm::vmm::PAGE_WRITE_COMBINING;
+            let flags = crate::mm::vmm::PAGE_PRESENT | crate::mm::vmm::PAGE_WRITABLE;
             for p in 0..total_pages {
                 let virt = GUI_BACKBUFFER_VIRT + (p * PAGE_SIZE) as u64;
                 let phys = PMM.lock().alloc_frame().unwrap_or(0);
@@ -278,34 +278,55 @@ impl Canvas {
         }
     }
 
+    /// Cache-friendly vertical gradient with direct contiguous scanline slice fills.
     pub fn draw_gradient_v(&mut self, x: i32, y: i32, w: i32, h: i32, top: Color, bottom: Color) {
         if w <= 0 || h <= 0 {
             return;
         }
-        for dy in 0..h {
-            let t = (dy * 255) / (h - 1).max(1);
-            let color = Color::lerp(top, bottom, t as u32);
-            self.fill_rect(x, y + dy, w, 1, color);
+        let x_start = x.max(0);
+        let y_start = y.max(0);
+        let x_end = (x + w).min(self.width as i32);
+        let y_end = (y + h).min(self.height as i32);
+        if x_start >= x_end || y_start >= y_end {
+            return;
+        }
+        let denom = (h - 1).max(1) as u32;
+        for py in y_start..y_end {
+            let t = ((py - y) as u32 * 255) / denom;
+            let val = Color::lerp(top, bottom, t).to_u32();
+            let row_offset = py as usize * self.width as usize;
+            self.buffer[row_offset + x_start as usize..row_offset + x_end as usize].fill(val);
         }
     }
 
+    /// Cache-friendly row-major horizontal gradient (avoids column-major cache thrashing).
     pub fn draw_gradient_h(&mut self, x: i32, y: i32, w: i32, h: i32, left: Color, right: Color) {
         if w <= 0 || h <= 0 {
             return;
         }
-        for dx in 0..w {
-            let t = (dx * 255) / (w - 1).max(1);
-            let color = Color::lerp(left, right, t as u32);
-            self.fill_rect(x + dx, y, 1, h, color);
+        let x_start = x.max(0);
+        let y_start = y.max(0);
+        let x_end = (x + w).min(self.width as i32);
+        let y_end = (y + h).min(self.height as i32);
+        if x_start >= x_end || y_start >= y_end {
+            return;
+        }
+        let denom = (w - 1).max(1) as u32;
+        for py in y_start..y_end {
+            let row_offset = py as usize * self.width as usize;
+            for px in x_start..x_end {
+                let t = ((px - x) as u32 * 255) / denom;
+                self.buffer[row_offset + px as usize] = Color::lerp(left, right, t).to_u32();
+            }
         }
     }
 
-    /// Render a smooth drop shadow around a rectangular window.
+    /// Hollow perimeter drop shadow (avoids millions of redundant interior overdraws per frame).
     pub fn draw_shadow(&mut self, x: i32, y: i32, w: i32, h: i32, spread: i32, base_alpha: u8) {
         for i in 1..=spread {
             let alpha = ((base_alpha as i32 * (spread - i + 1)) / (spread * 2)) as u8;
             let shadow_color = Color::argb(alpha, 0, 0, 0);
-            self.fill_rounded_rect(
+            self.draw_rounded_rect(
                 x - i,
                 y - i + 4,
                 w + 2 * i,

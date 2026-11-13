@@ -93,6 +93,17 @@ pub fn unix_to_datetime(unix_secs: u64) -> DateTime {
     }
 }
 
+/// Anchor system time from CMOS RTC at boot.
+pub fn init() {
+    let dt = read_datetime();
+    let unix = datetime_to_unix(&dt);
+    set_system_time(unix);
+    crate::kinfo!(
+        "CMOS RTC anchored: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC (Unix: {})",
+        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, unix
+    );
+}
+
 /// Set the system time anchor (e.g. from NTP or manual configuration).
 pub fn set_system_time(unix_secs: u64) {
     let current_ticks = crate::arch::x86_64::pit::get_ticks();
