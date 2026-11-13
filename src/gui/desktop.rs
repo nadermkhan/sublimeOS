@@ -8,6 +8,8 @@ pub enum DesktopAppId {
     Sysmon,
     FileManager,
     About,
+    Calculator,
+    TextEdit,
 }
 
 pub struct DesktopIcon {
@@ -20,7 +22,7 @@ pub struct DesktopIcon {
 }
 
 pub struct Desktop {
-    pub icons: [DesktopIcon; 4],
+    pub icons: [DesktopIcon; 6],
     pub selected_icon: Option<DesktopAppId>,
     stars: [(i32, i32, Color); 96],
 }
@@ -49,7 +51,7 @@ impl Desktop {
                 id: DesktopAppId::FileManager,
                 title: "Sublime HD",
                 x: 930,
-                y: 42,
+                y: 38,
                 icon_char: '@',
                 icon_color: Color::WHITE,
             },
@@ -57,7 +59,7 @@ impl Desktop {
                 id: DesktopAppId::FileManager,
                 title: "Sublime USB",
                 x: 930,
-                y: 136,
+                y: 126,
                 icon_char: '#',
                 icon_color: Color::ACCENT_YELLOW,
             },
@@ -65,15 +67,31 @@ impl Desktop {
                 id: DesktopAppId::Terminal,
                 title: "Terminal",
                 x: 930,
-                y: 230,
+                y: 214,
                 icon_char: '>',
                 icon_color: Color::ACCENT_GREEN,
+            },
+            DesktopIcon {
+                id: DesktopAppId::Calculator,
+                title: "Calculator",
+                x: 930,
+                y: 302,
+                icon_char: '+',
+                icon_color: Color::ACCENT_ORANGE,
+            },
+            DesktopIcon {
+                id: DesktopAppId::TextEdit,
+                title: "TextEdit",
+                x: 930,
+                y: 390,
+                icon_char: 'T',
+                icon_color: Color::ACCENT_CYAN,
             },
             DesktopIcon {
                 id: DesktopAppId::About,
                 title: "About Sublime",
                 x: 930,
-                y: 324,
+                y: 478,
                 icon_char: '✦',
                 icon_color: Color::ACCENT_PURPLE,
             },
@@ -92,7 +110,7 @@ impl Desktop {
         let h = canvas.height as i32;
 
         // 1. Cosmic Gradient Wallpaper
-        canvas.draw_gradient_v(0, 0, w, h - 36, Color::BG_DEEP_SPACE, Color::BG_NEBULA_PURPLE);
+        canvas.draw_gradient_v(0, 0, w, h, Color::BG_DEEP_SPACE, Color::BG_NEBULA_PURPLE);
 
         // 2. Starfield
         for &(sx, sy, col) in self.stars.iter() {
@@ -178,7 +196,7 @@ impl Desktop {
                 Color::WINDOW_BORDER,
             );
 
-            // Center icon character (scaled or centered)
+            // Center icon character
             draw_char(canvas, icon.x + 20, icon.y + 16, icon.icon_char, icon.icon_color);
 
             // Icon title centered underneath

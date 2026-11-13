@@ -14,7 +14,7 @@ use crate::serial_println;
 use crate::drivers::keyboard::read_char;
 use crate::drivers::mouse::MOUSE;
 use crate::drivers::vbe::{self, VBE};
-use crate::gui::apps::{AboutApp, FileManagerApp, SysmonApp, TerminalApp};
+use crate::gui::apps::{AboutApp, CalcApp, FileManagerApp, SysmonApp, TerminalApp, TextEditApp};
 use crate::gui::canvas::Canvas;
 use crate::gui::desktop::{Desktop, DesktopAppId};
 use crate::gui::mouse::draw_cursor;
@@ -98,6 +98,24 @@ impl DesktopManager {
                 480,
                 330,
                 WindowApp::About(AboutApp::new()),
+            ),
+            DesktopAppId::Calculator => Window::new(
+                id,
+                "Calculator",
+                440,
+                80,
+                240,
+                340,
+                WindowApp::Calc(CalcApp::new()),
+            ),
+            DesktopAppId::TextEdit => Window::new(
+                id,
+                "TextEdit — untitled.txt",
+                180,
+                70,
+                520,
+                360,
+                WindowApp::Editor(TextEditApp::new()),
             ),
         };
 
@@ -200,7 +218,7 @@ impl DesktopManager {
                     return TaskbarAction::None;
                 }
                 TaskbarAction::ToggleStartMenu => return TaskbarAction::None,
-                TaskbarAction::ExitToShell | TaskbarAction::HaltSystem => return action,
+                TaskbarAction::ExitToShell | TaskbarAction::RebootSystem | TaskbarAction::HaltSystem => return action,
                 TaskbarAction::None => {}
             }
 
@@ -302,7 +320,7 @@ impl DesktopManager {
 
         // 2. Windows (back to front)
         for w in self.windows.iter_mut() {
-            w.render(&mut self.canvas);
+            w.render(&mut self.canvas, self.mouse_x, self.mouse_y);
         }
 
         // 3. Taskbar & Start Menu
@@ -373,6 +391,12 @@ pub fn launch_desktop() {
         match action {
             TaskbarAction::ExitToShell => {
                 running = false;
+            }
+            TaskbarAction::RebootSystem => {
+                kinfo!("System reboot requested via GUI.");
+                unsafe {
+                    crate::arch::x86_64::io::outb(0x64, 0xFE);
+                }
             }
             TaskbarAction::HaltSystem => {
                 kinfo!("System halted by user via GUI.");

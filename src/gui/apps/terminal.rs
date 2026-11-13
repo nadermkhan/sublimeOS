@@ -240,10 +240,19 @@ impl TerminalApp {
                 }
             }
             _ => {
-                let mut err = String::from("sublime: command not found: ");
-                err.push_str(cmd);
-                self.lines.push((err, Color::ACCENT_RED));
+                crate::arch::x86_64::vga::start_stdout_capture();
+                crate::shell::commands::execute_command(cmd_line);
+                if let Some(captured) = crate::arch::x86_64::vga::stop_stdout_capture() {
+                    for line in captured.lines() {
+                        let clean = strip_ansi(line);
+                        self.lines.push((clean, Color::TEXT_PRIMARY));
+                    }
+                }
             }
+        }
+
+        if self.lines.len() > 800 {
+            self.lines.drain(0..400);
         }
     }
 
@@ -305,4 +314,25 @@ fn push_u64(s: &mut String, mut val: u64) {
         idx -= 1;
         s.push(buf[idx] as char);
     }
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1B' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if (nc >= 'a' && nc <= 'z') || (nc >= 'A' && nc <= 'Z') {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

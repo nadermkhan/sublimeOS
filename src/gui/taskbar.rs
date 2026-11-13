@@ -7,7 +7,7 @@ use crate::gui::font::{draw_char, draw_string};
 use crate::mm::pmm::PMM;
 
 pub const TOPBAR_HEIGHT: i32 = 26;
-pub const DOCK_HEIGHT: i32 = 48;
+pub const DOCK_HEIGHT: i32 = 52;
 
 pub enum TaskbarAction {
     None,
@@ -15,6 +15,7 @@ pub enum TaskbarAction {
     LaunchApp(DesktopAppId),
     FocusWindow(u32),
     ExitToShell,
+    RebootSystem,
     HaltSystem,
 }
 
@@ -36,7 +37,7 @@ impl Taskbar {
         }
     }
 
-    /// Render CosmicOS Top Menu Bar and Bottom Floating Dock.
+    /// Render SublimeOS Top Menu Bar and Bottom Floating Dock.
     pub fn render(
         &self,
         canvas: &mut Canvas,
@@ -48,12 +49,12 @@ impl Taskbar {
         let sh = canvas.height as i32;
 
         // ==========================================
-        // 1. CosmicOS Top Menu Bar (Global Menu Bar)
+        // 1. macOS Top Menu Bar (Global Menu Bar)
         // ==========================================
         canvas.fill_rect(0, 0, sw, TOPBAR_HEIGHT, Color::argb(225, 26, 27, 36));
         canvas.fill_rect(0, TOPBAR_HEIGHT - 1, sw, 1, Color::argb(60, 255, 255, 255));
 
-        // Cosmic Emblem Icon ✦
+        // Sublime Emblem Logo ✦
         let emblem_hover = mouse_x >= 8 && mouse_x <= 32 && mouse_y <= TOPBAR_HEIGHT;
         if self.cosmic_menu_open || emblem_hover {
             canvas.fill_rounded_rect(8, 2, 24, 22, 4, Color::argb(60, 255, 255, 255));
@@ -81,7 +82,6 @@ impl Taskbar {
         }
 
         // Right Menu Extras (RAM, Battery, Control Center, Clock)
-        // Memory Badge
         let (used_mb, total_mb) = {
             let pmm = PMM.lock();
             let used = (pmm.get_used_frames() * 4) / 1024;
@@ -100,7 +100,7 @@ impl Taskbar {
         // Control Center & Battery
         draw_string(canvas, sw - 165, 5, "[100%]", Color::TEXT_PRIMARY);
 
-        // RTC Clock: "Wed 9:18 AM"
+        // RTC Clock
         let time = read_datetime();
         let mut clock_str = String::new();
         push_2digits(&mut clock_str, time.hour);
@@ -111,9 +111,9 @@ impl Taskbar {
         draw_string(canvas, sw - 86, 5, &clock_str, Color::WHITE);
 
         // ==========================================
-        // 2. Floating Glass Dock (Bottom)
+        // 2. Floating Frosted Glass Dock (Bottom)
         // ==========================================
-        let dock_w = 340;
+        let dock_w = 448;
         let dock_h = 52;
         let dock_x = (sw - dock_w) / 2;
         let dock_y = sh - dock_h - 10;
@@ -124,14 +124,16 @@ impl Taskbar {
         canvas.draw_rounded_rect(dock_x, dock_y, dock_w, dock_h, 16, Color::argb(60, 255, 255, 255));
 
         // Dock App Items
-        let dock_apps: [(DesktopAppId, &str, char, Color); 4] = [
+        let dock_apps: [(DesktopAppId, &str, char, Color); 6] = [
             (DesktopAppId::FileManager, "Finder", '@', Color::ACCENT_CYAN),
             (DesktopAppId::Terminal, "Terminal", '>', Color::ACCENT_GREEN),
+            (DesktopAppId::TextEdit, "TextEdit", 'T', Color::WHITE),
+            (DesktopAppId::Calculator, "Calculator", '+', Color::ACCENT_ORANGE),
             (DesktopAppId::Sysmon, "Activity", '#', Color::ACCENT_YELLOW),
             (DesktopAppId::About, "About", '✦', Color::ACCENT_PURPLE),
         ];
 
-        let mut app_x = dock_x + 20;
+        let mut app_x = dock_x + 16;
         let icon_y = dock_y + 8;
 
         for (app_id, _title, icon_ch, icon_col) in dock_apps.into_iter() {
@@ -155,13 +157,15 @@ impl Taskbar {
                 DesktopAppId::Sysmon => t.title.contains("Activity"),
                 DesktopAppId::FileManager => t.title.contains("Finder"),
                 DesktopAppId::About => t.title.contains("About"),
+                DesktopAppId::Calculator => t.title.contains("Calculator"),
+                DesktopAppId::TextEdit => t.title.contains("TextEdit"),
             });
 
             if is_running {
                 canvas.fill_circle(app_x + 18, dock_y + 46, 2, Color::ACCENT_CYAN);
             }
 
-            app_x += 54;
+            app_x += 52;
         }
 
         // Dock Divider
@@ -174,7 +178,7 @@ impl Taskbar {
         draw_char(canvas, app_x + 14, icon_y + 10, 'x', Color::TEXT_MUTED);
 
         // ==========================================
-        // 3. Cosmic Menu Dropdown (if open)
+        // 3. Apple/Sublime Menu Dropdown (if open)
         // ==========================================
         if self.cosmic_menu_open {
             self.render_cosmic_menu(canvas, mouse_x, mouse_y);
@@ -185,7 +189,7 @@ impl Taskbar {
         let menu_x = 8;
         let menu_y = TOPBAR_HEIGHT + 2;
         let menu_w = 210;
-        let menu_h = 224;
+        let menu_h = 256;
 
         canvas.draw_shadow(menu_x, menu_y, menu_w, menu_h, 8, 90);
         canvas.fill_rounded_rect(menu_x, menu_y, menu_w, menu_h, 8, Color::argb(235, 30, 32, 44));
@@ -193,9 +197,10 @@ impl Taskbar {
 
         let items = [
             "About SublimeOS",
-            "System Settings...",
             "Activity Monitor",
             "Terminal",
+            "Calculator",
+            "TextEdit",
             "Exit to Sublime Shell",
             "Restart...",
             "Shut Down...",
@@ -240,12 +245,12 @@ impl Taskbar {
         sw: i32,
         sh: i32,
     ) -> TaskbarAction {
-        // 1. Check Cosmic Dropdown Menu
+        // 1. Check Dropdown Menu
         if self.cosmic_menu_open {
             let menu_x = 8;
             let menu_y = TOPBAR_HEIGHT + 2;
             let menu_w = 210;
-            let menu_h = 224;
+            let menu_h = 256;
 
             if x >= menu_x && x <= menu_x + menu_w && y >= menu_y && y <= menu_y + menu_h {
                 let item_h = 28;
@@ -254,10 +259,11 @@ impl Taskbar {
                 let actions = [
                     TaskbarAction::LaunchApp(DesktopAppId::About),
                     TaskbarAction::LaunchApp(DesktopAppId::Sysmon),
-                    TaskbarAction::LaunchApp(DesktopAppId::Sysmon),
                     TaskbarAction::LaunchApp(DesktopAppId::Terminal),
+                    TaskbarAction::LaunchApp(DesktopAppId::Calculator),
+                    TaskbarAction::LaunchApp(DesktopAppId::TextEdit),
                     TaskbarAction::ExitToShell,
-                    TaskbarAction::HaltSystem,
+                    TaskbarAction::RebootSystem,
                     TaskbarAction::HaltSystem,
                 ];
 
@@ -286,7 +292,7 @@ impl Taskbar {
         }
 
         // 3. Check Bottom Floating Dock
-        let dock_w = 340;
+        let dock_w = 448;
         let dock_h = 52;
         let dock_x = (sw - dock_w) / 2;
         let dock_y = sh - dock_h - 10;
@@ -295,16 +301,18 @@ impl Taskbar {
             let apps = [
                 DesktopAppId::FileManager,
                 DesktopAppId::Terminal,
+                DesktopAppId::TextEdit,
+                DesktopAppId::Calculator,
                 DesktopAppId::Sysmon,
                 DesktopAppId::About,
             ];
 
-            let mut app_x = dock_x + 20;
+            let mut app_x = dock_x + 16;
             for app_id in apps.into_iter() {
                 if x >= app_x && x <= app_x + 40 {
                     return TaskbarAction::LaunchApp(app_id);
                 }
-                app_x += 54;
+                app_x += 52;
             }
         }
 

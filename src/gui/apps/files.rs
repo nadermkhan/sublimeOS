@@ -46,6 +46,20 @@ impl FileManagerApp {
         self.refresh();
     }
 
+    pub fn navigate_parent(&mut self) {
+        if self.current_path == "/" {
+            return;
+        }
+        if let Some(idx) = self.current_path.rfind('/') {
+            if idx == 0 {
+                self.current_path = String::from("/");
+            } else {
+                self.current_path.truncate(idx);
+            }
+            self.refresh();
+        }
+    }
+
     pub fn select_item(&mut self, index: usize) {
         if index < self.entries.len() {
             self.selected_index = index;
@@ -117,9 +131,9 @@ impl FileManagerApp {
 
             dy += 20; // skip Locations label
             let locations = [
-                "/Volumes/Cosmic HD",
-                "/Volumes/Cosmic USB",
                 "/",
+                "/Volumes",
+                "/System",
             ];
 
             for path in locations.iter() {
@@ -134,6 +148,13 @@ impl FileManagerApp {
         // Check items in file list pane
         let right_x = inner_x + left_w + 6;
         let right_w = w - left_w - 12;
+
+        // Check [< Up] button click
+        if x >= right_x + 4 && x <= right_x + 48 && y >= inner_y + 6 && y <= inner_y + 30 {
+            self.navigate_parent();
+            return;
+        }
+
         if x >= right_x && x <= right_x + right_w {
             let mut dy = inner_y + 36;
             for idx in 0..self.entries.len() {
@@ -191,9 +212,9 @@ impl FileManagerApp {
         dy += 16;
 
         let locations = [
-            ("Cosmic HD", "/Volumes/Cosmic HD", 'C'),
-            ("Cosmic USB", "/Volumes/Cosmic USB", 'U'),
-            ("Root /", "/", '/'),
+            ("Sublime HD", "/", 'C'),
+            ("Volumes", "/Volumes", 'U'),
+            ("System", "/System", '/'),
         ];
 
         for (name, path, icon) in locations.iter() {
@@ -218,9 +239,14 @@ impl FileManagerApp {
 
         // Finder Toolbar Header
         canvas.fill_rounded_rect(right_x, y + 6, right_w, 24, 4, Color::argb(35, 255, 255, 255));
+
+        // Navigation button [< Up]
+        canvas.fill_rounded_rect(right_x + 4, y + 8, 42, 20, 3, Color::argb(60, 255, 255, 255));
+        draw_string(canvas, right_x + 8, y + 10, "< Up", Color::WHITE);
+
         let mut path_bar = String::from("  ");
         path_bar.push_str(&self.current_path);
-        draw_string(canvas, right_x + 6, y + 10, &path_bar, Color::ACCENT_CYAN);
+        draw_string(canvas, right_x + 50, y + 10, &path_bar, Color::ACCENT_CYAN);
 
         // 3. File List Items
         let mut item_y = y + 36;
