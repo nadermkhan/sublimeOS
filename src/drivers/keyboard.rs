@@ -176,7 +176,7 @@ impl KeyboardDriver {
             0x33 => if self.shift_pressed { b'<' } else { b',' },
             0x34 => if self.shift_pressed { b'>' } else { b'.' },
             0x35 => if self.shift_pressed { b'?' } else { b'/' },
-            0x39 => b' ', // Space
+            0x39 => if self.ctrl_pressed { 0x00 } else { b' ' }, // Space (Ctrl+Space = NUL byte for Spotlight)
 
             _ => return None,
         };

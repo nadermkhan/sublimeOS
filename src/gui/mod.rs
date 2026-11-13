@@ -4,6 +4,7 @@ pub mod color;
 pub mod desktop;
 pub mod font;
 pub mod mouse;
+pub mod spotlight;
 pub mod taskbar;
 pub mod window;
 
@@ -14,18 +15,20 @@ use crate::serial_println;
 use crate::drivers::keyboard::read_char;
 use crate::drivers::mouse::MOUSE;
 use crate::drivers::vbe::{self, VBE};
-use crate::gui::apps::{AboutApp, CalcApp, FileManagerApp, SysmonApp, TerminalApp, TextEditApp};
+use crate::gui::apps::{AboutApp, CalcApp, FileManagerApp, SettingsApp, SysmonApp, TerminalApp, TextEditApp};
 use crate::gui::canvas::Canvas;
 use crate::gui::desktop::{Desktop, DesktopAppId};
-use crate::gui::mouse::draw_cursor;
+use crate::gui::mouse::{draw_cursor, CursorType};
+use crate::gui::spotlight::{Spotlight, SpotlightTarget};
 use crate::gui::taskbar::{Taskbar, TaskbarAction, TaskbarTab};
-use crate::gui::window::{Window, WindowApp};
+use crate::gui::window::{ResizeEdge, Window, WindowApp};
 use crate::kinfo;
 
 pub struct DesktopManager {
     pub canvas: Canvas,
     pub desktop: Desktop,
     pub taskbar: Taskbar,
+    pub spotlight: Spotlight,
     pub windows: Vec<Window>,
     next_window_id: u32,
     prev_left_down: bool,
@@ -42,6 +45,7 @@ impl DesktopManager {
             canvas: Canvas::new(width, height),
             desktop: Desktop::new(),
             taskbar: Taskbar::new(),
+            spotlight: Spotlight::new(),
             windows: Vec::new(),
             next_window_id: 1,
             prev_left_down: false,
@@ -122,6 +126,15 @@ impl DesktopManager {
                 520,
                 360,
                 WindowApp::Editor(TextEditApp::new()),
+            ),
+            DesktopAppId::Settings => Window::new(
+                id,
+                "System Settings",
+                200,
+                80,
+                560,
+                380,
+                WindowApp::Settings(SettingsApp::new()),
             ),
         };
 
@@ -223,6 +236,34 @@ impl DesktopManager {
         }
 
         if left_clicked {
+            // Check Spotlight interaction if open
+            if self.spotlight.is_open {
+                let modal_w = 540;
+                let results = self.spotlight.get_results();
+                let item_h = 32;
+                let modal_h = 56 + (results.len().min(5) as i32 * item_h);
+                let modal_x = (sw - modal_w) / 2;
+                let modal_y = 100;
+
+                if x >= modal_x && x <= modal_x + modal_w && y >= modal_y && y <= modal_y + modal_h {
+                    if y >= modal_y + 48 {
+                        let idx = ((y - (modal_y + 54)) / item_h) as usize;
+                        if let Some(item) = results.get(idx) {
+                            match &item.target {
+                                SpotlightTarget::LaunchApp(app_id) => self.open_app(*app_id),
+                                SpotlightTarget::Calculation(_) => {}
+                            }
+                            self.spotlight.is_open = false;
+                        }
+                    }
+                    self.dirty = true;
+                    return TaskbarAction::None;
+                } else {
+                    self.spotlight.is_open = false;
+                    self.dirty = true;
+                }
+            }
+
             // Collect tabs info for taskbar click testing
             let tabs: Vec<TaskbarTab> = self
                 .windows
@@ -265,6 +306,11 @@ impl DesktopManager {
                     return TaskbarAction::None;
                 }
                 TaskbarAction::ToggleStartMenu => {
+                    self.dirty = true;
+                    return TaskbarAction::None;
+                }
+                TaskbarAction::ToggleSpotlight => {
+                    self.spotlight.toggle();
                     self.dirty = true;
                     return TaskbarAction::None;
                 }
@@ -379,6 +425,24 @@ impl DesktopManager {
     }
 
     pub fn handle_key_event(&mut self, ch: char) {
+        // Ctrl+Space ('\0') or backtick ('`') toggles Spotlight
+        if ch == '\0' || ch == '`' {
+            self.spotlight.toggle();
+            self.dirty = true;
+            return;
+        }
+
+        if self.spotlight.is_open {
+            if let Some(target) = self.spotlight.handle_char(ch) {
+                match target {
+                    SpotlightTarget::LaunchApp(app_id) => self.open_app(app_id),
+                    SpotlightTarget::Calculation(_) => {}
+                }
+            }
+            self.dirty = true;
+            return;
+        }
+
         if let Some(active_win) = self.windows.iter_mut().find(|w| w.is_active && !w.is_minimized) {
             active_win.handle_char(ch);
             self.dirty = true;
@@ -395,6 +459,10 @@ impl DesktopManager {
         self.dirty = false;
         self.last_sec = now_sec;
         self.last_blink = blink;
+
+        let sw = self.canvas.width as i32;
+        let sh = self.canvas.height as i32;
+
         // 1. Wallpaper & Icons
         self.desktop.render(&mut self.canvas, self.mouse_x, self.mouse_y);
 
@@ -403,7 +471,7 @@ impl DesktopManager {
             w.render(&mut self.canvas, self.mouse_x, self.mouse_y);
         }
 
-        // 3. Taskbar & Start Menu
+        // 3. Taskbar, Menus & Dock
         let tabs: Vec<TaskbarTab> = self
             .windows
             .iter()
@@ -417,10 +485,58 @@ impl DesktopManager {
             .collect();
         self.taskbar.render(&mut self.canvas, &tabs, self.mouse_x, self.mouse_y);
 
-        // 4. Mouse Cursor Pointer
-        draw_cursor(&mut self.canvas, self.mouse_x, self.mouse_y);
+        // 3.5. Spotlight Search Modal Overlay
+        self.spotlight.render(&mut self.canvas, sw, sh);
 
-        // 5. Blit to hardware linear framebuffer (respecting GOP pitch stride & channel shifts)
+        // 4. Determine Dynamic Cursor Type
+        let mut cursor_type = CursorType::Arrow;
+        if self.spotlight.is_open {
+            let modal_w = 540;
+            let modal_x = (sw - modal_w) / 2;
+            let modal_y = 100;
+            if self.mouse_x >= modal_x + 30 && self.mouse_x <= modal_x + modal_w - 30 && self.mouse_y >= modal_y + 10 && self.mouse_y <= modal_y + 40 {
+                cursor_type = CursorType::IBeam;
+            }
+        } else {
+            for w in self.windows.iter().rev() {
+                if !w.is_minimized && w.contains(self.mouse_x, self.mouse_y) {
+                    let edge = w.contains_resize_handle(self.mouse_x, self.mouse_y);
+                    match edge {
+                        ResizeEdge::BottomRight => cursor_type = CursorType::ResizeDiagonal,
+                        ResizeEdge::Right => cursor_type = CursorType::ResizeHorizontal,
+                        ResizeEdge::Bottom => cursor_type = CursorType::ResizeVertical,
+                        ResizeEdge::None => {
+                            match &w.app {
+                                WindowApp::Terminal(_) | WindowApp::Editor(_) => {
+                                    if self.mouse_y > w.y + 28 && self.mouse_y < w.y + w.height - 4 {
+                                        cursor_type = CursorType::IBeam;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+
+            // Dock hover -> Hand
+            let dock_h = 58;
+            let dock_y = sh - dock_h - 10;
+            if self.mouse_y >= dock_y && self.mouse_y <= dock_y + dock_h {
+                cursor_type = CursorType::Hand;
+            }
+
+            // Top menu bar icons hover -> Hand
+            if self.mouse_y <= 24 {
+                cursor_type = CursorType::Hand;
+            }
+        }
+
+        // 5. Mouse Cursor Pointer
+        draw_cursor(&mut self.canvas, self.mouse_x, self.mouse_y, cursor_type);
+
+        // 6. Blit to hardware linear framebuffer (respecting GOP pitch stride & channel shifts)
         let (fb_ptr, pitch, bpp, rpos, gpos, bpos) = {
             let vbe = VBE.lock();
             (

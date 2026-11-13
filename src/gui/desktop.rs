@@ -10,6 +10,7 @@ pub enum DesktopAppId {
     About,
     Calculator,
     TextEdit,
+    Settings,
 }
 
 pub struct DesktopIcon {
@@ -22,7 +23,7 @@ pub struct DesktopIcon {
 }
 
 pub struct Desktop {
-    pub icons: [DesktopIcon; 6],
+    pub icons: [DesktopIcon; 7],
     pub selected_icon: Option<DesktopAppId>,
     stars: [(i32, i32, Color); 96],
 }
@@ -88,10 +89,18 @@ impl Desktop {
                 icon_color: Color::ACCENT_CYAN,
             },
             DesktopIcon {
+                id: DesktopAppId::Settings,
+                title: "Settings",
+                x: 930,
+                y: 478,
+                icon_char: 'S',
+                icon_color: Color::WHITE,
+            },
+            DesktopIcon {
                 id: DesktopAppId::About,
                 title: "About Sublime",
                 x: 930,
-                y: 478,
+                y: 566,
                 icon_char: '✦',
                 icon_color: Color::ACCENT_PURPLE,
             },

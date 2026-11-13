@@ -1,5 +1,5 @@
 use alloc::string::String;
-use crate::gui::apps::{AboutApp, CalcApp, FileManagerApp, SysmonApp, TerminalApp, TextEditApp};
+use crate::gui::apps::{AboutApp, CalcApp, FileManagerApp, SettingsApp, SysmonApp, TerminalApp, TextEditApp};
 use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
 use crate::gui::desktop::DesktopAppId;
@@ -23,6 +23,7 @@ pub enum WindowApp {
     About(AboutApp),
     Calc(CalcApp),
     Editor(TextEditApp),
+    Settings(SettingsApp),
 }
 
 impl WindowApp {
@@ -34,6 +35,7 @@ impl WindowApp {
             WindowApp::About(_) => DesktopAppId::About,
             WindowApp::Calc(_) => DesktopAppId::Calculator,
             WindowApp::Editor(_) => DesktopAppId::TextEdit,
+            WindowApp::Settings(_) => DesktopAppId::Settings,
         }
     }
 }
@@ -184,6 +186,7 @@ impl Window {
             WindowApp::Files(ref mut files) => files.handle_click(px, py, ix, iy, iw, ih),
             WindowApp::Calc(ref mut calc) => calc.handle_click(px, py, ix, iy, iw, ih),
             WindowApp::Editor(ref mut ed) => ed.handle_click(px, py, ix, iy, iw, ih),
+            WindowApp::Settings(ref mut s) => s.handle_click(px, py, ix, iy, iw, ih),
             _ => {}
         }
     }
@@ -298,6 +301,7 @@ impl Window {
             WindowApp::About(ref about) => about.render(canvas, ix, iy, iw, ih),
             WindowApp::Calc(ref calc) => calc.render(canvas, ix, iy, iw, ih),
             WindowApp::Editor(ref ed) => ed.render(canvas, ix, iy, iw, ih),
+            WindowApp::Settings(ref s) => s.render(canvas, ix, iy, iw, ih),
         }
 
         // 5. Authentic macOS Resize Grip at bottom-right corner (if not maximized)
