@@ -381,21 +381,18 @@ impl Canvas {
         let dst_bytes = fb_ptr as *mut u8;
         if bpp == 32 {
             if red_pos == 0 && green_pos == 8 && blue_pos == 16 {
-                // High-performance line-buffered conversion using PCIe burst copy
-                let mut row_buf = [0u32; 2560];
-                let line_len = w.min(2560);
+                // Direct BGRX write to hardware framebuffer without intermediate stack buffer
                 for y in 0..h {
                     let dst_row = unsafe { dst_bytes.add(y * stride) as *mut u32 };
                     let src_base = y * w;
-                    for x in 0..line_len {
+                    for x in 0..w {
                         let argb = self.buffer[src_base + x];
                         let r = (argb >> 16) & 0xFF;
                         let g = (argb >> 8) & 0xFF;
                         let b = argb & 0xFF;
-                        row_buf[x] = r | (g << 8) | (b << 16);
-                    }
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(row_buf.as_ptr(), dst_row, line_len);
+                        unsafe {
+                            *dst_row.add(x) = r | (g << 8) | (b << 16);
+                        }
                     }
                 }
             } else {

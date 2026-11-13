@@ -40,7 +40,7 @@ pub enum ThreadState {
     Dead,
 }
 
-pub const KERNEL_STACK_SIZE: usize = 16384; // 16 KiB kernel stack per thread
+pub const KERNEL_STACK_SIZE: usize = 65536; // 64 KiB kernel stack per thread
 
 pub struct ThreadControlBlock {
     pub tid: ThreadId,

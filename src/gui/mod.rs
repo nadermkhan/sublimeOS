@@ -552,13 +552,16 @@ pub fn launch_desktop() {
     };
 
     crate::drivers::mouse::set_bounds(w as i32, h as i32);
-    let mut desktop_mgr = DesktopManager::new(w, h);
+    let mut desktop_mgr = alloc::boxed::Box::new(DesktopManager::new(w, h));
 
     // Open default initial windows: Terminal & System Monitor
     desktop_mgr.open_app(DesktopAppId::Terminal);
     desktop_mgr.open_app(DesktopAppId::Sysmon);
 
     kinfo!("Sublime Aqua Desktop online: {}x{}@{}bpp (Pitch: {} B)", w, h, bpp, pitch);
+
+    // Render initial frame to paint the Aqua desktop onto the display before suppressing text console
+    desktop_mgr.render_frame();
 
     let mut running = true;
     crate::drivers::gop_console::set_gui_active(true);
@@ -629,7 +632,7 @@ pub fn launch_desktop() {
             if mx != desktop_mgr.mouse_x || my != desktop_mgr.mouse_y || lbtn != desktop_mgr.prev_left_down {
                 break;
             }
-            crate::arch::x86_64::registers::enable_interrupts_and_hlt();
+            core::hint::spin_loop();
         }
     }
 

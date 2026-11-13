@@ -106,8 +106,8 @@ pub fn execute_user_binary_with_args(data: &[u8], args: &[&str]) -> Result<i32, 
     let pid = crate::task::process::alloc_process(proc_name);
     crate::task::process::set_current_pid(pid);
 
-    let mut temp_kstack = alloc::vec![0u8; 16384].into_boxed_slice();
-    let kstack_top = (temp_kstack.as_mut_ptr() as u64 + 16384) & !0xFu64;
+    let mut temp_kstack = alloc::vec![0u8; 65536].into_boxed_slice();
+    let kstack_top = (temp_kstack.as_mut_ptr() as u64 + 65536) & !0xFu64;
     let old_kstack = crate::arch::x86_64::gdt::get_kernel_stack();
     crate::arch::x86_64::gdt::set_kernel_stack(kstack_top);
     crate::arch::x86_64::syscall::set_syscall_kernel_stack(kstack_top);
