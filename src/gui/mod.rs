@@ -31,6 +31,9 @@ pub struct DesktopManager {
     prev_left_down: bool,
     pub mouse_x: i32,
     pub mouse_y: i32,
+    pub dirty: bool,
+    last_sec: u8,
+    last_blink: u64,
 }
 
 impl DesktopManager {
@@ -44,6 +47,9 @@ impl DesktopManager {
             prev_left_down: false,
             mouse_x: (width / 2) as i32,
             mouse_y: (height / 2) as i32,
+            dirty: true,
+            last_sec: 255,
+            last_blink: 0,
         }
     }
 
@@ -125,6 +131,7 @@ impl DesktopManager {
         }
 
         self.windows.push(win);
+        self.dirty = true;
     }
 
     pub fn bring_to_front(&mut self, window_id: u32) {
@@ -144,6 +151,7 @@ impl DesktopManager {
             win.is_active = true;
             win.is_minimized = false;
             self.windows.push(win);
+            self.dirty = true;
         }
     }
 
@@ -153,36 +161,68 @@ impl DesktopManager {
             if let Some(last) = self.windows.last_mut() {
                 last.is_active = true;
             }
+            self.dirty = true;
         }
     }
 
     pub fn handle_mouse_event(&mut self, x: i32, y: i32, left_down: bool) -> TaskbarAction {
-        self.mouse_x = x;
-        self.mouse_y = y;
+        if x != self.mouse_x || y != self.mouse_y {
+            self.mouse_x = x;
+            self.mouse_y = y;
+            self.dirty = true;
+        }
+
+        let sw = self.canvas.width as i32;
+        let sh = self.canvas.height as i32;
         let result_action = TaskbarAction::None;
 
         let left_clicked = left_down && !self.prev_left_down;
         let left_released = !left_down && self.prev_left_down;
         self.prev_left_down = left_down;
 
-        // 1. If currently dragging a window, update its position
+        if left_clicked || left_released {
+            self.dirty = true;
+        }
+
+        // 1. If currently resizing a window, update its size
+        if let Some(res_win) = self.windows.iter_mut().find(|w| w.resizing) {
+            if left_down {
+                match res_win.resize_edge {
+                    crate::gui::window::ResizeEdge::BottomRight => {
+                        res_win.width = (x - res_win.x).clamp(res_win.min_width, sw - res_win.x);
+                        res_win.height = (y - res_win.y).clamp(res_win.min_height, sh - res_win.y - 64);
+                    }
+                    crate::gui::window::ResizeEdge::Right => {
+                        res_win.width = (x - res_win.x).clamp(res_win.min_width, sw - res_win.x);
+                    }
+                    crate::gui::window::ResizeEdge::Bottom => {
+                        res_win.height = (y - res_win.y).clamp(res_win.min_height, sh - res_win.y - 64);
+                    }
+                    _ => {}
+                }
+                self.dirty = true;
+            }
+        }
+
+        // 2. If currently dragging a window, update its position with macOS boundary limits
         if let Some(drag_win) = self.windows.iter_mut().find(|w| w.dragging) {
             if left_down {
-                drag_win.x = x - drag_win.drag_offset_x;
-                drag_win.y = (y - drag_win.drag_offset_y).clamp(0, 768 - 36 - 28);
+                drag_win.x = (x - drag_win.drag_offset_x).clamp(-drag_win.width + 60, sw - 60);
+                drag_win.y = (y - drag_win.drag_offset_y).clamp(26, sh - 40);
+                self.dirty = true;
             }
         }
 
         if left_released {
             for w in self.windows.iter_mut() {
                 w.dragging = false;
+                w.resizing = false;
+                w.resize_edge = crate::gui::window::ResizeEdge::None;
             }
+            self.dirty = true;
         }
 
         if left_clicked {
-            let sw = self.canvas.width as i32;
-            let sh = self.canvas.height as i32;
-
             // Collect tabs info for taskbar click testing
             let tabs: Vec<TaskbarTab> = self
                 .windows
@@ -192,14 +232,14 @@ impl DesktopManager {
                     title: w.title.clone(),
                     is_active: w.is_active,
                     is_minimized: w.is_minimized,
+                    app_id: w.app.app_id(),
                 })
                 .collect();
 
-            // 2. Check taskbar / start menu click
+            // 3. Check taskbar / start menu click
             let action = self.taskbar.handle_click(x, y, &tabs, sw, sh);
             match action {
                 TaskbarAction::FocusWindow(win_id) => {
-                    // If already active and not minimized, toggle minimize
                     let mut is_active_now = false;
                     for w in self.windows.iter_mut() {
                         if w.id == win_id && w.is_active && !w.is_minimized {
@@ -211,13 +251,23 @@ impl DesktopManager {
                     if !is_active_now {
                         self.bring_to_front(win_id);
                     }
+                    self.dirty = true;
+                    return TaskbarAction::None;
+                }
+                TaskbarAction::RestoreWindow(win_id) => {
+                    self.bring_to_front(win_id);
+                    self.dirty = true;
                     return TaskbarAction::None;
                 }
                 TaskbarAction::LaunchApp(app_id) => {
                     self.open_app(app_id);
+                    self.dirty = true;
                     return TaskbarAction::None;
                 }
-                TaskbarAction::ToggleStartMenu => return TaskbarAction::None,
+                TaskbarAction::ToggleStartMenu => {
+                    self.dirty = true;
+                    return TaskbarAction::None;
+                }
                 TaskbarAction::ExitToShell | TaskbarAction::RebootSystem | TaskbarAction::HaltSystem => return action,
                 TaskbarAction::None => {}
             }
@@ -227,11 +277,12 @@ impl DesktopManager {
                 return TaskbarAction::None;
             }
 
-            // 3. Check Windows from front to back
+            // 4. Check Windows from front to back
             let mut clicked_win_id = None;
             let mut close_id = None;
             let mut max_id = None;
             let mut min_id = None;
+            let mut start_resize_id = None;
             let mut start_drag_id = None;
             let mut inner_click_id = None;
 
@@ -239,12 +290,15 @@ impl DesktopManager {
                 if !w.is_minimized && w.contains(x, y) {
                     clicked_win_id = Some(w.id);
 
+                    let edge = w.contains_resize_handle(x, y);
                     if w.contains_close_btn(x, y) {
                         close_id = Some(w.id);
                     } else if w.contains_maximize_btn(x, y) {
                         max_id = Some(w.id);
                     } else if w.contains_minimize_btn(x, y) {
                         min_id = Some(w.id);
+                    } else if edge != crate::gui::window::ResizeEdge::None {
+                        start_resize_id = Some((w.id, edge));
                     } else if w.contains_titlebar(x, y) {
                         start_drag_id = Some((w.id, x - w.x, y - w.y));
                     } else {
@@ -256,6 +310,7 @@ impl DesktopManager {
 
             if let Some(id) = close_id {
                 self.close_window(id);
+                self.dirty = true;
                 return TaskbarAction::None;
             }
 
@@ -263,6 +318,7 @@ impl DesktopManager {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
                     w.toggle_maximize(sw, sh);
                 }
+                self.dirty = true;
                 return TaskbarAction::None;
             }
 
@@ -271,6 +327,17 @@ impl DesktopManager {
                     w.is_minimized = true;
                     w.is_active = false;
                 }
+                self.dirty = true;
+                return TaskbarAction::None;
+            }
+
+            if let Some((id, edge)) = start_resize_id {
+                self.bring_to_front(id);
+                if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
+                    w.resizing = true;
+                    w.resize_edge = edge;
+                }
+                self.dirty = true;
                 return TaskbarAction::None;
             }
 
@@ -281,6 +348,7 @@ impl DesktopManager {
                     w.drag_offset_x = off_x;
                     w.drag_offset_y = off_y;
                 }
+                self.dirty = true;
                 return TaskbarAction::None;
             }
 
@@ -289,10 +357,11 @@ impl DesktopManager {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
                     w.handle_inner_click(x, y);
                 }
+                self.dirty = true;
                 return TaskbarAction::None;
             }
 
-            // 4. Clicked on desktop background
+            // 5. Clicked on desktop background
             if clicked_win_id.is_none() {
                 // Deactivate windows
                 for w in self.windows.iter_mut() {
@@ -302,6 +371,7 @@ impl DesktopManager {
                 if let Some(app_id) = self.desktop.check_click(x, y) {
                     self.open_app(app_id);
                 }
+                self.dirty = true;
             }
         }
 
@@ -311,10 +381,20 @@ impl DesktopManager {
     pub fn handle_key_event(&mut self, ch: char) {
         if let Some(active_win) = self.windows.iter_mut().find(|w| w.is_active && !w.is_minimized) {
             active_win.handle_char(ch);
+            self.dirty = true;
         }
     }
 
     pub fn render_frame(&mut self) {
+        let now_sec = crate::arch::x86_64::rtc::read_datetime().second;
+        let blink = (crate::arch::x86_64::pit::get_ticks() / 500) % 2;
+        let needs_render = self.dirty || now_sec != self.last_sec || blink != self.last_blink;
+        if !needs_render {
+            return;
+        }
+        self.dirty = false;
+        self.last_sec = now_sec;
+        self.last_blink = blink;
         // 1. Wallpaper & Icons
         self.desktop.render(&mut self.canvas, self.mouse_x, self.mouse_y);
 
@@ -332,6 +412,7 @@ impl DesktopManager {
                 title: w.title.clone(),
                 is_active: w.is_active,
                 is_minimized: w.is_minimized,
+                app_id: w.app.app_id(),
             })
             .collect();
         self.taskbar.render(&mut self.canvas, &tabs, self.mouse_x, self.mouse_y);

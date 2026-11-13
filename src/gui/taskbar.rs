@@ -14,6 +14,7 @@ pub enum TaskbarAction {
     ToggleStartMenu,
     LaunchApp(DesktopAppId),
     FocusWindow(u32),
+    RestoreWindow(u32),
     ExitToShell,
     RebootSystem,
     HaltSystem,
@@ -24,6 +25,7 @@ pub struct TaskbarTab {
     pub title: String,
     pub is_active: bool,
     pub is_minimized: bool,
+    pub app_id: DesktopAppId,
 }
 
 pub struct Taskbar {
@@ -51,7 +53,8 @@ impl Taskbar {
         // ==========================================
         // 1. macOS Top Menu Bar (Global Menu Bar)
         // ==========================================
-        canvas.fill_rect(0, 0, sw, TOPBAR_HEIGHT, Color::argb(225, 26, 27, 36));
+        canvas.blur_rect(0, 0, sw, TOPBAR_HEIGHT, 1);
+        canvas.fill_rect(0, 0, sw, TOPBAR_HEIGHT, Color::argb(215, 26, 27, 36));
         canvas.fill_rect(0, TOPBAR_HEIGHT - 1, sw, 1, Color::argb(60, 255, 255, 255));
 
         // Sublime Emblem Logo ✦
@@ -61,23 +64,36 @@ impl Taskbar {
         }
         draw_char(canvas, 16, 5, '✦', Color::WHITE);
 
-        // Active App Title & Standard Menus
-        let mut menu_x = 40;
-        let menus = ["Finder", "File", "Edit", "View", "Go", "Window", "Help"];
-        for (i, &item) in menus.iter().enumerate() {
+        // Dynamic Active App Title & Menus
+        let active_tab = tabs.iter().find(|t| t.is_active);
+        let (app_title, submenus): (&str, &[&str]) = match active_tab.map(|t| t.app_id) {
+            Some(DesktopAppId::Terminal) => ("Terminal", &["Shell", "Edit", "View", "Window", "Help"]),
+            Some(DesktopAppId::Calculator) => ("Calculator", &["Edit", "View", "Help"]),
+            Some(DesktopAppId::TextEdit) => ("TextEdit", &["File", "Edit", "Format", "View", "Help"]),
+            Some(DesktopAppId::Sysmon) => ("Activity Monitor", &["Edit", "View", "Window", "Help"]),
+            Some(DesktopAppId::About) => ("About SublimeOS", &["View", "Help"]),
+            _ => ("Finder", &["File", "Edit", "View", "Go", "Window", "Help"]),
+        };
+
+        let mut menu_x = 38;
+
+        // Bold Active Application Title
+        let app_title_w = (app_title.len() as i32 * 8) + 16;
+        let app_hover = mouse_x >= menu_x && mouse_x <= menu_x + app_title_w && mouse_y <= TOPBAR_HEIGHT;
+        if app_hover {
+            canvas.fill_rounded_rect(menu_x, 2, app_title_w, 22, 4, Color::argb(50, 255, 255, 255));
+        }
+        draw_string(canvas, menu_x + 8, 5, app_title, Color::WHITE);
+        menu_x += app_title_w;
+
+        // Application Specific Menus
+        for &item in submenus.iter() {
             let item_w = (item.len() as i32 * 8) + 16;
             let item_hover = mouse_x >= menu_x && mouse_x <= menu_x + item_w && mouse_y <= TOPBAR_HEIGHT;
             if item_hover {
                 canvas.fill_rounded_rect(menu_x, 2, item_w, 22, 4, Color::argb(40, 255, 255, 255));
             }
-
-            draw_string(
-                canvas,
-                menu_x + 8,
-                5,
-                item,
-                if i == 0 { Color::WHITE } else { Color::TEXT_PRIMARY },
-            );
+            draw_string(canvas, menu_x + 8, 5, item, Color::TEXT_PRIMARY);
             menu_x += item_w;
         }
 
@@ -113,12 +129,14 @@ impl Taskbar {
         // ==========================================
         // 2. Floating Frosted Glass Dock (Bottom)
         // ==========================================
-        let dock_w = 448;
+        let min_tabs: alloc::vec::Vec<&TaskbarTab> = tabs.iter().filter(|t| t.is_minimized).collect();
+        let dock_w = 448 + (min_tabs.len() as i32 * 48);
         let dock_h = 52;
         let dock_x = (sw - dock_w) / 2;
         let dock_y = sh - dock_h - 10;
 
-        // Frosted Glass Dock Base
+        // Frosted Glass Optical Blur + Tint
+        canvas.blur_rect(dock_x, dock_y, dock_w, dock_h, 2);
         canvas.draw_shadow(dock_x, dock_y, dock_w, dock_h, 8, 80);
         canvas.fill_rounded_rect(dock_x, dock_y, dock_w, dock_h, 16, Color::argb(210, 28, 30, 42));
         canvas.draw_rounded_rect(dock_x, dock_y, dock_w, dock_h, 16, Color::argb(60, 255, 255, 255));
@@ -152,15 +170,7 @@ impl Taskbar {
             draw_char(canvas, app_x + 14, icon_y + 10, icon_ch, icon_col);
 
             // Active running indicator dot underneath
-            let is_running = tabs.iter().any(|t| match app_id {
-                DesktopAppId::Terminal => t.title.contains("Terminal"),
-                DesktopAppId::Sysmon => t.title.contains("Activity"),
-                DesktopAppId::FileManager => t.title.contains("Finder"),
-                DesktopAppId::About => t.title.contains("About"),
-                DesktopAppId::Calculator => t.title.contains("Calculator"),
-                DesktopAppId::TextEdit => t.title.contains("TextEdit"),
-            });
-
+            let is_running = tabs.iter().any(|t| t.app_id == app_id && !t.is_minimized);
             if is_running {
                 canvas.fill_circle(app_x + 18, dock_y + 46, 2, Color::ACCENT_CYAN);
             }
@@ -171,6 +181,34 @@ impl Taskbar {
         // Dock Divider
         canvas.fill_rect(app_x, dock_y + 10, 1, 32, Color::argb(80, 255, 255, 255));
         app_x += 16;
+
+        // Minimized Windows Section (Right of divider, before Trash)
+        for _min_tab in min_tabs.iter() {
+            let is_hover = mouse_x >= app_x - 4
+                && mouse_x <= app_x + 40
+                && mouse_y >= icon_y - 4
+                && mouse_y <= icon_y + 40;
+
+            if is_hover {
+                canvas.fill_rounded_rect(app_x - 4, icon_y - 4, 44, 44, 10, Color::argb(60, 255, 255, 255));
+            }
+
+            // Miniature Window Tile
+            canvas.fill_rounded_rect(app_x, icon_y, 36, 36, 6, Color::argb(255, 42, 45, 58));
+            canvas.draw_rounded_rect(app_x, icon_y, 36, 36, 6, Color::argb(90, 255, 255, 255));
+            // Mini titlebar
+            canvas.fill_rect(app_x + 1, icon_y + 1, 34, 7, Color::argb(255, 55, 58, 72));
+            // Mini traffic lights (3 tiny dots)
+            canvas.fill_rect(app_x + 3, icon_y + 3, 2, 2, Color::argb(255, 255, 95, 86));
+            canvas.fill_rect(app_x + 7, icon_y + 3, 2, 2, Color::argb(255, 255, 189, 46));
+            canvas.fill_rect(app_x + 11, icon_y + 3, 2, 2, Color::argb(255, 39, 201, 63));
+            // Mini doc lines inside
+            canvas.fill_rect(app_x + 4, icon_y + 13, 28, 2, Color::argb(100, 255, 255, 255));
+            canvas.fill_rect(app_x + 4, icon_y + 18, 20, 2, Color::argb(60, 255, 255, 255));
+            canvas.fill_rect(app_x + 4, icon_y + 23, 24, 2, Color::argb(60, 255, 255, 255));
+
+            app_x += 48;
+        }
 
         // Trash Icon
         canvas.fill_rounded_rect(app_x, icon_y, 36, 36, 8, Color::BG_CARD);
@@ -292,7 +330,8 @@ impl Taskbar {
         }
 
         // 3. Check Bottom Floating Dock
-        let dock_w = 448;
+        let min_tabs: alloc::vec::Vec<&TaskbarTab> = _tabs.iter().filter(|t| t.is_minimized).collect();
+        let dock_w = 448 + (min_tabs.len() as i32 * 48);
         let dock_h = 52;
         let dock_x = (sw - dock_w) / 2;
         let dock_y = sh - dock_h - 10;
@@ -313,6 +352,17 @@ impl Taskbar {
                     return TaskbarAction::LaunchApp(app_id);
                 }
                 app_x += 52;
+            }
+
+            // Skip divider
+            app_x += 16;
+
+            // Check Minimized Window restore clicks
+            for min_tab in min_tabs.iter() {
+                if x >= app_x && x <= app_x + 40 {
+                    return TaskbarAction::RestoreWindow(min_tab.window_id);
+                }
+                app_x += 48;
             }
         }
 

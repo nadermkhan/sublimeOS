@@ -152,6 +152,46 @@ impl Canvas {
         }
     }
 
+    /// Authentic macOS Frosted Glass: Box-blur backdrop filter across rectangular region.
+    pub fn blur_rect(&mut self, x: i32, y: i32, w: i32, h: i32, passes: usize) {
+        if w <= 4 || h <= 4 {
+            return;
+        }
+        let x_start = x.max(1);
+        let y_start = y.max(1);
+        let x_end = (x + w).min(self.width as i32 - 1);
+        let y_end = (y + h).min(self.height as i32 - 1);
+
+        if x_start >= x_end || y_start >= y_end {
+            return;
+        }
+
+        let stride = self.width as usize;
+
+        for _ in 0..passes {
+            for py in y_start..y_end {
+                let row = py as usize * stride;
+                let row_up = (py - 1) as usize * stride;
+                let row_dn = (py + 1) as usize * stride;
+
+                for px in x_start..x_end {
+                    let idx = row + px as usize;
+                    let c = self.buffer[idx];
+                    let l = self.buffer[idx - 1];
+                    let r = self.buffer[idx + 1];
+                    let u = self.buffer[row_up + px as usize];
+                    let d = self.buffer[row_dn + px as usize];
+
+                    let red = (((c >> 16) & 0xFF) * 2 + ((l >> 16) & 0xFF) + ((r >> 16) & 0xFF) + ((u >> 16) & 0xFF) + ((d >> 16) & 0xFF)) / 6;
+                    let green = (((c >> 8) & 0xFF) * 2 + ((l >> 8) & 0xFF) + ((r >> 8) & 0xFF) + ((u >> 8) & 0xFF) + ((d >> 8) & 0xFF)) / 6;
+                    let blue = ((c & 0xFF) * 2 + (l & 0xFF) + (r & 0xFF) + (u & 0xFF) + (d & 0xFF)) / 6;
+
+                    self.buffer[idx] = (0xFF << 24) | (red << 16) | (green << 8) | blue;
+                }
+            }
+        }
+    }
+
     pub fn draw_line(&mut self, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: Color) {
         let dx = (x1 - x0).abs();
         let dy = -(y1 - y0).abs();
