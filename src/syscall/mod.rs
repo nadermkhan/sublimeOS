@@ -161,6 +161,8 @@ pub extern "C" fn syscall_dispatcher(
         SYS_SCHED_SETAFFINITY => crate::task::process::sys_sched_setaffinity(a1 as i32, a2 as usize, a3 as *const u64) as i64,
         SYS_SCHED_GETAFFINITY => crate::task::process::sys_sched_getaffinity(a1 as i32, a2 as usize, a3 as *mut u64) as i64,
         SYS_GETDENTS64 => crate::syscall::fs_calls::sys_getdents64(a1 as usize, a2 as *mut u8, a3 as usize) as i64,
+        SYS_GETCWD => crate::task::process::sys_getcwd(a1 as *mut u8, a2 as usize),
+        SYS_CHDIR => crate::task::process::sys_chdir(a1 as *const u8),
         SYS_SEM_OPEN => crate::task::process::sys_sem_open(a1 as *const u8, a2 as i32, a3 as u32, _a4 as u32),
         SYS_SEM_CLOSE => crate::task::process::sys_sem_close(a1 as usize),
         SYS_SEM_POST => crate::task::process::sys_sem_post(a1 as usize),

@@ -37,6 +37,7 @@ pub struct ProcessControlBlock {
     pub pgid: ProcessId,
     pub sid: ProcessId,
     pub name: String,
+    pub cwd: String,
     pub state: ProcessState,
     pub address_space: Option<AddressSpace>,
     pub children: Vec<ProcessId>,
@@ -68,6 +69,7 @@ impl ProcessControlBlock {
             pgid: pid,
             sid: if ppid > 0 { ppid } else { pid },
             name: String::from(name),
+            cwd: String::from("/"),
             state: ProcessState::Running,
             address_space,
             children: Vec::new(),
@@ -141,6 +143,7 @@ pub fn alloc_process_with_space(name: &str, ppid: ProcessId, space: AddressSpace
             pcb.pgid = p.pgid;
             pcb.sid = p.sid;
             pcb.fd_table = p.fd_table.clone();
+            pcb.cwd = p.cwd.clone();
         }
     }
     PROCESS_TABLE.lock().push(Arc::new(IrqSafeSpinlock::new(pcb)));
@@ -214,6 +217,7 @@ pub fn sys_fork_with_frame(frame: Option<&crate::task::thread::SyscallFrame>) ->
     let mut inherited_sigactions = [crate::ipc::signal::SigAction::default(); 32];
     let mut inherited_blocked = 0u64;
     let mut inherited_fds = Vec::new();
+    let mut inherited_cwd = String::from("/");
 
     if let Some(ref pproc) = parent_proc {
         let mut p = pproc.lock();
@@ -223,6 +227,7 @@ pub fn sys_fork_with_frame(frame: Option<&crate::task::thread::SyscallFrame>) ->
         inherited_sigactions = p.sigactions;
         inherited_blocked = p.signal_state.blocked;
         inherited_fds = p.fd_table.clone();
+        inherited_cwd = p.cwd.clone();
         if let Some(ref mut space) = p.address_space {
             child_space_opt = space.clone_cow();
         }
@@ -248,6 +253,7 @@ pub fn sys_fork_with_frame(frame: Option<&crate::task::thread::SyscallFrame>) ->
     child_pcb.sid = inherited_sid;
     child_pcb.sigactions = inherited_sigactions;
     child_pcb.signal_state.blocked = inherited_blocked;
+    child_pcb.cwd = inherited_cwd;
     if !inherited_fds.is_empty() {
         child_pcb.fd_table = inherited_fds;
     }
@@ -1339,6 +1345,100 @@ pub fn sys_mkdir(path_ptr: *const u8, _mode: u32) -> i64 {
         Ok(_) => 0,
         Err(_) => -13, // -EACCES
     }
+}
+
+/// Canonicalize an input path against a base working directory, resolving '.' and '..'
+pub fn canonicalize_path(base_cwd: &str, target: &str) -> String {
+    let mut stack: Vec<&str> = Vec::new();
+    if !target.starts_with('/') {
+        for segment in base_cwd.split('/').filter(|s| !s.is_empty()) {
+            stack.push(segment);
+        }
+    }
+    for segment in target.split('/').filter(|s| !s.is_empty()) {
+        if segment == "." {
+            continue;
+        } else if segment == ".." {
+            stack.pop();
+        } else {
+            stack.push(segment);
+        }
+    }
+    if stack.is_empty() {
+        String::from("/")
+    } else {
+        let mut res = String::new();
+        for segment in stack {
+            res.push('/');
+            res.push_str(segment);
+        }
+        res
+    }
+}
+
+pub fn sys_getcwd(buf_ptr: *mut u8, size: usize) -> i64 {
+    if buf_ptr.is_null() || size == 0 {
+        return -14; // -EFAULT
+    }
+    let current_pid = get_current_pid();
+    let cwd = if let Some(proc) = get_process(current_pid) {
+        proc.lock().cwd.clone()
+    } else {
+        String::from("/")
+    };
+    let bytes = cwd.as_bytes();
+    if bytes.len() + 1 > size {
+        return -34; // -ERANGE
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr, bytes.len());
+        *buf_ptr.add(bytes.len()) = 0;
+    }
+    buf_ptr as i64
+}
+
+pub fn sys_chdir(path_ptr: *const u8) -> i64 {
+    if path_ptr.is_null() {
+        return -14; // -EFAULT
+    }
+    let mut len = 0;
+    while unsafe { *path_ptr.add(len) } != 0 && len < 256 {
+        len += 1;
+    }
+    let raw_path = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(path_ptr, len) }) {
+        Ok(s) => s.trim(),
+        Err(_) => return -22, // -EINVAL
+    };
+    if raw_path.is_empty() {
+        return -22; // -EINVAL
+    }
+
+    let current_pid = get_current_pid();
+    let current_cwd = if let Some(proc) = get_process(current_pid) {
+        proc.lock().cwd.clone()
+    } else {
+        String::from("/")
+    };
+
+    let abs_path = canonicalize_path(&current_cwd, raw_path);
+
+    let vfs = crate::fs::vfs::VFS.lock();
+    let inode = match vfs.resolve_path(&abs_path) {
+        Ok(n) => n,
+        Err(_) => return -2, // -ENOENT
+    };
+    drop(vfs);
+
+    let stat = inode.lock().stat();
+    if stat.file_type != crate::fs::vfs::FileType::Directory {
+        return -20; // -ENOTDIR
+    }
+
+    if let Some(proc) = get_process(current_pid) {
+        proc.lock().cwd = abs_path;
+        return 0;
+    }
+    -3 // -ESRCH
 }
 
 pub fn sys_ioctl(fd: usize, cmd: u32, arg: usize) -> i64 {

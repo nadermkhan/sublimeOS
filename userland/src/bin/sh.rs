@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use sublime_rt::{
-    close, dup, dup2, mkdir, open, pipe, print, println, read, read_dir, sleep_ms,
+    chdir, close, dup, dup2, getcwd, mkdir, open, pipe, print, println, read, read_dir, sleep_ms,
     spawn, spawn_bg, sync, syscommand, unlink, O_APPEND, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
 };
 
@@ -32,7 +32,7 @@ fn handle_tab_completion(prompt: &str, line: &mut Vec<char>, cursor: &mut usize)
         "clear", "network", "audio", "power", "desktop", "calc", "snake",
         "exit", "quit", "list", "view", "print", "find", "count", "edit",
         "create", "delete", "make", "ls", "cat", "echo", "grep", "wc",
-        "hello", "pwd", "sync", "exec", "uptime", "date", "touch", "rm", "mkdir"
+        "hello", "pwd", "sync", "exec", "uptime", "date", "touch", "rm", "mkdir", "cd"
     ];
 
     let mut matches = Vec::new();
@@ -55,16 +55,16 @@ fn handle_tab_completion(prompt: &str, line: &mut Vec<char>, cursor: &mut usize)
             Some(pos) => {
                 let d = if pos == 0 { "/" } else { &token[..pos] };
                 let p = &token[pos + 1..];
-                (d, p)
+                (String::from(d), p)
             }
-            None => ("/", token),
+            None => (getcwd(), token),
         };
 
-        if let Ok(entries) = read_dir(dir_path) {
+        if let Ok(entries) = read_dir(&dir_path) {
             for entry in entries {
                 if entry.name.starts_with(name_prefix) {
                     let full = if token.contains('/') {
-                        let base = if dir_path == "/" { "/" } else { dir_path };
+                        let base = if dir_path == "/" { "/" } else { &dir_path };
                         if base == "/" {
                             alloc::format!("/{}{}", entry.name, if entry.is_dir { "/" } else { "" })
                         } else {
@@ -363,6 +363,7 @@ fn execute_single_cmd(trimmed: &str) {
         println!("    tasks [list|kill]   Process manager and task control (or 'ps')");
         println!("    storage [list|sync] Storage drives and buffer cache");
         println!("    display [1|2]       Console font size & HiDPI (Ctrl+= / Ctrl+-)");
+        println!("    cd [path]           Change working directory (or 'cd ..', 'cd /')");
         println!("    path                Print current working directory (or 'pwd')");
         println!("    clear               Clear screen");
         println!();
@@ -383,7 +384,23 @@ fn execute_single_cmd(trimmed: &str) {
     } else if trimmed == "clear" {
         print!("\x1b[2J\x1b[H");
     } else if matches!(trimmed, "path" | "where" | "pwd") {
-        println!("/");
+        println!("{}", getcwd());
+    } else if first_word == "cd" {
+        let target = if rest.is_empty() || rest == "~" {
+            "/"
+        } else {
+            rest
+        };
+        let res = chdir(target);
+        if res < 0 {
+            if res == -2 {
+                println!("cd: {}: No such file or directory", target);
+            } else if res == -20 {
+                println!("cd: {}: Not a directory", target);
+            } else {
+                println!("cd: {}: error {}", target, res);
+            }
+        }
     } else if matches!(trimmed, "about" | "uname") {
         println!("SublimeOS 1.0.0 (x86_64) — KiteKernel");
         println!("Developer: Nader Mahbub Khan | Copyright (c) 2026");
@@ -674,12 +691,13 @@ pub fn main() -> i32 {
     println!("Developer: Nader Mahbub Khan | Copyright (c) 2026");
     println!("Type 'help' for available commands.\n");
 
-    let prompt = "\x1b[36msublime\x1b[0m \x1b[34m/\x1b[0m > ";
     let mut history: Vec<String> = Vec::new();
 
     loop {
+        let cwd = getcwd();
+        let prompt = alloc::format!("\x1b[36msublime\x1b[0m \x1b[34m{}\x1b[0m > ", cwd);
         print!("{}", prompt);
-        let line_opt = read_line(prompt, &mut history);
+        let line_opt = read_line(&prompt, &mut history);
         let raw_str = match line_opt {
             Some(s) => s,
             None => continue,

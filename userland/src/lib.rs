@@ -288,6 +288,30 @@ pub fn mkdir(path: &str, mode: u32) -> isize {
     unsafe { syscall2(83, buf.as_ptr() as u64, mode as u64) as isize }
 }
 
+pub fn getcwd() -> alloc::string::String {
+    let mut buf = [0u8; 256];
+    let ret = unsafe { syscall2(79, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    if ret >= 0 {
+        let mut len = 0;
+        while len < buf.len() && buf[len] != 0 {
+            len += 1;
+        }
+        if let Ok(s) = core::str::from_utf8(&buf[..len]) {
+            return alloc::string::String::from(s);
+        }
+    }
+    alloc::string::String::from("/")
+}
+
+pub fn chdir(path: &str) -> isize {
+    let mut buf = [0u8; 256];
+    let bytes = path.as_bytes();
+    let len = bytes.len().min(255);
+    buf[..len].copy_from_slice(&bytes[..len]);
+    buf[len] = 0;
+    unsafe { syscall1(80, buf.as_ptr() as u64) as isize }
+}
+
 pub fn getpid() -> usize {
     unsafe { syscall0(39) as usize }
 }
