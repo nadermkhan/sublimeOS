@@ -57,7 +57,16 @@ pub fn init_userland() {
     let _ = crate::shell::pipeline::write_file_to_vfs("/lib/libm.so", &libm_so, false);
     let _ = crate::shell::pipeline::write_file_to_vfs("/lib/libgui.so", &libgui_so, false);
 
-    kinfo!("Userspace subsystem initialized (cosmic-libc, /bin/*, /lib/ld-cosmic.so, /lib/libc.so, /lib/libm.so, /lib/libgui.so)");
+    let rc_sh = b"# SublimeOS Master Run-Control Init Script\n\
+export USER=sublime\n\
+export HOME=/\n\
+export PATH=/bin\n\
+export OS=SublimeOS\n\
+export KERNEL=KiteKernel\n\
+print \"\x1b[1;36m[SublimeOS Init]\x1b[0m Services and environment initialized.\"\n";
+    let _ = crate::shell::pipeline::write_file_to_vfs("/etc/rc.sh", rc_sh, false);
+
+    kinfo!("Userspace subsystem initialized (cosmic-libc, /bin/*, /lib/*, /etc/rc.sh)");
 }
 
 /// Launch the master userspace init supervisor as PID 1 in Ring 3.
