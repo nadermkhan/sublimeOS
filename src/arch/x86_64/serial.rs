@@ -182,10 +182,19 @@ impl SerialPort {
     }
 
     pub fn is_transmit_empty(&self) -> bool {
-        unsafe { (inb(self.port + REG_LSR) & LSR_THRE) != 0 }
+        if !self.is_initialized {
+            return false;
+        }
+        unsafe {
+            let lsr = inb(self.port + REG_LSR);
+            lsr != 0xFF && (lsr & LSR_THRE) != 0
+        }
     }
 
     pub fn write_byte(&self, byte: u8) {
+        if !self.is_initialized {
+            return;
+        }
         let mut timeout = 100_000;
         while !self.is_transmit_empty() && timeout > 0 {
             core::hint::spin_loop();
@@ -197,13 +206,23 @@ impl SerialPort {
     }
 
     pub fn is_data_ready(&self) -> bool {
-        unsafe { (inb(self.port + REG_LSR) & LSR_DATA_READY) != 0 }
+        if !self.is_initialized {
+            return false;
+        }
+        unsafe {
+            let lsr = inb(self.port + REG_LSR);
+            lsr != 0xFF && (lsr & LSR_DATA_READY) != 0
+        }
     }
 
     pub fn try_read_byte(&mut self) -> Option<u8> {
         // First check internal interrupt-driven RX ring buffer
         if let Some(byte) = self.rx_buffer.pop_front() {
             return Some(byte);
+        }
+
+        if !self.is_initialized {
+            return None;
         }
 
         // Otherwise check physical hardware FIFO directly
@@ -225,8 +244,11 @@ impl SerialPort {
 
     /// Handle interrupt from UART controller: drains pending interrupt reasons and RX FIFO.
     pub fn handle_interrupt(&mut self) {
+        if !self.is_initialized {
+            return;
+        }
         unsafe {
-            loop {
+            for _ in 0..16 {
                 let iir = inb(self.port + REG_IIR_FCR);
                 if (iir & 1) != 0 {
                     // Bit 0 = 1 means no interrupt pending
@@ -240,7 +262,11 @@ impl SerialPort {
                     }
                     // Received Data Available (0b010 = 2) or Character Timeout (0b110 = 6)
                     2 | 6 => {
-                        while (inb(self.port + REG_LSR) & LSR_DATA_READY) != 0 {
+                        for _ in 0..64 {
+                            let lsr = inb(self.port + REG_LSR);
+                            if lsr == 0xFF || (lsr & LSR_DATA_READY) == 0 {
+                                break;
+                            }
                             let byte = inb(self.port + REG_DATA);
                             if self.rx_buffer.len() < 4096 {
                                 self.rx_buffer.push_back(byte);

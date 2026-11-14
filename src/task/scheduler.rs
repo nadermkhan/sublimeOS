@@ -77,19 +77,36 @@ impl Scheduler {
             return;
         }
 
-        // Find the least-loaded online CPU that satisfies affinity
-        let mut best_cpu = 0;
+        // Find the least-loaded active CPU running the scheduler (skip parked APs whose
+        // runqueue has no running/idle scheduler context yet so threads are never stranded).
+        // If explicit affinity excludes all active CPUs (e.g. AP affinity pinning), honor affinity.
+        let mut best_cpu = None;
         let mut min_load = usize::MAX;
 
         for (idx, rq) in self.per_cpu.iter().enumerate() {
-            if (affinity & (1 << idx)) != 0 {
+            let scheduler_active = idx == 0 || rq.current_thread.is_some();
+            if scheduler_active && (affinity & (1 << idx)) != 0 {
                 let load = rq.queue_len();
                 if load < min_load {
                     min_load = load;
-                    best_cpu = idx;
+                    best_cpu = Some(idx);
                 }
             }
         }
+
+        if best_cpu.is_none() {
+            for (idx, rq) in self.per_cpu.iter().enumerate() {
+                if (affinity & (1 << idx)) != 0 {
+                    let load = rq.queue_len();
+                    if load < min_load {
+                        min_load = load;
+                        best_cpu = Some(idx);
+                    }
+                }
+            }
+        }
+
+        let best_cpu = best_cpu.unwrap_or(0);
 
         thread.lock().current_cpu = best_cpu as u32;
         self.per_cpu[best_cpu].ready_queue.push_back(thread);

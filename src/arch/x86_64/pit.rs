@@ -214,7 +214,7 @@ pub static IN_KERNEL_TESTS: core::sync::atomic::AtomicBool = core::sync::atomic:
 /// Advance global OS millisecond tick counter and notify the scheduler.
 pub fn advance_system_tick(ctx: &mut InterruptContext) {
     let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-    if (ticks & 3) == 0 && !IN_KERNEL_TESTS.load(Ordering::Relaxed) {
+    if (ticks & 1) == 0 && !IN_KERNEL_TESTS.load(Ordering::Relaxed) {
         crate::drivers::usb::poll_hid_nonblocking();
     }
     crate::task::scheduler::on_timer_tick(ticks, ctx);

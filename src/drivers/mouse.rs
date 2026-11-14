@@ -197,11 +197,13 @@ pub fn init(width: i32, height: i32) {
                 }
                 let _ = inb(PS2_DATA_PORT);
             }
+            register_irq_handler(12, mouse_irq_handler);
+            crate::arch::x86_64::ioapic::unmask_isa_irq(12);
+            kinfo!("PS/2 Mouse driver initialized (IRQ 12 routed via I/O APIC -> Vector 44)");
+        } else {
+            kinfo!("No 8042 PS/2 Mouse controller detected (0x64=0xFF); keeping IRQ 12 masked (using USB HID)");
         }
     }
-    register_irq_handler(12, mouse_irq_handler);
-    crate::arch::x86_64::ioapic::unmask_isa_irq(12);
-    kinfo!("PS/2 Mouse driver initialized (IRQ 12 routed via I/O APIC -> Vector 44)");
 }
 
 /// Synchronize mouse clamping dimensions with active GOP/framebuffer resolution.

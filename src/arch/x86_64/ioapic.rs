@@ -143,11 +143,12 @@ pub fn init() {
         max_entries
     );
 
-    // Route ISA hardware IRQs to BSP Local APIC, keeping legacy PIT IRQ 0 masked
+    // Route ISA hardware IRQs to BSP Local APIC initially masked until individual drivers
+    // confirm physical hardware presence (avoids floating IRQ storms on modern USB-only laptops)
     let bsp_id = crate::arch::x86_64::apic::get_apic_id();
     route_irq(0, 32, bsp_id, true);  // Keep legacy PIT masked (LAPIC MMIO Timer owns ticks)
-    route_irq(1, 33, bsp_id, false); // PS/2 Keyboard unmasked
-    route_irq(3, 35, bsp_id, false); // COM2 UART unmasked
-    route_irq(4, 36, bsp_id, false); // COM1 UART unmasked
-    route_irq(12, 44, bsp_id, false); // PS/2 Mouse unmasked
+    route_irq(1, 33, bsp_id, true);  // Masked until 8042 PS/2 Keyboard detected
+    route_irq(3, 35, bsp_id, true);  // Masked until COM2 UART detected
+    route_irq(4, 36, bsp_id, true);  // Masked until COM1 UART detected
+    route_irq(12, 44, bsp_id, true); // Masked until 8042 PS/2 Mouse detected
 }

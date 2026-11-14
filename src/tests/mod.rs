@@ -1342,12 +1342,18 @@ fn test_smp_and_apic_subsystem() {
 
     let ioapic_virt = crate::arch::x86_64::ioapic::get_ioapic_base_virt();
     assert!(ioapic_virt != 0, "I/O APIC MMIO base not mapped");
+    let has_8042 = unsafe { crate::arch::x86_64::io::inb(0x64) != 0xFF };
     let redtbl1 = unsafe { crate::arch::x86_64::ioapic::read_redirection_entry(1) };
     assert_eq!(redtbl1 & 0xFF, 33, "IRQ 1 not routed to vector 33");
-    assert_eq!(redtbl1 & (1 << 16), 0, "IRQ 1 redirection entry should be unmasked on I/O APIC");
     let redtbl12 = unsafe { crate::arch::x86_64::ioapic::read_redirection_entry(12) };
     assert_eq!(redtbl12 & 0xFF, 44, "IRQ 12 not routed to vector 44");
-    assert_eq!(redtbl12 & (1 << 16), 0, "IRQ 12 redirection entry should be unmasked on I/O APIC");
+    if has_8042 {
+        assert_eq!(redtbl1 & (1 << 16), 0, "IRQ 1 redirection entry should be unmasked on I/O APIC");
+        assert_eq!(redtbl12 & (1 << 16), 0, "IRQ 12 redirection entry should be unmasked on I/O APIC");
+    } else {
+        assert_ne!(redtbl1 & (1 << 16), 0, "IRQ 1 should remain masked when 8042 PS/2 is absent");
+        assert_ne!(redtbl12 & (1 << 16), 0, "IRQ 12 should remain masked when 8042 PS/2 is absent");
+    }
 
     // 4. Verify SMP Manager discovered cores, active BSP & trampoline status
     assert!(crate::arch::x86_64::smp::is_trampoline_staged(), "16-bit AP trampoline not staged at 0x8000");

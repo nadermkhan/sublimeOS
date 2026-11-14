@@ -32,6 +32,7 @@ const EHCI_CAP_HCCPARAMS: u64 = 0x08;
 // EHCI Operational Register offsets (relative to op_base)
 const EHCI_OP_USBCMD: u64 = 0x00;
 const EHCI_OP_USBSTS: u64 = 0x04;
+const EHCI_OP_USBINTR: u64 = 0x08;
 const EHCI_OP_CTRLDSSEGMENT: u64 = 0x10;
 const EHCI_OP_PERIODICLISTBASE: u64 = 0x14;
 const EHCI_OP_ASYNCLISTADDR: u64 = 0x18;
@@ -409,7 +410,10 @@ impl EhciController {
                 timeout -= 1;
             }
 
-            // 3. Program 32-bit DMA segment selector and schedule base addresses
+            // 3. Mask controller PCI interrupts (kernel polls HID cleanly), clear latched status,
+            //    and program 32-bit DMA segment selector + schedule base addresses
+            write_volatile((self.op_base + EHCI_OP_USBINTR) as *mut u32, 0);
+            write_volatile((self.op_base + EHCI_OP_USBSTS) as *mut u32, 0x3F);
             write_volatile((self.op_base + EHCI_OP_CTRLDSSEGMENT) as *mut u32, 0);
             write_volatile(
                 (self.op_base + EHCI_OP_PERIODICLISTBASE) as *mut u32,
@@ -756,7 +760,7 @@ impl EhciController {
                 },
             );
 
-            // Insert QH into Periodic Frame List with phase staggering so 8ms/2ms pipes stay disjoint
+            // Insert QH into Periodic Frame List with phase staggering (cycle-free, no silent drops)
             let step = (interval_ms.max(1) as usize).min(1024);
             let phase = slot_index % step;
             let frame_list = self.frame_list_virt as *mut u32;
@@ -765,13 +769,14 @@ impl EhciController {
             let mut idx = phase;
             while idx < 1024 {
                 let prev = read_volatile(frame_list.add(idx));
-                if prev != EHCI_PTR_TERMINATE
-                    && prev != new_link
-                    && read_volatile(&(*qh_ptr).horiz_link) == EHCI_PTR_TERMINATE
+                if prev == EHCI_PTR_TERMINATE || prev == new_link {
+                    write_volatile(frame_list.add(idx), new_link);
+                } else if read_volatile(&(*qh_ptr).horiz_link) == EHCI_PTR_TERMINATE
+                    || read_volatile(&(*qh_ptr).horiz_link) == prev
                 {
                     write_volatile(&mut (*qh_ptr).horiz_link, prev);
+                    write_volatile(frame_list.add(idx), new_link);
                 }
-                write_volatile(frame_list.add(idx), new_link);
                 idx += step;
             }
             fence(Ordering::SeqCst);
@@ -898,11 +903,13 @@ impl EhciController {
                     },
                 );
 
-                // Re-arm Queue Head overlay & Interrupt IN qTD cleanly on both success and error
+                // Re-arm Queue Head overlay & Interrupt IN qTD cleanly: program pointers + fence
+                // before clearing QH token so the HC never fetches token=0 with a stale next_qtd.
                 write_volatile(&mut (*qh_ptr).curr_qtd, 0);
-                write_volatile(&mut (*qh_ptr).token, 0);
                 write_volatile(&mut (*qh_ptr).alt_next_qtd, EHCI_PTR_TERMINATE);
                 write_volatile(&mut (*qh_ptr).next_qtd, pipe.qtd_phys);
+                fence(Ordering::SeqCst);
+                write_volatile(&mut (*qh_ptr).token, 0);
                 fence(Ordering::SeqCst);
             }
         }

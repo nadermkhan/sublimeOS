@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use crate::fs::vfs::{DirEntry, FileType, VFS};
 use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
-use crate::gui::font::{draw_char, draw_string, FONT_HEIGHT};
+use crate::gui::font::{draw_string, FONT_HEIGHT};
 
 pub struct SidebarItem {
     pub label: &'static str,
@@ -31,8 +31,12 @@ impl FileManagerApp {
     }
 
     pub fn refresh(&mut self) {
-        let vfs = VFS.lock();
-        if let Ok(entries) = vfs.resolve_path(&self.current_path).and_then(|node| node.lock().readdir()) {
+        let entries_res = {
+            let vfs = VFS.lock();
+            vfs.resolve_path(&self.current_path)
+                .and_then(|node| node.lock().readdir())
+        };
+        if let Ok(entries) = entries_res {
             self.entries = entries;
         } else {
             self.entries.clear();
@@ -109,11 +113,19 @@ impl FileManagerApp {
     }
 
     pub fn handle_click(&mut self, x: i32, y: i32, inner_x: i32, inner_y: i32, w: i32, _h: i32) {
-        let left_w = 136;
+        let tb_y = inner_y + 23;
+        // 1. Check [< Back] toolbar button
+        if x >= inner_x + 8 && x <= inner_x + 66 && y >= tb_y && y <= tb_y + 22 {
+            self.navigate_parent();
+            return;
+        }
 
-        // Check sidebar clicks
+        let body_y = inner_y + 52;
+        let left_w = 148;
+
+        // 2. Check XP Blue Common Tasks sidebar clicks
         if x >= inner_x && x <= inner_x + left_w {
-            let mut dy = inner_y + 24; // start below Favorites label
+            let mut dy = body_y + 32;
             let favorites = [
                 "/Applications",
                 "/Users/sublime/Desktop",
@@ -126,10 +138,10 @@ impl FileManagerApp {
                     self.navigate_to(path);
                     return;
                 }
-                dy += 24;
+                dy += 23;
             }
 
-            dy += 20; // skip Locations label
+            let mut ly = body_y + 136 + 24;
             let locations = [
                 "/",
                 "/Volumes",
@@ -137,173 +149,200 @@ impl FileManagerApp {
             ];
 
             for path in locations.iter() {
-                if y >= dy && y <= dy + 22 {
+                if y >= ly && y <= ly + 22 {
                     self.navigate_to(path);
                     return;
                 }
-                dy += 24;
+                ly += 23;
             }
         }
 
-        // Check items in file list pane
-        let right_x = inner_x + left_w + 6;
-        let right_w = w - left_w - 12;
-
-        // Check [< Up] button click
-        if x >= right_x + 4 && x <= right_x + 48 && y >= inner_y + 6 && y <= inner_y + 30 {
-            self.navigate_parent();
-            return;
-        }
+        // 3. Check items in white Explorer file pane
+        let right_x = inner_x + left_w;
+        let right_w = w - left_w;
 
         if x >= right_x && x <= right_x + right_w {
-            let mut dy = inner_y + 36;
+            let mut dy = body_y + 8;
             for idx in 0..self.entries.len() {
                 if y >= dy && y <= dy + 22 {
                     self.select_item(idx);
                     return;
                 }
-                dy += 24;
+                dy += 23;
             }
         }
     }
 
     pub fn render(&self, canvas: &mut Canvas, x: i32, y: i32, w: i32, h: i32) {
-        canvas.fill_rect(x, y, w, h, Color::argb(255, 30, 32, 44));
+        // 0. Explorer Top Menu & Toolbar
+        canvas.fill_rect(x, y, w, 52, Color::XP_FACE);
+        crate::gui::font::draw_string_ellipsis(canvas, x + 8, y + 2, "File   Edit   View   Places   Tools   Help", Color::XP_TEXT_BLACK, w - 16);
+        canvas.fill_rect(x, y + 20, w, 1, Color::XP_SHADOW);
 
-        let left_w = 136;
-        let mid_x = x + left_w;
+        // Navigation Toolbar Row
+        let tb_y = y + 23;
+        canvas.draw_gradient_v(x + 8, tb_y, 58, 22, Color::XP_WHITE, Color::XP_FACE_DARK);
+        canvas.draw_rounded_rect(x + 8, tb_y, 58, 22, 3, Color::XP_CTRL_BORDER);
+        canvas.fill_circle(x + 19, tb_y + 11, 7, Color::XP_START_MID);
+        draw_string(canvas, x + 28, tb_y + 3, "Back", Color::XP_TEXT_BLACK);
 
-        // 1. Finder Sidebar (Vibrant Translucent Dark)
-        canvas.fill_rect(x, y, left_w, h, Color::argb(255, 24, 25, 34));
-        canvas.fill_rect(mid_x, y, 1, h, Color::argb(50, 255, 255, 255));
+        // Address Bar
+        draw_string(canvas, x + 76, tb_y + 3, "Address", Color::XP_TEXT_GRAY);
+        let addr_x = x + 138;
+        let addr_w = (w - 146).max(80);
+        canvas.fill_rect(addr_x, tb_y, addr_w, 22, Color::WHITE);
+        canvas.draw_rect(addr_x, tb_y, addr_w, 22, Color::XP_INPUT_BORDER);
+        crate::gui::font::draw_string_ellipsis(canvas, addr_x + 6, tb_y + 3, &self.current_path, Color::XP_TEXT_BLACK, addr_w - 12);
+        canvas.fill_rect(x, y + 51, w, 1, Color::XP_SHADOW);
 
-        let mut dy = y + 8;
+        let body_y = y + 52;
+        let body_h = (h - 52 - 20).max(60);
+        let left_w = 148;
 
-        // Favorites Category
-        draw_string(canvas, x + 10, dy, "Favorites", Color::TEXT_MUTED);
-        dy += 16;
+        // 1. Classic Blue "Common Tasks" Left Sidebar
+        canvas.draw_gradient_v(x, body_y, left_w, body_h, Color::rgb(123, 162, 231), Color::rgb(99, 117, 214));
+
+        // Task Group Card 1: Favorite Places
+        let card1_x = x + 8;
+        let card1_w = left_w - 16;
+        canvas.draw_gradient_h(card1_x, body_y + 8, card1_w, 20, Color::WHITE, Color::rgb(198, 214, 245));
+        draw_string(canvas, card1_x + 8, body_y + 10, "Places", Color::XP_TEXT_LINK);
+        canvas.fill_rect(card1_x, body_y + 28, card1_w, 98, Color::rgb(214, 223, 247));
 
         let favorites = [
-            ("Applications", "/Applications", 'A'),
-            ("Desktop", "/Users/sublime/Desktop", 'D'),
-            ("Documents", "/Users/sublime/Documents", 'F'),
-            ("Downloads", "/Users/sublime/Downloads", 'v'),
+            ("Applications", "/Applications"),
+            ("Desktop", "/Users/sublime/Desktop"),
+            ("Documents", "/Users/sublime/Documents"),
+            ("Downloads", "/Users/sublime/Downloads"),
         ];
 
-        for (name, path, icon) in favorites.iter() {
+        let mut dy = body_y + 32;
+        for (name, path) in favorites.iter() {
             let is_curr = self.current_path == *path;
             if is_curr {
-                canvas.fill_rounded_rect(x + 6, dy, left_w - 12, 22, 5, Color::ACCENT_BLUE);
+                canvas.fill_rect(card1_x + 2, dy, card1_w - 4, 20, Color::XP_SELECTION);
             }
-            draw_char(canvas, x + 10, dy + 3, *icon, if is_curr { Color::WHITE } else { Color::ACCENT_CYAN });
             draw_string(
                 canvas,
-                x + 24,
-                dy + 3,
+                card1_x + 8,
+                dy + 2,
                 name,
-                if is_curr { Color::WHITE } else { Color::TEXT_PRIMARY },
+                if is_curr { Color::WHITE } else { Color::rgb(33, 93, 198) },
             );
-            dy += 24;
+            dy += 23;
         }
 
-        dy += 8;
-        // Locations Category
-        draw_string(canvas, x + 10, dy, "Locations", Color::TEXT_MUTED);
-        dy += 16;
+        // Task Group Card 2: Drives / System
+        let card2_y = body_y + 136;
+        canvas.draw_gradient_h(card1_x, card2_y, card1_w, 20, Color::WHITE, Color::rgb(198, 214, 245));
+        draw_string(canvas, card1_x + 8, card2_y + 2, "System", Color::XP_TEXT_LINK);
+        canvas.fill_rect(card1_x, card2_y + 20, card1_w, 76, Color::rgb(214, 223, 247));
 
         let locations = [
-            ("Sublime HD", "/", 'C'),
-            ("Volumes", "/Volumes", 'U'),
-            ("System", "/System", '/'),
+            ("Local Disk (C:)", "/"),
+            ("Volumes", "/Volumes"),
+            ("System Root", "/System"),
         ];
 
-        for (name, path, icon) in locations.iter() {
+        let mut ly = card2_y + 24;
+        for (name, path) in locations.iter() {
             let is_curr = self.current_path == *path;
             if is_curr {
-                canvas.fill_rounded_rect(x + 6, dy, left_w - 12, 22, 5, Color::ACCENT_BLUE);
+                canvas.fill_rect(card1_x + 2, ly, card1_w - 4, 20, Color::XP_SELECTION);
             }
-            draw_char(canvas, x + 10, dy + 3, *icon, if is_curr { Color::WHITE } else { Color::ACCENT_YELLOW });
             draw_string(
                 canvas,
-                x + 24,
-                dy + 3,
+                card1_x + 8,
+                ly + 2,
                 name,
-                if is_curr { Color::WHITE } else { Color::TEXT_PRIMARY },
+                if is_curr { Color::WHITE } else { Color::rgb(33, 93, 198) },
             );
-            dy += 24;
+            ly += 23;
         }
 
-        // 2. Right Pane: Toolbar Breadcrumb & Controls
-        let right_x = mid_x + 8;
-        let right_w = w - left_w - 16;
+        // 2. Right White Explorer File Pane
+        let right_x = x + left_w;
+        let right_w = (w - left_w).max(80);
+        canvas.fill_rect(right_x, body_y, right_w, body_h, Color::WHITE);
 
-        // Finder Toolbar Header
-        canvas.fill_rounded_rect(right_x, y + 6, right_w, 24, 4, Color::argb(35, 255, 255, 255));
-
-        // Navigation button [< Up]
-        canvas.fill_rounded_rect(right_x + 4, y + 8, 42, 20, 3, Color::argb(60, 255, 255, 255));
-        draw_string(canvas, right_x + 8, y + 10, "< Up", Color::WHITE);
-
-        let mut path_bar = String::from("  ");
-        path_bar.push_str(&self.current_path);
-        draw_string(canvas, right_x + 50, y + 10, &path_bar, Color::ACCENT_CYAN);
-
-        // 3. File List Items
-        let mut item_y = y + 36;
+        let mut item_y = body_y + 8;
         for (idx, entry) in self.entries.iter().enumerate() {
-            if item_y + 22 > y + h - 100 {
+            if item_y + 22 > body_y + body_h - 76 {
                 break;
             }
 
             let is_sel = idx == self.selected_index;
             if is_sel {
-                canvas.fill_rounded_rect(right_x, item_y, right_w, 22, 4, Color::ACCENT_BLUE);
-            } else if idx % 2 == 1 {
-                canvas.fill_rect(right_x, item_y, right_w, 22, Color::argb(15, 255, 255, 255));
+                canvas.fill_rect(right_x + 6, item_y, right_w - 12, 22, Color::XP_SELECTION);
             }
 
-            let icon = match entry.file_type {
-                FileType::Directory => 'D',
-                FileType::Regular => if entry.name.ends_with(".app") { 'A' } else if entry.name.ends_with(".plist") { 'P' } else { 'F' },
-                FileType::CharDevice => 'C',
-                _ => '?',
-            };
-            let icon_col = match entry.file_type {
-                FileType::Directory => Color::ACCENT_CYAN,
-                FileType::Regular => if entry.name.ends_with(".app") { Color::ACCENT_YELLOW } else { Color::TEXT_PRIMARY },
-                FileType::CharDevice => Color::ACCENT_GREEN,
-                _ => Color::TEXT_MUTED,
-            };
+            // Mini folder or document glyph
+            match entry.file_type {
+                FileType::Directory => {
+                    canvas.fill_rect(right_x + 12, item_y + 4, 14, 12, Color::rgb(248, 204, 72));
+                    canvas.draw_rect(right_x + 12, item_y + 4, 14, 12, Color::rgb(176, 128, 18));
+                }
+                _ => {
+                    canvas.fill_rect(right_x + 13, item_y + 3, 12, 14, Color::XP_FACE_LIGHT);
+                    canvas.draw_rect(right_x + 13, item_y + 3, 12, 14, Color::XP_INPUT_BORDER);
+                }
+            }
 
-            draw_char(canvas, right_x + 8, item_y + 3, icon, if is_sel { Color::WHITE } else { icon_col });
             draw_string(
                 canvas,
-                right_x + 24,
+                right_x + 34,
                 item_y + 3,
                 &entry.name,
-                if is_sel { Color::WHITE } else { Color::TEXT_PRIMARY },
+                if is_sel { Color::WHITE } else { Color::XP_TEXT_BLACK },
             );
 
-            item_y += 24;
+            item_y += 23;
         }
 
-        // 4. File Content Preview Pane at bottom
-        let prev_y = y + h - 94;
-        canvas.fill_rounded_rect(right_x, prev_y, right_w, 86, 6, Color::argb(45, 0, 0, 0));
-        canvas.draw_rounded_rect(right_x, prev_y, right_w, 86, 6, Color::argb(50, 255, 255, 255));
-
-        draw_string(canvas, right_x + 8, prev_y + 6, "Quick Look / Info:", Color::ACCENT_YELLOW);
+        // 3. Details / File Preview Pane
+        let prev_y = body_y + body_h - 72;
+        canvas.fill_rect(right_x, prev_y, right_w, 72, Color::XP_FACE_LIGHT);
+        canvas.fill_rect(right_x, prev_y, right_w, 1, Color::XP_SHADOW);
+        draw_string(canvas, right_x + 10, prev_y + 6, "Details / Preview:", Color::XP_TEXT_LINK);
 
         let mut py = prev_y + 24;
-        for line in self.preview_text.lines().take(3) {
-            let max_chars = (right_w / 8) as usize;
-            let display_line = if line.len() > max_chars {
-                &line[..max_chars]
-            } else {
-                line
-            };
-            draw_string(canvas, right_x + 8, py, display_line, Color::TEXT_MUTED);
+        for line in self.preview_text.lines().take(2) {
+            let max_chars = ((right_w - 20) / 8).max(4) as usize;
+            let cut = line
+                .char_indices()
+                .nth(max_chars)
+                .map(|(idx, _)| idx)
+                .unwrap_or(line.len());
+            let display_line = &line[..cut];
+            draw_string(canvas, right_x + 10, py, display_line, Color::XP_TEXT_GRAY);
             py += FONT_HEIGHT + 2;
+        }
+
+        // 4. Bottom Explorer Status Bar (#ECE9D8)
+        let stat_y = y + h - 20;
+        canvas.fill_rect(x, stat_y, w, 20, Color::XP_FACE);
+        canvas.fill_rect(x, stat_y, w, 1, Color::XP_SHADOW);
+        let obj_count = alloc::format!("{} object(s)", self.entries.len());
+        draw_string(canvas, x + 8, stat_y + 3, &obj_count, Color::XP_TEXT_BLACK);
+        crate::gui::font::draw_string_ellipsis(canvas, x + w - 150, stat_y + 3, "SublimeOS Explorer", Color::XP_TEXT_GRAY, 144);
+    }
+}
+
+impl FileManagerApp {
+    pub fn handle_char(&mut self, ch: char) {
+        if ch == '\x08' {
+            // Backspace navigates up one folder level safely
+            if self.current_path != "/" {
+                if let Some(pos) = self.current_path.rfind('/') {
+                    if pos == 0 {
+                        self.current_path = alloc::string::String::from("/");
+                    } else {
+                        self.current_path = alloc::string::String::from(&self.current_path[..pos]);
+                    }
+                    self.selected_index = 0;
+                    self.refresh();
+                }
+            }
         }
     }
 }

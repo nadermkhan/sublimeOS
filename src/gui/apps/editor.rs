@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use crate::fs::vfs::VFS;
 use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
-use crate::gui::font::{draw_string, FONT_HEIGHT, FONT_WIDTH};
+use crate::gui::font::{draw_string, draw_string_ellipsis, FONT_HEIGHT, FONT_WIDTH};
 
 pub struct TextEditApp {
     pub file_path: String,
@@ -22,8 +22,8 @@ impl TextEditApp {
             cursor_col: 0,
             status_msg: String::from("Ready — Click or type to write"),
         };
-        app.lines.push(String::from("Welcome to TextEdit for SublimeOS!"));
-        app.lines.push(String::from("A lightweight document editor styled after macOS."));
+        app.lines.push(String::from("Welcome to SublimeOS Notepad!"));
+        app.lines.push(String::from("Type freely or open /etc/rc.sh from the toolbar."));
         app.lines.push(String::new());
         app.cursor_row = 2;
         app.cursor_col = 0;
@@ -130,45 +130,50 @@ impl TextEditApp {
     }
 
     pub fn render(&self, canvas: &mut Canvas, ix: i32, iy: i32, iw: i32, ih: i32) {
-        // 1. Window Document Canvas (Dark/Light macOS document theme)
-        canvas.fill_rect(ix, iy, iw, ih, Color::argb(255, 24, 25, 34));
+        // 1. Notepad Menu + Toolbar Strip
+        canvas.fill_rect(ix, iy, iw, 50, Color::XP_FACE);
+        draw_string_ellipsis(canvas, ix + 8, iy + 3, "File   Edit   Format   View   Help", Color::XP_TEXT_BLACK, iw - 16);
+        canvas.fill_rect(ix, iy + 20, iw, 1, Color::XP_SHADOW);
 
-        // 2. Toolbar at Top
-        canvas.fill_rect(ix, iy, iw, 30, Color::argb(255, 32, 34, 46));
-        canvas.fill_rect(ix, iy + 29, iw, 1, Color::WINDOW_BORDER);
+        // Action Buttons: [New] [Open rc.sh] [Save]
+        canvas.draw_gradient_v(ix + 8, iy + 24, 52, 22, Color::XP_WHITE, Color::XP_FACE_DARK);
+        canvas.draw_rounded_rect(ix + 8, iy + 24, 52, 22, 3, Color::XP_CTRL_BORDER);
+        draw_string(canvas, ix + 19, iy + 27, "New", Color::XP_TEXT_BLACK);
 
-        // Action Buttons: [New] [Open /etc/rc.sh] [Save]
-        canvas.fill_rounded_rect(ix + 8, iy + 4, 52, 22, 4, Color::argb(60, 255, 255, 255));
-        draw_string(canvas, ix + 18, iy + 7, "New", Color::WHITE);
+        canvas.draw_gradient_v(ix + 66, iy + 24, 94, 22, Color::XP_WHITE, Color::XP_FACE_DARK);
+        canvas.draw_rounded_rect(ix + 66, iy + 24, 94, 22, 3, Color::XP_CTRL_BORDER);
+        draw_string(canvas, ix + 73, iy + 27, "Open rc.sh", Color::XP_TEXT_BLACK);
 
-        canvas.fill_rounded_rect(ix + 66, iy + 4, 94, 22, 4, Color::argb(60, 255, 255, 255));
-        draw_string(canvas, ix + 74, iy + 7, "Open rc.sh", Color::TEXT_PRIMARY);
+        canvas.draw_gradient_v(ix + 166, iy + 24, 54, 22, Color::XP_WHITE, Color::XP_FACE_DARK);
+        canvas.draw_rounded_rect(ix + 166, iy + 24, 54, 22, 3, Color::XP_CTRL_BORDER);
+        draw_string(canvas, ix + 177, iy + 27, "Save", Color::XP_TEXT_BLACK);
 
-        canvas.fill_rounded_rect(ix + 166, iy + 4, 54, 22, 4, Color::ACCENT_BLUE);
-        draw_string(canvas, ix + 176, iy + 7, "Save", Color::WHITE);
+        draw_string_ellipsis(canvas, ix + 230, iy + 27, &self.status_msg, Color::XP_TEXT_GRAY, (iw - 238).max(20));
+        canvas.fill_rect(ix, iy + 49, iw, 1, Color::XP_SHADOW);
 
-        // Status message right-aligned
-        draw_string(canvas, ix + 230, iy + 7, &self.status_msg, Color::TEXT_MUTED);
+        // 2. Classic Crisp White Notepad Paper Canvas
+        let doc_y = iy + 50;
+        let doc_h = (ih - 50).max(16);
+        canvas.fill_rect(ix, doc_y, iw, doc_h, Color::WHITE);
+        canvas.draw_rect(ix, doc_y, iw, doc_h, Color::XP_INPUT_BORDER);
 
-        // 3. Document Content Area
-        let doc_y = iy + 36;
-        let mut curr_y = doc_y;
-        let left_margin = ix + 12;
+        let mut curr_y = doc_y + 6;
+        let left_margin = ix + 10;
+        let max_text_w = (iw - 20).max(32);
 
         for (row_idx, line) in self.lines.iter().enumerate() {
-            if curr_y + FONT_HEIGHT as i32 > iy + ih - 6 {
+            if curr_y + FONT_HEIGHT > iy + ih - 4 {
                 break;
             }
 
-            draw_string(canvas, left_margin, curr_y, line, Color::WHITE);
+            draw_string_ellipsis(canvas, left_margin, curr_y, line, Color::XP_TEXT_BLACK, max_text_w);
 
-            // Draw text cursor
             if row_idx == self.cursor_row {
-                let cursor_x = left_margin + (self.cursor_col as i32 * FONT_WIDTH as i32);
-                canvas.fill_rect(cursor_x, curr_y, 2, FONT_HEIGHT as i32, Color::ACCENT_CYAN);
+                let cursor_x = (left_margin + (self.cursor_col as i32 * FONT_WIDTH)).min(ix + iw - 12);
+                canvas.fill_rect(cursor_x, curr_y, 2, FONT_HEIGHT, Color::XP_TEXT_BLACK);
             }
 
-            curr_y += FONT_HEIGHT as i32 + 2;
+            curr_y += FONT_HEIGHT + 2;
         }
     }
 }

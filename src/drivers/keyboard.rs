@@ -292,12 +292,13 @@ pub fn init() {
                 }
                 let _ = inb(KEYBOARD_DATA_PORT);
             }
+            register_irq_handler(1, keyboard_irq_handler);
+            crate::arch::x86_64::ioapic::unmask_isa_irq(1);
+            kinfo!("PS/2 Keyboard driver initialized (IRQ 1 routed via I/O APIC -> Vector 33)");
+        } else {
+            kinfo!("No 8042 PS/2 Keyboard controller detected (0x64=0xFF); keeping IRQ 1 masked (using USB HID)");
         }
     }
-
-    register_irq_handler(1, keyboard_irq_handler);
-    crate::arch::x86_64::ioapic::unmask_isa_irq(1);
-    kinfo!("PS/2 Keyboard driver initialized (IRQ 1 routed via I/O APIC -> Vector 33)");
 }
 
 /// Non-blocking read of the next typed character (checks buffer, then polls PS/2, USB HID, and UART).

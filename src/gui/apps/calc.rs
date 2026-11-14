@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::string::String;
 use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
-use crate::gui::font::{draw_string, draw_string_scaled, measure_string};
+use crate::gui::font::{draw_string, measure_string};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CalcOp {
@@ -162,47 +162,55 @@ impl CalcApp {
     }
 
     pub fn render(&self, canvas: &mut Canvas, ix: i32, iy: i32, iw: i32, ih: i32) {
-        // macOS Calculator dark body
-        canvas.fill_rect(ix, iy, iw, ih, Color::argb(255, 30, 32, 40));
+        // Classic Calculator dialog body
+        canvas.fill_rect(ix, iy, iw, ih, Color::XP_FACE);
+        draw_string(canvas, ix + 8, iy + 2, "Edit   View   Help", Color::XP_TEXT_BLACK);
+        canvas.fill_rect(ix, iy + 20, iw, 1, Color::XP_SHADOW);
 
-        // 1. Digital Display Register
-        let disp_y = iy + 14;
+        // 1. Sunken White LCD Display
+        let disp_box_y = iy + 26;
+        canvas.fill_rect(ix + 8, disp_box_y, iw - 16, 30, Color::WHITE);
+        canvas.draw_rect(ix + 8, disp_box_y, iw - 16, 30, Color::XP_INPUT_BORDER);
+
         let disp_text = if self.display.is_empty() { "0" } else { &self.display };
-        let disp_w = measure_string(disp_text) * 2;
-        let disp_x = (ix + iw - 16).saturating_sub(disp_w).max(ix + 16);
+        let disp_w = measure_string(disp_text);
+        let disp_x = (ix + iw - 14).saturating_sub(disp_w).max(ix + 12);
+        draw_string(canvas, disp_x, disp_box_y + 7, disp_text, Color::XP_TEXT_BLACK);
 
-        draw_string_scaled(canvas, disp_x, disp_y, disp_text, Color::WHITE, 2);
-
-        // 2. Buttons Grid
+        // 2. Classic Raised Calculator Keys
         let btn_margin = 6;
         let start_y = iy + 64;
         let btn_w = (iw - btn_margin * 5) / 4;
         let btn_h = (ih - 64 - btn_margin * 6) / 5;
 
+        let xp_blue_txt = Color::rgb(0, 0, 200);
+        let xp_red_txt = Color::rgb(200, 0, 0);
+        let xp_clear_txt = Color::rgb(160, 0, 0);
+
         let buttons: [(&str, usize, usize, usize, Color, Color); 19] = [
-            ("AC", 0, 0, 1, Color::argb(255, 165, 165, 165), Color::BLACK),
-            ("+/-", 1, 0, 1, Color::argb(255, 165, 165, 165), Color::BLACK),
-            ("%", 2, 0, 1, Color::argb(255, 165, 165, 165), Color::BLACK),
-            ("÷", 3, 0, 1, Color::argb(255, 255, 159, 10), Color::WHITE),
+            ("AC", 0, 0, 1, Color::XP_FACE_LIGHT, xp_clear_txt),
+            ("+/-", 1, 0, 1, Color::XP_FACE_LIGHT, xp_blue_txt),
+            ("%", 2, 0, 1, Color::XP_FACE_LIGHT, xp_blue_txt),
+            ("÷", 3, 0, 1, Color::XP_FACE_LIGHT, xp_red_txt),
 
-            ("7", 0, 1, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("8", 1, 1, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("9", 2, 1, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("×", 3, 1, 1, Color::argb(255, 255, 159, 10), Color::WHITE),
+            ("7", 0, 1, 1, Color::XP_WHITE, xp_blue_txt),
+            ("8", 1, 1, 1, Color::XP_WHITE, xp_blue_txt),
+            ("9", 2, 1, 1, Color::XP_WHITE, xp_blue_txt),
+            ("×", 3, 1, 1, Color::XP_FACE_LIGHT, xp_red_txt),
 
-            ("4", 0, 2, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("5", 1, 2, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("6", 2, 2, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("-", 3, 2, 1, Color::argb(255, 255, 159, 10), Color::WHITE),
+            ("4", 0, 2, 1, Color::XP_WHITE, xp_blue_txt),
+            ("5", 1, 2, 1, Color::XP_WHITE, xp_blue_txt),
+            ("6", 2, 2, 1, Color::XP_WHITE, xp_blue_txt),
+            ("-", 3, 2, 1, Color::XP_FACE_LIGHT, xp_red_txt),
 
-            ("1", 0, 3, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("2", 1, 3, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("3", 2, 3, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("+", 3, 3, 1, Color::argb(255, 255, 159, 10), Color::WHITE),
+            ("1", 0, 3, 1, Color::XP_WHITE, xp_blue_txt),
+            ("2", 1, 3, 1, Color::XP_WHITE, xp_blue_txt),
+            ("3", 2, 3, 1, Color::XP_WHITE, xp_blue_txt),
+            ("+", 3, 3, 1, Color::XP_FACE_LIGHT, xp_red_txt),
 
-            ("0", 0, 4, 2, Color::argb(255, 55, 58, 70), Color::WHITE),
-            (".", 2, 4, 1, Color::argb(255, 55, 58, 70), Color::WHITE),
-            ("=", 3, 4, 1, Color::argb(255, 255, 159, 10), Color::WHITE),
+            ("0", 0, 4, 2, Color::XP_WHITE, xp_blue_txt),
+            (".", 2, 4, 1, Color::XP_WHITE, xp_blue_txt),
+            ("=", 3, 4, 1, Color::XP_FACE_LIGHT, xp_red_txt),
         ];
 
         for (label, col, row, col_span, bg_col, text_col) in buttons.iter() {
@@ -210,11 +218,9 @@ impl CalcApp {
             let by = start_y + *row as i32 * (btn_h + btn_margin);
             let bw = if *col_span == 2 { btn_w * 2 + btn_margin } else { btn_w };
 
-            // Rounded button pill
-            canvas.fill_rounded_rect(bx, by, bw, btn_h, 8, *bg_col);
-            canvas.draw_rounded_rect(bx, by, bw, btn_h, 8, Color::argb(30, 255, 255, 255));
+            canvas.draw_gradient_v(bx, by, bw, btn_h, *bg_col, Color::XP_FACE_DARK);
+            canvas.draw_rounded_rect(bx, by, bw, btn_h, 3, Color::XP_CTRL_BORDER);
 
-            // Centered label text
             let tw = measure_string(label);
             let tx = bx + (bw - tw) / 2;
             let ty = by + (btn_h - 16) / 2;

@@ -113,9 +113,9 @@ impl AppleTrackpadDriver {
         self.boot_emulation_enabled = active;
     }
 
-    /// Decode a standard 3-byte, 4-byte, or 8-byte USB HID Boot Mouse report.
+    /// Decode a standard 3-byte, 4-byte, or up-to-8-byte USB HID Boot Mouse report.
     pub fn process_report(&mut self, report: &[u8]) {
-        if report.len() < 3 {
+        if report.len() < 3 || report.len() > 8 {
             return;
         }
         let buttons = report[0] & 0x07;

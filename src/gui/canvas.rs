@@ -11,6 +11,7 @@ pub struct Canvas {
     allocated_pages: usize,
     contiguous_phys: Option<u64>,
     mapped_virt: bool,
+    clip: Option<(i32, i32, i32, i32)>,
 }
 
 impl Canvas {
@@ -46,12 +47,34 @@ impl Canvas {
             allocated_pages: total_pages,
             contiguous_phys,
             mapped_virt,
+            clip: None,
+        }
+    }
+
+    pub fn set_clip_rect(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x + w.max(0)).min(self.width as i32);
+        let y1 = (y + h.max(0)).min(self.height as i32);
+        self.clip = Some((x0, y0, x1, y1));
+    }
+
+    pub fn clear_clip_rect(&mut self) {
+        self.clip = None;
+    }
+
+    #[inline(always)]
+    pub fn clip_bounds(&self) -> (i32, i32, i32, i32) {
+        match self.clip {
+            Some(c) => c,
+            None => (0, 0, self.width as i32, self.height as i32),
         }
     }
 
     #[inline(always)]
     pub fn set_pixel(&mut self, x: i32, y: i32, color: Color) {
-        if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+        if x >= cx0 && x < cx1 && y >= cy0 && y < cy1 {
             let idx = (y as usize * self.width as usize) + x as usize;
             self.buffer[idx] = color.to_u32();
         }
@@ -59,7 +82,8 @@ impl Canvas {
 
     #[inline(always)]
     pub fn set_pixel_blend(&mut self, x: i32, y: i32, color: Color) {
-        if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+        if x >= cx0 && x < cx1 && y >= cy0 && y < cy1 {
             let idx = (y as usize * self.width as usize) + x as usize;
             let current = Color(self.buffer[idx]);
             self.buffer[idx] = Color::blend(color, current).to_u32();
@@ -88,10 +112,11 @@ impl Canvas {
             return;
         }
 
-        let x_start = x.max(0);
-        let y_start = y.max(0);
-        let x_end = (x + w).min(self.width as i32);
-        let y_end = (y + h).min(self.height as i32);
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+        let x_start = x.max(cx0);
+        let y_start = y.max(cy0);
+        let x_end = (x + w).min(cx1);
+        let y_end = (y + h).min(cy1);
 
         if x_start >= x_end || y_start >= y_end {
             return;
@@ -283,10 +308,11 @@ impl Canvas {
         if w <= 0 || h <= 0 {
             return;
         }
-        let x_start = x.max(0);
-        let y_start = y.max(0);
-        let x_end = (x + w).min(self.width as i32);
-        let y_end = (y + h).min(self.height as i32);
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+        let x_start = x.max(cx0);
+        let y_start = y.max(cy0);
+        let x_end = (x + w).min(cx1);
+        let y_end = (y + h).min(cy1);
         if x_start >= x_end || y_start >= y_end {
             return;
         }
@@ -304,10 +330,11 @@ impl Canvas {
         if w <= 0 || h <= 0 {
             return;
         }
-        let x_start = x.max(0);
-        let y_start = y.max(0);
-        let x_end = (x + w).min(self.width as i32);
-        let y_end = (y + h).min(self.height as i32);
+        let (cx0, cy0, cx1, cy1) = self.clip_bounds();
+        let x_start = x.max(cx0);
+        let y_start = y.max(cy0);
+        let x_end = (x + w).min(cx1);
+        let y_end = (y + h).min(cy1);
         if x_start >= x_end || y_start >= y_end {
             return;
         }
@@ -417,6 +444,94 @@ impl Canvas {
                 let dst_row = unsafe { dst_bytes.add(y * bpp_stride) };
                 let src_base = y * w;
                 for x in 0..w {
+                    let argb = self.buffer[src_base + x];
+                    let r = ((argb >> 16) & 0xFF) as u8;
+                    let g = ((argb >> 8) & 0xFF) as u8;
+                    let b = (argb & 0xFF) as u8;
+                    unsafe {
+                        if red_pos == 16 {
+                            *dst_row.add(x * 3) = b;
+                            *dst_row.add(x * 3 + 1) = g;
+                            *dst_row.add(x * 3 + 2) = r;
+                        } else {
+                            *dst_row.add(x * 3) = r;
+                            *dst_row.add(x * 3 + 1) = g;
+                            *dst_row.add(x * 3 + 2) = b;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Copy only a clamped rectangular dirty region `(rx, ry, rw, rh)` to the hardware linear framebuffer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn blit_rect_to_framebuffer(
+        &self,
+        fb_ptr: *mut u32,
+        pitch: u32,
+        bpp: u32,
+        red_pos: u8,
+        green_pos: u8,
+        blue_pos: u8,
+        rx: i32,
+        ry: i32,
+        rw: i32,
+        rh: i32,
+    ) {
+        if fb_ptr.is_null() || rw <= 0 || rh <= 0 {
+            return;
+        }
+        let w = self.width as i32;
+        let h = self.height as i32;
+        let x0 = rx.max(0).min(w);
+        let y0 = ry.max(0).min(h);
+        let x1 = (rx + rw).max(0).min(w);
+        let y1 = (ry + rh).max(0).min(h);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+
+        let rect_w = (x1 - x0) as usize;
+        let ux0 = x0 as usize;
+        let stride = (pitch as usize).max(self.width as usize * 4);
+        let dst_bytes = fb_ptr as *mut u8;
+
+        if bpp == 32 && red_pos == 16 && green_pos == 8 && blue_pos == 0 {
+            for y in y0..y1 {
+                let uy = y as usize;
+                unsafe {
+                    let dst_row = (dst_bytes.add(uy * stride) as *mut u32).add(ux0);
+                    let src_row = self.buffer.as_ptr().add(uy * self.width as usize + ux0);
+                    core::ptr::copy_nonoverlapping(src_row, dst_row, rect_w);
+                }
+            }
+            return;
+        }
+
+        if bpp == 32 {
+            for y in y0..y1 {
+                let uy = y as usize;
+                let dst_row = unsafe { dst_bytes.add(uy * stride) as *mut u32 };
+                let src_base = uy * self.width as usize;
+                for x in ux0..(x1 as usize) {
+                    let argb = self.buffer[src_base + x];
+                    let r = (argb >> 16) & 0xFF;
+                    let g = (argb >> 8) & 0xFF;
+                    let b = argb & 0xFF;
+                    let packed = (r << red_pos) | (g << green_pos) | (b << blue_pos);
+                    unsafe {
+                        *dst_row.add(x) = packed;
+                    }
+                }
+            }
+        } else if bpp == 24 {
+            let bpp_stride = (pitch as usize).max(self.width as usize * 3);
+            for y in y0..y1 {
+                let uy = y as usize;
+                let dst_row = unsafe { dst_bytes.add(uy * bpp_stride) };
+                let src_base = uy * self.width as usize;
+                for x in ux0..(x1 as usize) {
                     let argb = self.buffer[src_base + x];
                     let r = ((argb >> 16) & 0xFF) as u8;
                     let g = ((argb >> 8) & 0xFF) as u8;

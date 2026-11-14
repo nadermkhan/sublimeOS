@@ -13,6 +13,8 @@ use crate::arch::x86_64::serial::read_rx_char;
 use crate::drivers::keyboard::read_char;
 use crate::drivers::mouse::MOUSE;
 use crate::drivers::vbe::{self, VBE};
+use crate::gui::apps::settings::SettingsTab;
+use crate::gui::apps::sysmon::SysmonAction;
 use crate::gui::apps::{AboutApp, CalcApp, FileManagerApp, SettingsApp, SysmonApp, TerminalApp, TextEditApp};
 use crate::gui::canvas::Canvas;
 use crate::gui::desktop::{Desktop, DesktopAppId};
@@ -33,8 +35,11 @@ pub struct DesktopManager {
     pub mouse_x: i32,
     pub mouse_y: i32,
     pub dirty: bool,
+    cursor_dirty: bool,
     last_sec: u8,
     last_blink: u64,
+    cursor_bg: [u32; 32 * 32],
+    saved_cursor_box: Option<(i32, i32, i32, i32)>,
 }
 
 impl DesktopManager {
@@ -50,8 +55,11 @@ impl DesktopManager {
             mouse_x: (width / 2) as i32,
             mouse_y: (height / 2) as i32,
             dirty: true,
+            cursor_dirty: true,
             last_sec: 255,
             last_blink: 0,
+            cursor_bg: [0; 32 * 32],
+            saved_cursor_box: None,
         }
     }
 
@@ -73,29 +81,29 @@ impl DesktopManager {
         let win = match app_id {
             DesktopAppId::Terminal => Window::new(
                 id,
-                "Terminal — sublime — 80x24",
-                90,
-                45,
+                "Terminal - SublimeOS",
+                155,
+                40,
                 580,
                 380,
                 WindowApp::Terminal(TerminalApp::new()),
             ),
             DesktopAppId::Sysmon => Window::new(
                 id,
-                "Activity Monitor (CPU & Unified Memory)",
-                360,
-                100,
-                540,
+                "Task Manager",
+                420,
+                110,
+                550,
                 380,
                 WindowApp::Sysmon(SysmonApp::new()),
             ),
             DesktopAppId::FileManager => Window::new(
                 id,
-                "Finder",
-                140,
-                130,
-                580,
-                380,
+                "My Computer",
+                150,
+                85,
+                590,
+                390,
                 WindowApp::Files(FileManagerApp::new()),
             ),
             DesktopAppId::About => Window::new(
@@ -104,7 +112,7 @@ impl DesktopManager {
                 260,
                 90,
                 480,
-                330,
+                320,
                 WindowApp::About(AboutApp::new()),
             ),
             DesktopAppId::Calculator => Window::new(
@@ -112,22 +120,22 @@ impl DesktopManager {
                 "Calculator",
                 440,
                 80,
-                240,
-                340,
+                260,
+                330,
                 WindowApp::Calc(CalcApp::new()),
             ),
             DesktopAppId::TextEdit => Window::new(
                 id,
-                "TextEdit — untitled.txt",
+                "untitled.txt - Notepad",
                 180,
                 70,
-                520,
+                530,
                 360,
                 WindowApp::Editor(TextEditApp::new()),
             ),
             DesktopAppId::Settings => Window::new(
                 id,
-                "System Settings",
+                "Control Panel",
                 200,
                 80,
                 560,
@@ -142,6 +150,17 @@ impl DesktopManager {
         }
 
         self.windows.push(win);
+        self.dirty = true;
+    }
+
+    pub fn open_settings_tab(&mut self, tab: SettingsTab) {
+        self.open_app(DesktopAppId::Settings);
+        for w in self.windows.iter_mut() {
+            if let WindowApp::Settings(ref mut s) = w.app {
+                s.set_tab(tab);
+                break;
+            }
+        }
         self.dirty = true;
     }
 
@@ -180,7 +199,7 @@ impl DesktopManager {
         if x != self.mouse_x || y != self.mouse_y {
             self.mouse_x = x;
             self.mouse_y = y;
-            self.dirty = true;
+            self.cursor_dirty = true;
         }
 
         let sw = self.canvas.width as i32;
@@ -201,13 +220,13 @@ impl DesktopManager {
                 match res_win.resize_edge {
                     crate::gui::window::ResizeEdge::BottomRight => {
                         res_win.width = (x - res_win.x).clamp(res_win.min_width, sw - res_win.x);
-                        res_win.height = (y - res_win.y).clamp(res_win.min_height, sh - res_win.y - 64);
+                        res_win.height = (y - res_win.y).clamp(res_win.min_height, sh - res_win.y - 30);
                     }
                     crate::gui::window::ResizeEdge::Right => {
                         res_win.width = (x - res_win.x).clamp(res_win.min_width, sw - res_win.x);
                     }
                     crate::gui::window::ResizeEdge::Bottom => {
-                        res_win.height = (y - res_win.y).clamp(res_win.min_height, sh - res_win.y - 64);
+                        res_win.height = (y - res_win.y).clamp(res_win.min_height, sh - res_win.y - 30);
                     }
                     _ => {}
                 }
@@ -215,11 +234,11 @@ impl DesktopManager {
             }
         }
 
-        // 2. If currently dragging a window, update its position with macOS boundary limits
+        // 2. If currently dragging a window, update its position within Windows XP workspace
         if let Some(drag_win) = self.windows.iter_mut().find(|w| w.dragging) {
             if left_down {
                 drag_win.x = (x - drag_win.drag_offset_x).clamp(-drag_win.width + 60, sw - 60);
-                drag_win.y = (y - drag_win.drag_offset_y).clamp(26, sh - 40);
+                drag_win.y = (y - drag_win.drag_offset_y).clamp(0, sh - 30 - 28);
                 self.dirty = true;
             }
         }
@@ -234,24 +253,48 @@ impl DesktopManager {
         }
 
         if left_clicked {
-            // Check Spotlight interaction if open
+            // Check Windows XP Run dialog interaction if open
             if self.spotlight.is_open {
-                let modal_w = 540;
                 let results = self.spotlight.get_results();
-                let item_h = 32;
-                let modal_h = 56 + (results.len().min(5) as i32 * item_h);
+                let modal_w = 460;
+                let item_h = 26;
+                let list_h = (results.len().min(5) as i32) * item_h;
+                let modal_h = 132 + list_h;
                 let modal_x = (sw - modal_w) / 2;
-                let modal_y = 100;
+                let modal_y = ((sh - 30 - modal_h) / 2).max(40);
 
                 if x >= modal_x && x <= modal_x + modal_w && y >= modal_y && y <= modal_y + modal_h {
-                    if y >= modal_y + 48 {
-                        let idx = ((y - (modal_y + 54)) / item_h) as usize;
-                        if let Some(item) = results.get(idx) {
+                    let close_x = modal_x + modal_w - 24;
+                    let close_y = modal_y + 4;
+                    let btn_y = modal_y + modal_h - 34;
+                    let ok_x = modal_x + modal_w - 172;
+                    let cancel_x = modal_x + modal_w - 90;
+
+                    if (x >= close_x && x <= close_x + 20 && y >= close_y && y <= close_y + 19)
+                        || (x >= cancel_x && x <= cancel_x + 74 && y >= btn_y && y <= btn_y + 24)
+                    {
+                        self.spotlight.is_open = false;
+                    } else if x >= ok_x && x <= ok_x + 74 && y >= btn_y && y <= btn_y + 24 {
+                        if let Some(item) = results.get(self.spotlight.selected_index) {
                             match &item.target {
                                 SpotlightTarget::LaunchApp(app_id) => self.open_app(*app_id),
                                 SpotlightTarget::Calculation(_) => {}
                             }
                             self.spotlight.is_open = false;
+                        }
+                    } else {
+                        let list_y = modal_y + 27 + 62;
+                        let box_x = modal_x + 3 + 62;
+                        let box_w = modal_w - 6 - 76;
+                        if x >= box_x && x <= box_x + box_w && y >= list_y && y <= list_y + list_h {
+                            let idx = ((y - list_y) / item_h) as usize;
+                            if let Some(item) = results.get(idx) {
+                                match &item.target {
+                                    SpotlightTarget::LaunchApp(app_id) => self.open_app(*app_id),
+                                    SpotlightTarget::Calculation(_) => {}
+                                }
+                                self.spotlight.is_open = false;
+                            }
                         }
                     }
                     self.dirty = true;
@@ -262,19 +305,20 @@ impl DesktopManager {
                 }
             }
 
-            // 3. Check taskbar / start menu click
+            // 3. Check Windows XP Taskbar & Start Menu click
             let action = self.taskbar.handle_click(x, y, &self.windows, sw, sh);
             match action {
                 TaskbarAction::FocusWindow(win_id) => {
-                    let mut is_active_now = false;
+                    let mut minimized_now = false;
                     for w in self.windows.iter_mut() {
                         if w.id == win_id && w.is_active && !w.is_minimized {
                             w.is_minimized = true;
-                            is_active_now = true;
+                            w.is_active = false;
+                            minimized_now = true;
                             break;
                         }
                     }
-                    if !is_active_now {
+                    if !minimized_now {
                         self.bring_to_front(win_id);
                     }
                     self.dirty = true;
@@ -285,8 +329,26 @@ impl DesktopManager {
                     self.dirty = true;
                     return TaskbarAction::None;
                 }
+                TaskbarAction::MinimizeAll => {
+                    for w in self.windows.iter_mut() {
+                        w.is_minimized = true;
+                        w.is_active = false;
+                    }
+                    self.dirty = true;
+                    return TaskbarAction::None;
+                }
                 TaskbarAction::LaunchApp(app_id) => {
                     self.open_app(app_id);
+                    self.dirty = true;
+                    return TaskbarAction::None;
+                }
+                TaskbarAction::OpenNetworkSettings => {
+                    self.open_settings_tab(SettingsTab::Network);
+                    self.dirty = true;
+                    return TaskbarAction::None;
+                }
+                TaskbarAction::OpenDisplaySettings => {
+                    self.open_settings_tab(SettingsTab::Display);
                     self.dirty = true;
                     return TaskbarAction::None;
                 }
@@ -303,8 +365,8 @@ impl DesktopManager {
                 TaskbarAction::None => {}
             }
 
-            // If click was in taskbar area, don't check windows
-            if y >= sh - 36 {
+            // If click was in bottom Windows XP taskbar area, don't check windows
+            if y >= sh - 30 {
                 return TaskbarAction::None;
             }
 
@@ -385,8 +447,26 @@ impl DesktopManager {
 
             if let Some(id) = inner_click_id {
                 self.bring_to_front(id);
+                let mut sys_act = SysmonAction::None;
                 if let Some(w) = self.windows.iter_mut().find(|w| w.id == id) {
                     w.handle_inner_click(x, y);
+                    if let WindowApp::Sysmon(ref mut sysmon) = w.app {
+                        sys_act = sysmon.take_action();
+                    }
+                }
+                match sys_act {
+                    SysmonAction::SwitchToWindow(target_id) => {
+                        for w in self.windows.iter_mut() {
+                            if w.id == target_id {
+                                w.is_minimized = false;
+                            }
+                        }
+                        self.bring_to_front(target_id);
+                    }
+                    SysmonAction::CloseWindow(target_id) => {
+                        self.close_window(target_id);
+                    }
+                    SysmonAction::None => {}
                 }
                 self.dirty = true;
                 return TaskbarAction::None;
@@ -434,42 +514,25 @@ impl DesktopManager {
         }
     }
 
-    pub fn render_frame(&mut self) {
-        let ticks = crate::arch::x86_64::pit::get_ticks();
-        let now_sec = (ticks / 1000) as u8;
-        let blink = ((ticks / 500) % 2) as u64;
-        let needs_render = self.dirty || now_sec != self.last_sec || blink != self.last_blink;
-        if !needs_render {
-            return;
-        }
-        self.dirty = false;
-        self.last_sec = now_sec;
-        self.last_blink = blink;
-
+    fn determine_cursor_type(&self) -> CursorType {
         let sw = self.canvas.width as i32;
         let sh = self.canvas.height as i32;
-
-        // 1. Wallpaper & Icons
-        self.desktop.render(&mut self.canvas, self.mouse_x, self.mouse_y);
-
-        // 2. Windows (back to front)
-        for w in self.windows.iter_mut() {
-            w.render(&mut self.canvas, self.mouse_x, self.mouse_y);
-        }
-
-        // 3. Taskbar, Menus & Dock
-        self.taskbar.render(&mut self.canvas, &self.windows, self.mouse_x, self.mouse_y);
-
-        // 3.5. Spotlight Search Modal Overlay
-        self.spotlight.render(&mut self.canvas, sw, sh);
-
-        // 4. Determine Dynamic Cursor Type
         let mut cursor_type = CursorType::Arrow;
+
         if self.spotlight.is_open {
-            let modal_w = 540;
+            let results = self.spotlight.get_results();
+            let modal_w = 460;
+            let list_h = (results.len().min(5) as i32) * 26;
+            let modal_h = 132 + list_h;
             let modal_x = (sw - modal_w) / 2;
-            let modal_y = 100;
-            if self.mouse_x >= modal_x + 30 && self.mouse_x <= modal_x + modal_w - 30 && self.mouse_y >= modal_y + 10 && self.mouse_y <= modal_y + 40 {
+            let modal_y = ((sh - 30 - modal_h) / 2).max(40);
+            let box_x = modal_x + 65;
+            let box_y = modal_y + 59;
+            if self.mouse_x >= box_x
+                && self.mouse_x <= modal_x + modal_w - 14
+                && self.mouse_y >= box_y
+                && self.mouse_y <= box_y + 24
+            {
                 cursor_type = CursorType::IBeam;
             }
         } else {
@@ -481,13 +544,11 @@ impl DesktopManager {
                         ResizeEdge::Right => cursor_type = CursorType::ResizeHorizontal,
                         ResizeEdge::Bottom => cursor_type = CursorType::ResizeVertical,
                         ResizeEdge::None => {
-                            match &w.app {
-                                WindowApp::Terminal(_) | WindowApp::Editor(_) => {
-                                    if self.mouse_y > w.y + 28 && self.mouse_y < w.y + w.height - 4 {
-                                        cursor_type = CursorType::IBeam;
-                                    }
-                                }
-                                _ => {}
+                            if matches!(&w.app, WindowApp::Terminal(_) | WindowApp::Editor(_))
+                                && self.mouse_y > w.y + 28
+                                && self.mouse_y < w.y + w.height - 4
+                            {
+                                cursor_type = CursorType::IBeam;
                             }
                         }
                     }
@@ -495,23 +556,61 @@ impl DesktopManager {
                 }
             }
 
-            // Dock hover -> Hand
-            let dock_h = 58;
-            let dock_y = sh - dock_h - 10;
-            if self.mouse_y >= dock_y && self.mouse_y <= dock_y + dock_h {
-                cursor_type = CursorType::Hand;
-            }
-
-            // Top menu bar icons hover -> Hand
-            if self.mouse_y <= 24 {
+            // Start button & Quick Launch hover -> Hand
+            if self.mouse_y >= sh - 30 && self.mouse_x < 180 {
                 cursor_type = CursorType::Hand;
             }
         }
 
-        // 5. Mouse Cursor Pointer
-        draw_cursor(&mut self.canvas, self.mouse_x, self.mouse_y, cursor_type);
+        cursor_type
+    }
 
-        // 6. Blit to hardware linear framebuffer (respecting GOP pitch stride & channel shifts)
+    #[inline]
+    fn cursor_patch_box(&self, mx: i32, my: i32) -> (i32, i32, i32, i32) {
+        let sw = self.canvas.width as i32;
+        let sh = self.canvas.height as i32;
+        let x0 = (mx - 10).max(0);
+        let y0 = (my - 10).max(0);
+        let x1 = (mx + 22).min(sw);
+        let y1 = (my + 22).min(sh);
+        (x0, y0, (x1 - x0).clamp(0, 32), (y1 - y0).clamp(0, 32))
+    }
+
+    fn capture_cursor_bg(&mut self, bx: i32, by: i32, bw: i32, bh: i32) {
+        let stride = self.canvas.width as usize;
+        for row in 0..bh {
+            let sy = (by + row) as usize * stride;
+            let dst_off = row as usize * 32;
+            for col in 0..bw {
+                self.cursor_bg[dst_off + col as usize] = self.canvas.buffer[sy + (bx + col) as usize];
+            }
+        }
+        self.saved_cursor_box = Some((bx, by, bw, bh));
+    }
+
+    fn restore_cursor_bg(&mut self) -> Option<(i32, i32, i32, i32)> {
+        let (bx, by, bw, bh) = self.saved_cursor_box.take()?;
+        let stride = self.canvas.width as usize;
+        for row in 0..bh {
+            let dy = (by + row) as usize * stride;
+            let src_off = row as usize * 32;
+            for col in 0..bw {
+                self.canvas.buffer[dy + (bx + col) as usize] = self.cursor_bg[src_off + col as usize];
+            }
+        }
+        Some((bx, by, bw, bh))
+    }
+
+    pub fn render_frame(&mut self) {
+        let ticks = crate::arch::x86_64::pit::get_ticks();
+        let now_sec = (ticks / 1000) as u8;
+        let blink = ((ticks / 500) % 2) as u64;
+        let full_scene = self.dirty || now_sec != self.last_sec || blink != self.last_blink;
+
+        if !full_scene && !self.cursor_dirty {
+            return;
+        }
+
         let (fb_ptr, pitch, bpp, rpos, gpos, bpos) = {
             let vbe = VBE.lock();
             (
@@ -523,6 +622,63 @@ impl DesktopManager {
                 vbe.blue_pos,
             )
         };
+
+        if !full_scene && self.cursor_dirty && self.saved_cursor_box.is_some() {
+            // Ultra-fast hardware-like cursor overlay: restore old 32x32 background & draw new 32x32 cursor
+            self.cursor_dirty = false;
+            let old_box = self.restore_cursor_bg();
+            let (nbx, nby, nbw, nbh) = self.cursor_patch_box(self.mouse_x, self.mouse_y);
+            self.capture_cursor_bg(nbx, nby, nbw, nbh);
+            let cursor_type = self.determine_cursor_type();
+            draw_cursor(&mut self.canvas, self.mouse_x, self.mouse_y, cursor_type);
+
+            if let Some((obx, oby, obw, obh)) = old_box {
+                self.canvas
+                    .blit_rect_to_framebuffer(fb_ptr, pitch, bpp, rpos, gpos, bpos, obx, oby, obw, obh);
+            }
+            self.canvas
+                .blit_rect_to_framebuffer(fb_ptr, pitch, bpp, rpos, gpos, bpos, nbx, nby, nbw, nbh);
+            return;
+        }
+
+        self.dirty = false;
+        self.cursor_dirty = false;
+        self.last_sec = now_sec;
+        self.last_blink = blink;
+        self.saved_cursor_box = None;
+
+        let sw = self.canvas.width as i32;
+        let sh = self.canvas.height as i32;
+
+        // 1. Wallpaper (cached) & Icons
+        self.desktop.render(&mut self.canvas, self.mouse_x, self.mouse_y);
+
+        // 2. Sync live window list into Task Manager and render windows (back to front)
+        let win_snapshot: Vec<(u32, alloc::string::String, bool)> = self
+            .windows
+            .iter()
+            .map(|w| (w.id, w.title.clone(), w.is_minimized))
+            .collect();
+        for w in self.windows.iter_mut() {
+            if let WindowApp::Sysmon(ref mut sysmon) = w.app {
+                sysmon.sync_windows(win_snapshot.clone());
+            }
+            w.render(&mut self.canvas, self.mouse_x, self.mouse_y);
+        }
+
+        // 3. Taskbar, Menus & Dock
+        self.taskbar.render(&mut self.canvas, &self.windows, self.mouse_x, self.mouse_y);
+
+        // 3.5. Spotlight Search Modal Overlay
+        self.spotlight.render(&mut self.canvas, sw, sh);
+
+        // 4. Capture clean under-cursor patch before drawing Cursor Pointer
+        let (nbx, nby, nbw, nbh) = self.cursor_patch_box(self.mouse_x, self.mouse_y);
+        self.capture_cursor_bg(nbx, nby, nbw, nbh);
+        let cursor_type = self.determine_cursor_type();
+        draw_cursor(&mut self.canvas, self.mouse_x, self.mouse_y, cursor_type);
+
+        // 5. Blit full composited frame to hardware linear framebuffer
         self.canvas
             .blit_to_framebuffer(fb_ptr, pitch, bpp, rpos, gpos, bpos);
     }
@@ -530,7 +686,7 @@ impl DesktopManager {
 
 /// Launch the Sublime Desktop GUI environment.
 pub fn launch_desktop() {
-    kinfo!("Initializing UEFI GOP / Multiboot Linear Framebuffer for Aqua Desktop...");
+    kinfo!("Initializing UEFI GOP / Multiboot Linear Framebuffer for SublimeOS Desktop...");
 
     if let Err(e) = vbe::init(1024, 768) {
         crate::kerror!("GUI launch aborted: {}", e);
@@ -538,7 +694,7 @@ pub fn launch_desktop() {
     }
 
     if vbe::is_text_mode_fallback() {
-        crate::kerror!("Cannot launch Aqua Desktop: Hardware is running in VGA Text Mode (no UEFI GOP / Multiboot LFB active).");
+        crate::kerror!("Cannot launch SublimeOS Desktop: Hardware is running in VGA Text Mode (no UEFI GOP / Multiboot LFB active).");
         return;
     }
 
@@ -554,13 +710,13 @@ pub fn launch_desktop() {
     crate::drivers::mouse::set_bounds(w as i32, h as i32);
     let mut desktop_mgr = alloc::boxed::Box::new(DesktopManager::new(w, h));
 
-    // Open default initial windows: Terminal & System Monitor
-    desktop_mgr.open_app(DesktopAppId::Terminal);
+    // Open default initial windows: Task Manager behind Terminal so Terminal starts focused
     desktop_mgr.open_app(DesktopAppId::Sysmon);
+    desktop_mgr.open_app(DesktopAppId::Terminal);
 
-    kinfo!("Sublime Aqua Desktop online: {}x{}@{}bpp (Pitch: {} B)", w, h, bpp, pitch);
+    kinfo!("SublimeOS Desktop online: {}x{}@{}bpp (Pitch: {} B)", w, h, bpp, pitch);
 
-    // Render initial frame to paint the Aqua desktop onto the display before suppressing text console
+    // Render initial frame to paint the SublimeOS desktop onto the display before suppressing text console
     desktop_mgr.render_frame();
 
     let mut running = true;
@@ -595,32 +751,87 @@ pub fn launch_desktop() {
             _ => {}
         }
 
-        // 2. Poll keyboard input (PS/2 keyboard)
-        while let Some(byte) = read_char() {
-            if byte == b'\x1B' {
-                // Escape key / F12 exits GUI to text shell
-                running = false;
+        // 2. Poll keyboard input (PS/2 + USB HID keyboard ring buffer, bounded per frame)
+        let mut csi_state = 0u8;
+        for _ in 0..64 {
+            let Some(byte) = read_char() else {
                 break;
+            };
+            if csi_state == 1 {
+                if byte == b'[' || byte == b'O' {
+                    csi_state = 2;
+                    continue;
+                }
+                csi_state = 0;
+                // Standalone Escape followed by another key: handle ESC action first
+                if desktop_mgr.spotlight.is_open {
+                    desktop_mgr.spotlight.is_open = false;
+                    desktop_mgr.dirty = true;
+                } else if desktop_mgr.taskbar.start_menu_open {
+                    desktop_mgr.taskbar.start_menu_open = false;
+                    desktop_mgr.dirty = true;
+                } else {
+                    running = false;
+                    break;
+                }
+            } else if csi_state == 2 {
+                // Consume CSI parameter/final bytes (0x40..=0x7E finishes sequence)
+                if (0x40..=0x7E).contains(&byte) {
+                    csi_state = 0;
+                }
+                continue;
+            }
+
+            if byte == 0xFF {
+                continue;
+            }
+            if byte == b'\x1B' {
+                csi_state = 1;
+                continue;
             }
             desktop_mgr.handle_key_event(byte as char);
         }
-
-        // 3. Poll serial input (COM1) so typing in terminal window also feeds GUI terminal!
-        while let Some(byte) = read_rx_char() {
-            if byte == b'\x1B' {
+        if csi_state == 1 && running {
+            // Standalone Escape (arrow/CSI keys always queue "\x1B[..." together)
+            if desktop_mgr.spotlight.is_open {
+                desktop_mgr.spotlight.is_open = false;
+                desktop_mgr.dirty = true;
+            } else if desktop_mgr.taskbar.start_menu_open {
+                desktop_mgr.taskbar.start_menu_open = false;
+                desktop_mgr.dirty = true;
+            } else {
                 running = false;
-                break;
             }
-            desktop_mgr.handle_key_event(byte as char);
+        }
+
+        // 3. Poll serial input (COM1, bounded & 0xFF-safe so absent UARTs never hang)
+        if running {
+            for _ in 0..64 {
+                let Some(byte) = read_rx_char() else {
+                    break;
+                };
+                if byte == 0xFF {
+                    break;
+                }
+                if byte == b'\x1B' {
+                    running = false;
+                    break;
+                }
+                desktop_mgr.handle_key_event(byte as char);
+            }
         }
 
         let frame_start = crate::arch::x86_64::pit::get_ticks();
+        let tsc_deadline = crate::arch::x86_64::pit::read_tsc().saturating_add(40_000_000);
 
         // 4. Render frame
         desktop_mgr.render_frame();
 
-        // 5. Throttled frame pacing (~60 FPS target): wait up to 16ms, waking immediately on input/timer interrupts
+        // 5. Throttled frame pacing (~60 FPS target): wait up to 16ms with TSC fallback guard
         while crate::arch::x86_64::pit::get_ticks().saturating_sub(frame_start) < 16 {
+            if crate::arch::x86_64::pit::read_tsc() >= tsc_deadline {
+                break;
+            }
             if crate::drivers::keyboard::poll_ps2_controller() {
                 break;
             }

@@ -1,338 +1,456 @@
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::arch::x86_64::pit::get_ticks;
-use crate::arch::x86_64::rtc::read_datetime;
+use crate::arch::x86_64::rtc::get_system_datetime;
 use crate::fs::vfs::VFS;
 use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
-use crate::gui::font::{draw_string, FONT_HEIGHT, FONT_WIDTH};
-use crate::mm::heap::HEAP_ALLOCATOR;
+use crate::gui::font::{
+    draw_string, draw_string_bold, get_terminal_bold, set_terminal_bold, set_ui_font_style,
+    FONT_HEIGHT, FONT_WIDTH,
+};
 use crate::mm::pmm::PMM;
+use crate::net::device::NET_MANAGER;
+use crate::net::wifi::WIFI_MANAGER;
+
+const CMD_BG: Color = Color(0xFF0B0E14);
+const CMD_TEXT: Color = Color(0xFFD6DCE5);
+const CMD_BRIGHT: Color = Color(0xFFFFFFFF);
+const CMD_ACCENT: Color = Color(0xFF66B8FF);
+const CMD_GOOD: Color = Color(0xFF68E088);
+const CMD_WARN: Color = Color(0xFFFFC866);
+const CMD_ERR: Color = Color(0xFFFF7A7A);
 
 pub struct TerminalApp {
-    lines: Vec<(String, Color)>,
-    input_buffer: String,
-    cursor_timer: u64,
+    pub lines: Vec<(String, Color)>,
+    pub input: String,
+    pub cwd: String,
+    pub cursor_blink: u64,
 }
 
 impl TerminalApp {
     pub fn new() -> Self {
-        let mut app = Self {
-            lines: Vec::new(),
-            input_buffer: String::new(),
-            cursor_timer: 0,
-        };
-
-        app.lines.push((
-            String::from("Last login: Wed Nov 11 on ttys000"),
-            Color::TEXT_MUTED,
+        let mut lines = Vec::new();
+        lines.push((String::from("SublimeOS Terminal [Version 1.0.0]"), CMD_ACCENT));
+        lines.push((
+            String::from("KiteKernel x86_64 | (C) 2026 Nader Mahbub Khan"),
+            CMD_TEXT,
         ));
-        app.lines.push((
-            String::from("CosmicOS (Sublime Kernel 1.0.0 x86_64)"),
-            Color::ACCENT_CYAN,
+        lines.push((
+            String::from("Type 'help' for commands, or 'wifi scan' for wireless."),
+            CMD_TEXT,
         ));
-        app.lines.push((String::new(), Color::TEXT_PRIMARY));
+        lines.push((String::new(), CMD_TEXT));
 
-        app
+        Self {
+            lines,
+            input: String::new(),
+            cwd: String::from("/"),
+            cursor_blink: 0,
+        }
+    }
+
+    fn prompt_prefix(&self) -> String {
+        format!("sublime@SublimeOS:{}$ ", self.cwd)
     }
 
     pub fn handle_char(&mut self, ch: char) {
         match ch {
             '\n' | '\r' => {
-                let cmd = core::mem::take(&mut self.input_buffer);
-                let mut prompt_line = String::from("sublime@SublimeOS ~ % ");
-                prompt_line.push_str(&cmd);
-                self.lines.push((prompt_line, Color::TEXT_PRIMARY));
-
-                self.execute_command(cmd.trim());
+                let cmd_line = self.input.clone();
+                let prompt = format!("{}{}", self.prompt_prefix(), cmd_line);
+                self.lines.push((prompt, CMD_BRIGHT));
+                self.input.clear();
+                self.execute_command(cmd_line.trim());
             }
             '\x08' => {
-                // Backspace
-                self.input_buffer.pop();
+                self.input.pop();
             }
             c if c >= ' ' && c <= '~' => {
-                self.input_buffer.push(c);
+                if self.input.len() < 120 {
+                    self.input.push(c);
+                }
             }
             _ => {}
         }
+
+        if self.lines.len() > 160 {
+            let drain_count = self.lines.len() - 160;
+            self.lines.drain(0..drain_count);
+        }
     }
 
-    fn execute_command(&mut self, cmd_line: &str) {
-        if cmd_line.is_empty() {
+    fn resolve_path(&self, arg: &str) -> String {
+        if arg.is_empty() || arg == "." {
+            return self.cwd.clone();
+        }
+        if arg == ".." {
+            if self.cwd == "/" {
+                return String::from("/");
+            }
+            if let Some(pos) = self.cwd.rfind('/') {
+                if pos == 0 {
+                    return String::from("/");
+                }
+                return String::from(&self.cwd[..pos]);
+            }
+            return String::from("/");
+        }
+        if arg.starts_with('/') {
+            String::from(arg)
+        } else if self.cwd == "/" {
+            format!("/{}", arg)
+        } else {
+            format!("{}/{}", self.cwd, arg)
+        }
+    }
+
+    fn execute_command(&mut self, raw_cmd: &str) {
+        if raw_cmd.is_empty() {
             return;
         }
 
-        let mut parts = cmd_line.split_whitespace();
+        let mut parts = raw_cmd.splitn(2, ' ');
         let cmd = parts.next().unwrap_or("");
-        let arg = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("").trim();
+        let lower = cmd.to_ascii_lowercase();
 
-        match cmd {
-            "help" => {
-                self.lines.push((String::from("Available SublimeOS commands:"), Color::ACCENT_YELLOW));
-                self.lines.push((String::from("  help      - Display this help message"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  clear     - Clear terminal screen"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  uname     - Print system and kernel information"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  uptime    - Show system uptime in seconds and ticks"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  date      - Display current UTC hardware RTC date & time"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  mem       - Display physical and heap memory statistics"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  ps        - List running kernel tasks and threads"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  ls [path] - List directory contents (e.g. ls /etc, ls /proc)"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  cat <file>- Read and print file content"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  echo <msg>- Print text message to terminal"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  reboot    - Reboot the system via 8042 controller"), Color::TEXT_PRIMARY));
+        match lower.as_str() {
+            "help" | "?" => {
+                self.lines.push((String::from("SublimeOS Shell Commands:"), CMD_ACCENT));
+                self.lines.push((String::from("  clear / cls         Clear terminal"), CMD_TEXT));
+                self.lines.push((String::from("  ver / uname         OS & kernel info"), CMD_TEXT));
+                self.lines.push((String::from("  sysinfo / mem       Hardware & RAM stats"), CMD_TEXT));
+                self.lines.push((String::from("  ps / tasklist       Active kernel tasks"), CMD_TEXT));
+                self.lines.push((String::from("  ls [path] / cd      Browse VFS directories"), CMD_TEXT));
+                self.lines.push((String::from("  cat <file>          Read a file"), CMD_TEXT));
+                self.lines.push((String::from("  volumes / df        Mounted filesystems"), CMD_TEXT));
+                self.lines.push((String::from("  ifconfig / net      Network adapters & IPs"), CMD_TEXT));
+                self.lines.push((String::from("  wifi <scan|status>  Wireless 802.11 control"), CMD_TEXT));
+                self.lines.push((String::from("  wifi connect <s>    Join SSID (optional pass)"), CMD_TEXT));
+                self.lines.push((String::from("  font <bold|regular> Switch font style"), CMD_TEXT));
+                self.lines.push((String::from("  sound               Play Intel HDA chime"), CMD_TEXT));
+                self.lines.push((String::from("  date / uptime       Clock & uptime ticks"), CMD_TEXT));
+                self.lines.push((String::from("  echo <text>         Print message"), CMD_TEXT));
+                self.lines.push((String::from("  reboot              Restart computer"), CMD_WARN));
             }
-            "clear" => {
+            "clear" | "cls" => {
                 self.lines.clear();
             }
-            "sw_vers" => {
-                self.lines.push((String::from("ProductName:        SublimeOS"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("ProductVersion:     1.0"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("BuildVersion:       1A01"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("KernelVersion:      KiteKernel 1.0.0"), Color::TEXT_PRIMARY));
-            }
-            "system_profiler" => {
-                let hw = crate::drivers::platform::smbios::get_hardware_telemetry();
-                self.lines.push((alloc::format!("Model:  {}", hw.model_name), Color::ACCENT_CYAN));
-                self.lines.push((alloc::format!("Ident:  {}", hw.model_identifier), Color::TEXT_PRIMARY));
-                self.lines.push((alloc::format!("Chip:   {}", hw.chip), Color::TEXT_PRIMARY));
-                self.lines.push((alloc::format!("Cores:  {}", hw.cores_threads), Color::TEXT_PRIMARY));
-                self.lines.push((alloc::format!("Memory: {}", hw.memory_summary), Color::TEXT_PRIMARY));
-                self.lines.push((alloc::format!("Serial: {}", hw.serial_number), Color::TEXT_MUTED));
-            }
-            "say" => {
-                let rest = cmd_line.strip_prefix("say").unwrap_or("").trim();
-                let mut s = String::from("[SpeechSynthesis (Sublime Voice)] \"");
-                s.push_str(if rest.is_empty() { "Hello from SublimeOS" } else { rest });
-                s.push('"');
-                self.lines.push((s, Color::ACCENT_PURPLE));
-            }
-            "defaults" => {
-                self.lines.push((String::from("{ SublimeInterfaceStyle = Dark; SublimeKeyboardLayout = US; }"), Color::TEXT_PRIMARY));
+            "ver" | "sw_vers" => {
+                self.lines.push((String::from("SublimeOS Version 1.0.0 (Build 100.2026)"), CMD_BRIGHT));
+                self.lines.push((String::from("Kernel: KiteKernel 1.0.0 (x86_64 UEFI/ACPI)"), CMD_TEXT));
             }
             "uname" => {
+                self.lines.push((String::from("SublimeOS KiteKernel 1.0.0 x86_64"), CMD_BRIGHT));
+            }
+            "sysinfo" | "systeminfo" => {
+                let hw = crate::drivers::platform::smbios::get_hardware_telemetry();
+                self.lines.push((format!("OS:      SublimeOS 1.0.0 (KiteKernel)"), CMD_BRIGHT));
+                self.lines.push((format!("Model:   {}", hw.model_name), CMD_TEXT));
+                self.lines.push((format!("CPU:     {}", hw.chip), CMD_TEXT));
+                self.lines.push((format!("Cores:   {}", hw.cores_threads), CMD_TEXT));
+                self.lines.push((format!("Memory:  {}", hw.memory_summary), CMD_TEXT));
+                self.lines.push((format!("BIOS:    {}", hw.system_firmware), CMD_TEXT));
+            }
+            "echo" => {
+                let s = if rest.is_empty() { "SublimeOS" } else { rest };
+                self.lines.push((String::from(s), CMD_TEXT));
+            }
+            "env" | "set" => {
+                self.lines.push((String::from("OS=SublimeOS; KERNEL=KiteKernel; ARCH=x86_64"), CMD_TEXT));
+                self.lines.push((format!("PWD={}; USER=sublime; THEME=Sublime_Classic", self.cwd), CMD_TEXT));
+            }
+            "mem" | "free" => {
+                let (used_mb, total_mb) = {
+                    let pmm = PMM.lock();
+                    ((pmm.get_used_frames() * 4) / 1024, (pmm.get_total_frames() * 4) / 1024)
+                };
+                let (h_total, h_used, _) = crate::mm::heap::HEAP_ALLOCATOR.stats();
+                self.lines.push((format!("Physical RAM: {} MB / {} MB used", used_mb, total_mb), CMD_TEXT));
+                self.lines.push((format!("Kernel Heap:  {} KB / {} KB", h_used / 1024, h_total / 1024), CMD_TEXT));
+            }
+            "date" | "time" => {
+                let dt = get_system_datetime();
                 self.lines.push((
-                    String::from("SublimeOS sublime.local 1.0.0 KiteKernel Version 1.0.0 x86_64"),
-                    Color::ACCENT_GREEN,
+                    format!(
+                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+                        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+                    ),
+                    CMD_TEXT,
                 ));
             }
             "uptime" => {
-                let ticks = get_ticks();
+                let ticks = crate::arch::x86_64::pit::get_ticks();
                 let secs = ticks / 1000;
-                let mut s = String::from("Uptime: ");
-                push_u64(&mut s, secs);
-                s.push_str("s (");
-                push_u64(&mut s, ticks);
-                s.push_str(" timer ticks at 1000 Hz)");
-                self.lines.push((s, Color::ACCENT_GREEN));
+                self.lines.push((format!("Up {}s ({} kernel ticks @ 1000 Hz)", secs, ticks), CMD_TEXT));
             }
-            "date" => {
-                let time = read_datetime();
-                let mut s = String::from("UTC Time: ");
-                push_u64(&mut s, time.year as u64);
-                s.push('-');
-                push_2digits(&mut s, time.month);
-                s.push('-');
-                push_2digits(&mut s, time.day);
-                s.push(' ');
-                push_2digits(&mut s, time.hour);
-                s.push(':');
-                push_2digits(&mut s, time.minute);
-                s.push(':');
-                push_2digits(&mut s, time.second);
-                self.lines.push((s, Color::ACCENT_GREEN));
+            "ps" | "tasklist" => {
+                let tasks = crate::task::scheduler::get_task_list();
+                self.lines.push((format!("TID   STATE      CPU   NAME ({} active)", tasks.len()), CMD_ACCENT));
+                for (tid, name, state, cpu) in tasks.iter().take(16) {
+                    self.lines.push((
+                        format!("{:<5} {:<10?} cpu{:<2} {}", tid, state, cpu, name),
+                        CMD_TEXT,
+                    ));
+                }
             }
-            "mem" => {
-                let (total_frames, used_frames) = {
-                    let pmm = PMM.lock();
-                    (pmm.get_total_frames(), pmm.get_used_frames())
+            "pwd" => {
+                self.lines.push((self.cwd.clone(), CMD_TEXT));
+            }
+            "cd" => {
+                let target = self.resolve_path(rest);
+                let ok = {
+                    let vfs = VFS.lock();
+                    vfs.resolve_path(&target).and_then(|n| n.lock().readdir()).is_ok()
                 };
-                let mut s1 = String::from("Physical RAM: ");
-                push_u64(&mut s1, (used_frames * 4) as u64);
-                s1.push_str(" KiB used / ");
-                push_u64(&mut s1, (total_frames * 4) as u64);
-                s1.push_str(" KiB total (");
-                push_u64(&mut s1, (total_frames - used_frames) as u64);
-                s1.push_str(" frames free)");
-                self.lines.push((s1, Color::ACCENT_CYAN));
-
-                let (_heap_total, heap_alloc, heap_free) = HEAP_ALLOCATOR.stats();
-                let mut s2 = String::from("Kernel Heap:  ");
-                push_u64(&mut s2, heap_alloc as u64);
-                s2.push_str(" bytes allocated, ");
-                push_u64(&mut s2, heap_free as u64);
-                s2.push_str(" bytes free");
-                self.lines.push((s2, Color::ACCENT_CYAN));
+                if ok {
+                    self.cwd = target;
+                } else {
+                    self.lines.push((format!("cd: {}: No such directory", target), CMD_ERR));
+                }
             }
-            "ps" => {
-                self.lines.push((String::from("PID  TID  STATUS   NAME"), Color::ACCENT_YELLOW));
-                self.lines.push((String::from("  0    0  RUNNING  [kernel_idle]"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  1    1  READY    [kmain_worker]"), Color::TEXT_PRIMARY));
-                self.lines.push((String::from("  2    2  RUNNING  [sublime_gui]"), Color::ACCENT_GREEN));
-            }
-            "ls" => {
-                let path = if arg.is_empty() { "/" } else { arg };
-                let vfs = VFS.lock();
-                match vfs.resolve_path(path).and_then(|node| node.lock().readdir()) {
+            "ls" | "dir" => {
+                let target = self.resolve_path(rest);
+                let entries_res = {
+                    let vfs = VFS.lock();
+                    vfs.resolve_path(&target).and_then(|n| n.lock().readdir())
+                };
+                match entries_res {
                     Ok(entries) => {
-                        let mut s = String::from("Entries in ");
-                        s.push_str(path);
-                        s.push(':');
-                        self.lines.push((s, Color::ACCENT_YELLOW));
-                        for entry in entries {
-                            let type_str = match entry.file_type {
+                        self.lines.push((format!("Directory of {}", target), CMD_ACCENT));
+                        for entry in entries.iter().take(48) {
+                            let tag = match entry.file_type {
                                 crate::fs::vfs::FileType::Directory => "[DIR] ",
-                                crate::fs::vfs::FileType::Regular => "[FILE]",
-                                crate::fs::vfs::FileType::CharDevice => "[DEV] ",
-                                _ => "[UNK] ",
+                                _ => "[FILE]",
                             };
-                            let mut item = String::from("  ");
-                            item.push_str(type_str);
-                            item.push(' ');
-                            item.push_str(&entry.name);
-                            self.lines.push((item, Color::TEXT_PRIMARY));
+                            self.lines.push((format!("  {} {}", tag, entry.name), CMD_TEXT));
                         }
                     }
                     Err(e) => {
-                        let mut err_msg = String::from("ls error: ");
-                        err_msg.push_str(e);
-                        self.lines.push((err_msg, Color::ACCENT_RED));
+                        self.lines.push((format!("ls '{}': {}", target, e), CMD_ERR));
                     }
                 }
             }
-            "cat" => {
-                if arg.is_empty() {
-                    self.lines.push((String::from("Usage: cat <filename>"), Color::ACCENT_YELLOW));
-                    return;
+            "cat" | "type" => {
+                if rest.is_empty() {
+                    self.lines.push((String::from("Usage: cat <path>"), CMD_WARN));
+                } else {
+                    let target = self.resolve_path(rest);
+                    let content = VFS
+                        .lock()
+                        .open(&target, 0)
+                        .and_then(|file| {
+                            let mut buf = [0u8; 768];
+                            file.read(&mut buf).map(|n| String::from_utf8_lossy(&buf[..n]).into_owned())
+                        });
+                    match content {
+                        Ok(txt) => {
+                            for line in txt.lines().take(24) {
+                                self.lines.push((String::from(line), CMD_TEXT));
+                            }
+                        }
+                        Err(e) => self.lines.push((format!("cat: {}", e), CMD_ERR)),
+                    }
                 }
-                match VFS.lock().open(arg, 0) {
-                    Ok(file) => {
-                        let mut buf = [0u8; 512];
-                        match file.read(&mut buf) {
-                            Ok(bytes_read) => {
-                                if let Ok(text) = core::str::from_utf8(&buf[..bytes_read]) {
-                                    for line in text.lines() {
-                                        self.lines.push((String::from(line), Color::TEXT_PRIMARY));
-                                    }
+            }
+            "volumes" | "df" => {
+                let vols_res = {
+                    let vfs = VFS.lock();
+                    vfs.resolve_path("/Volumes").and_then(|n| n.lock().readdir())
+                };
+                match vols_res {
+                    Ok(vols) => {
+                        self.lines.push((String::from("Mounted Filesystem Volumes:"), CMD_ACCENT));
+                        for entry in vols {
+                            self.lines.push((format!("  /Volumes/{}", entry.name), CMD_GOOD));
+                        }
+                    }
+                    Err(_) => {
+                        self.lines.push((String::from("Root filesystem: / (ramfs/tmpfs active)"), CMD_TEXT));
+                    }
+                }
+            }
+            "ifconfig" | "ip" | "net" => {
+                let net = NET_MANAGER.lock();
+                if net.devices.is_empty() {
+                    self.lines.push((String::from("No network interfaces registered."), CMD_WARN));
+                } else {
+                    for (dev, cfg) in &net.devices {
+                        let mac = dev.mac_address();
+                        let state = if dev.is_link_up() { "UP" } else { "DOWN" };
+                        self.lines.push((
+                            format!("{}: <{:?}, {}>  IP {}.{}.{}.{}", dev.name(), dev.device_type(), state, cfg.ipv4[0], cfg.ipv4[1], cfg.ipv4[2], cfg.ipv4[3]),
+                            CMD_ACCENT,
+                        ));
+                        self.lines.push((
+                            format!("  MAC {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}  TX {} / RX {}", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], cfg.tx_packets, cfg.rx_packets),
+                            CMD_TEXT,
+                        ));
+                    }
+                }
+            }
+            "wifi" => {
+                let mut wparts = rest.splitn(3, ' ');
+                let sub = wparts.next().unwrap_or("status").to_ascii_lowercase();
+                let arg1 = wparts.next().unwrap_or("").trim();
+                let arg2 = wparts.next().unwrap_or("").trim();
+                match sub.as_str() {
+                    "" | "status" => {
+                        let wifi = WIFI_MANAGER.lock();
+                        if wifi.is_connected {
+                            self.lines.push((
+                                format!(
+                                    "Wi-Fi Connected: {} (Ch {}, {} Mbps)",
+                                    wifi.current_ssid.as_deref().unwrap_or("Unknown"),
+                                    wifi.current_channel,
+                                    wifi.link_speed_mbps
+                                ),
+                                CMD_GOOD,
+                            ));
+                        } else {
+                            self.lines.push((
+                                format!("Wi-Fi Disconnected ({} known APs)", wifi.scan_results.len()),
+                                CMD_WARN,
+                            ));
+                        }
+                    }
+                    "scan" => {
+                        let mut wifi = WIFI_MANAGER.lock();
+                        let aps = wifi.scan().to_vec();
+                        drop(wifi);
+                        self.lines.push((format!("802.11 Scan found {} networks:", aps.len()), CMD_ACCENT));
+                        for ap in aps {
+                            let sec = ap.security.as_str();
+                            self.lines.push((
+                                format!("  {:<22} Ch {:<2} {} dBm [{}]", ap.ssid, ap.channel, ap.rssi, sec),
+                                CMD_TEXT,
+                            ));
+                        }
+                    }
+                    "connect" => {
+                        if arg1.is_empty() {
+                            self.lines.push((String::from("Usage: wifi connect <SSID> [passphrase]"), CMD_WARN));
+                        } else {
+                            let pass = if arg2.is_empty() { None } else { Some(arg2) };
+                            let mut wifi = WIFI_MANAGER.lock();
+                            match wifi.connect(arg1, pass) {
+                                Ok(()) => {
+                                    let ch = wifi.current_channel;
+                                    let spd = wifi.link_speed_mbps;
+                                    self.lines.push((format!("Connected to '{}' (Ch {}, {} Mbps)", arg1, ch, spd), CMD_GOOD));
                                 }
-                            }
-                            Err(e) => {
-                                let mut err_msg = String::from("cat read error: ");
-                                err_msg.push_str(e);
-                                self.lines.push((err_msg, Color::ACCENT_RED));
+                                Err(e) => self.lines.push((format!("wifi connect failed: {}", e), CMD_ERR)),
                             }
                         }
                     }
-                    Err(e) => {
-                        let mut err_msg = String::from("cat open error: ");
-                        err_msg.push_str(e);
-                        self.lines.push((err_msg, Color::ACCENT_RED));
+                    "disconnect" => {
+                        WIFI_MANAGER.lock().disconnect();
+                        self.lines.push((String::from("Wi-Fi disconnected."), CMD_WARN));
+                    }
+                    _ => {
+                        self.lines.push((String::from("Usage: wifi [status|scan|connect <ssid> [pass]|disconnect]"), CMD_WARN));
                     }
                 }
             }
-            "echo" => {
-                let rest = cmd_line.strip_prefix("echo").unwrap_or("").trim();
-                self.lines.push((String::from(rest), Color::TEXT_PRIMARY));
+            "font" => {
+                let mode = rest.to_ascii_lowercase();
+                if mode == "bold" {
+                    set_terminal_bold(true);
+                    set_ui_font_style(1);
+                    self.lines.push((String::from("Font switched to Bold UI & Terminal."), CMD_GOOD));
+                } else if mode == "regular" || mode == "mono" {
+                    set_terminal_bold(false);
+                    set_ui_font_style(0);
+                    self.lines.push((String::from("Font switched to Sublime Mono 8x16."), CMD_GOOD));
+                } else {
+                    let cur = if get_terminal_bold() { "Bold" } else { "Regular 8x16" };
+                    self.lines.push((format!("Current Terminal Font: {} (use 'font bold' or 'font regular')", cur), CMD_TEXT));
+                }
+            }
+            "sound" | "chime" => {
+                crate::drivers::audio::play_sublime_chime();
+                self.lines.push((String::from("Played SublimeOS audio chime via Intel HDA."), CMD_GOOD));
             }
             "reboot" => {
-                self.lines.push((String::from("Rebooting system..."), Color::ACCENT_RED));
-                unsafe {
-                    crate::arch::x86_64::io::outb(0x64, 0xFE);
-                }
+                self.lines.push((String::from("Rebooting SublimeOS..."), CMD_WARN));
+                crate::arch::x86_64::acpi::reboot();
             }
             _ => {
-                crate::arch::x86_64::vga::start_stdout_capture();
-                crate::shell::commands::execute_command(cmd_line);
-                if let Some(captured) = crate::arch::x86_64::vga::stop_stdout_capture() {
-                    for line in captured.lines() {
-                        let clean = strip_ansi(line);
-                        self.lines.push((clean, Color::TEXT_PRIMARY));
-                    }
-                }
+                self.lines.push((
+                    format!("'{}' is not recognized. Type 'help' for commands.", cmd),
+                    CMD_ERR,
+                ));
             }
-        }
-
-        if self.lines.len() > 800 {
-            self.lines.drain(0..400);
         }
     }
 
     pub fn render(&mut self, canvas: &mut Canvas, x: i32, y: i32, w: i32, h: i32) {
-        // Dark background for terminal
-        canvas.fill_rect(x, y, w, h, Color::BG_INPUT);
+        canvas.fill_rect(x, y, w, h, CMD_BG);
+        let pad_x = 8;
+        let max_cols = ((w - pad_x * 2) / FONT_WIDTH).max(16) as usize;
+        let line_h = FONT_HEIGHT + 2;
+        let max_rows = ((h - 10) / line_h).max(1) as usize;
 
-        let max_visible_lines = (h / FONT_HEIGHT) as usize;
-        let total_lines = self.lines.len() + 1; // +1 for current input line
-
-        let start_line = if total_lines > max_visible_lines {
-            total_lines - max_visible_lines
-        } else {
-            0
-        };
-
-        let mut draw_y = y + 4;
-
-        for line_idx in start_line..self.lines.len() {
-            let (ref text, color) = self.lines[line_idx];
-            draw_string(canvas, x + 6, draw_y, text, color);
-            draw_y += FONT_HEIGHT;
+        // Build wrapped visual lines so text NEVER overflows past the right edge
+        let mut visual: Vec<(String, Color)> = Vec::new();
+        for (txt, col) in &self.lines {
+            push_wrapped_line(&mut visual, txt, *col, max_cols);
         }
 
-        // Draw current prompt & input line
-        if draw_y + FONT_HEIGHT <= y + h {
-            draw_string(canvas, x + 6, draw_y, "sublime@SublimeOS ~ % ", Color::ACCENT_GREEN);
-            let prompt_w = 20 * FONT_WIDTH;
-            draw_string(canvas, x + 6 + prompt_w, draw_y, &self.input_buffer, Color::TEXT_PRIMARY);
+        // Active prompt + cursor position calculation
+        let prompt_line = format!("{}{}", self.prompt_prefix(), self.input);
+        let prompt_chars = prompt_line.chars().count();
+        let prompt_start_idx = visual.len();
+        push_wrapped_line(&mut visual, &prompt_line, CMD_BRIGHT, max_cols);
 
-            // Blinking cursor
-            self.cursor_timer = self.cursor_timer.wrapping_add(1);
-            if (self.cursor_timer % 30) < 15 {
-                let cursor_x = x + 6 + prompt_w + (self.input_buffer.len() as i32 * FONT_WIDTH);
-                canvas.fill_rect(cursor_x, draw_y + 13, FONT_WIDTH, 2, Color::ACCENT_GREEN);
+        let total = visual.len();
+        let start = total.saturating_sub(max_rows);
+        let bold = get_terminal_bold();
+
+        let mut curr_y = y + 6;
+        for (idx, (line, col)) in visual.iter().enumerate().skip(start) {
+            if bold {
+                draw_string_bold(canvas, x + pad_x, curr_y, line, *col);
+            } else {
+                draw_string(canvas, x + pad_x, curr_y, line, *col);
+            }
+            curr_y += line_h;
+            let _ = idx;
+        }
+
+        // Draw blinking underscore cursor at exact wrapped prompt tail
+        self.cursor_blink = self.cursor_blink.wrapping_add(1);
+        if (self.cursor_blink % 30) < 15 {
+            let tail_row_offset = prompt_chars / max_cols;
+            let tail_col = prompt_chars % max_cols;
+            let cursor_abs_row = prompt_start_idx + tail_row_offset;
+            if cursor_abs_row >= start && cursor_abs_row < start + max_rows {
+                let rel_row = (cursor_abs_row - start) as i32;
+                let cx = x + pad_x + (tail_col as i32 * FONT_WIDTH);
+                let cy = y + 6 + rel_row * line_h + FONT_HEIGHT - 3;
+                canvas.fill_rect(cx, cy, FONT_WIDTH, 2, CMD_ACCENT);
             }
         }
     }
 }
 
-fn push_2digits(s: &mut String, val: u8) {
-    s.push(((val / 10) % 10 + b'0') as char);
-    s.push((val % 10 + b'0') as char);
-}
-
-fn push_u64(s: &mut String, mut val: u64) {
-    if val == 0 {
-        s.push('0');
+fn push_wrapped_line(out: &mut Vec<(String, Color)>, text: &str, color: Color, max_cols: usize) {
+    if text.is_empty() {
+        out.push((String::new(), color));
         return;
     }
-    let mut buf = [0u8; 20];
-    let mut idx = 0;
-    while val > 0 {
-        buf[idx] = ((val % 10) as u8) + b'0';
-        val /= 10;
-        idx += 1;
-    }
-    while idx > 0 {
-        idx -= 1;
-        s.push(buf[idx] as char);
-    }
-}
-
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1B' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                while let Some(&nc) = chars.peek() {
-                    chars.next();
-                    if (nc >= 'a' && nc <= 'z') || (nc >= 'A' && nc <= 'Z') {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
+    let mut buf = String::new();
+    let mut count = 0usize;
+    for ch in text.chars() {
+        if count >= max_cols {
+            out.push((core::mem::take(&mut buf), color));
+            count = 0;
         }
+        buf.push(ch);
+        count += 1;
     }
-    out
+    if !buf.is_empty() {
+        out.push((buf, color));
+    }
 }
