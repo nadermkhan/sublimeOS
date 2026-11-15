@@ -51,6 +51,33 @@ path = "src/bin/wc.rs"
 name = "edit"
 path = "src/bin/edit.rs"
 
+[[bin]]
+name = "studio"
+path = "src/bin/studio.rs"
+
+[[bin]]
+name = "paint"
+path = "src/bin/paint.rs"
+
+[[bin]]
+name = "appcenter"
+path = "src/bin/appcenter.rs"
+
+[[bin]]
+name = "player"
+path = "src/bin/player.rs"
+
+[[bin]]
+name = "code"
+path = "src/bin/code.rs"
+
+[[bin]]
+name = "music"
+path = "src/bin/music.rs"
+
+[dependencies]
+libgui = { path = "../libgui" }
+
 [profile.release]
 panic = "abort"
 opt-level = 2

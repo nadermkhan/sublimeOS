@@ -19,6 +19,31 @@ pub trait NetDevice: Send + Sync {
     fn receive_packet(&self, buf: &mut [u8]) -> Result<usize, &'static str>;
     fn is_link_up(&self) -> bool;
     fn device_type(&self) -> NetDeviceType;
+
+    /// Tune an 802.11 wireless radio to channel `1..=13`.
+    fn set_channel(&self, _channel: u8) -> Result<(), &'static str> {
+        Err("Channel tuning unsupported on this device")
+    }
+
+    /// Transmit a raw IEEE 802.11 management/control/EAPOL MPDU (24-byte MAC header + body).
+    fn send_80211_frame(&self, _frame: &[u8]) -> Result<(), &'static str> {
+        Err("Raw 802.11 TX unsupported on this device")
+    }
+
+    /// Receive a pending raw IEEE 802.11 management/EAPOL MPDU without consuming 802.3 data frames.
+    fn receive_80211_frame(&self, _buf: &mut [u8]) -> Result<usize, &'static str> {
+        Ok(0)
+    }
+
+    /// Install associated BSSID, link state, and optional WPA2 AES-CCMP TK/GTK keys on 802.11 hardware.
+    fn set_wifi_session(
+        &self,
+        _bssid: Option<[u8; 6]>,
+        _link_up: bool,
+        _tk: Option<[u8; 16]>,
+        _gtk: Option<(u8, [u8; 16])>,
+    ) {
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -142,24 +167,54 @@ impl NetworkManager {
         None
     }
 
+    pub fn set_default_device(&mut self, name: &str) {
+        if let Some(idx) = self.devices.iter().position(|(d, _)| d.name() == name) {
+            self.default_idx = Some(idx);
+        }
+    }
+
     pub fn get_device_for_ip(&self, dst_ip: [u8; 4]) -> Option<(Arc<dyn NetDevice>, InterfaceConfig)> {
         if dst_ip[0] == 127 {
             return self.get_device("lo0");
         }
-        // Check if destination matches any non-loopback interface subnet
-        for (dev, cfg) in &self.devices {
-            if dev.device_type() != NetDeviceType::Loopback && cfg.ipv4 != [0, 0, 0, 0] {
-                let matches = (0..4).all(|i| (dst_ip[i] & cfg.netmask[i]) == (cfg.ipv4[i] & cfg.netmask[i]));
-                if matches {
-                    return Some((dev.clone(), *cfg));
+        // Check if destination matches any linked non-loopback interface subnet first
+        for pass in 0..2 {
+            for (dev, cfg) in &self.devices {
+                if dev.device_type() != NetDeviceType::Loopback && cfg.ipv4 != [0, 0, 0, 0] {
+                    if pass == 0 && !dev.is_link_up() {
+                        continue;
+                    }
+                    let matches = (0..4).all(|i| (dst_ip[i] & cfg.netmask[i]) == (cfg.ipv4[i] & cfg.netmask[i]));
+                    if matches {
+                        return Some((dev.clone(), *cfg));
+                    }
                 }
             }
         }
-        // Fallback to default device
+        // Fallback to active default device
         self.get_default_device()
     }
 
     pub fn get_default_device(&self) -> Option<(Arc<dyn NetDevice>, InterfaceConfig)> {
+        if let Some(idx) = self.default_idx {
+            if let Some((d, c)) = self.devices.get(idx) {
+                if d.is_link_up() && c.ipv4 != [0, 0, 0, 0] {
+                    return Some((d.clone(), *c));
+                }
+            }
+        }
+        // Prefer any linked non-loopback interface with an assigned IPv4 address
+        if let Some((d, c)) = self.devices.iter().find(|(d, c)| {
+            d.device_type() != NetDeviceType::Loopback && d.is_link_up() && c.ipv4 != [0, 0, 0, 0]
+        }) {
+            return Some((d.clone(), *c));
+        }
+        // Next prefer any linked non-loopback interface (e.g., DHCP discovery before IP assignment)
+        if let Some((d, c)) = self.devices.iter().find(|(d, _)| {
+            d.device_type() != NetDeviceType::Loopback && d.is_link_up()
+        }) {
+            return Some((d.clone(), *c));
+        }
         if let Some(idx) = self.default_idx {
             self.devices.get(idx).map(|(d, c)| (d.clone(), *c))
         } else {

@@ -386,13 +386,32 @@ fn cmd_open(args: &[&str]) {
         println!("The file does not exist.");
         return;
     }
-    let target = args[0];
-    if target.contains("Finder.app") || target == "gui" || target == "." {
-        println!("\x1b[35m[Sublime LaunchServices] Launching Finder.app...\x1b[0m");
+    let joined = args.join(" ");
+    let target = joined.trim();
+    if crate::gui::is_desktop_running() {
+        crate::gui::queue_open_path(target);
+        println!("[Sublime LaunchServices] Queued '{}' in Desktop...", target);
+        return;
+    }
+    if target == "gui" || target == "." || target == "/Applications/File Explorer.app" || target == "/Applications/Finder.app" {
+        println!("\x1b[35m[LaunchServices] Starting SublimeOS Modern Desktop...\x1b[0m");
         crate::gui::launch_desktop();
+    } else if target.ends_with(".app") {
+        if let Some(m) = crate::user::apps::read_app_manifest(target) {
+            if m.builtin.is_some() {
+                println!("\x1b[35m[LaunchServices] Starting SublimeOS Desktop for {}...\x1b[0m", m.name);
+                crate::gui::launch_desktop();
+            } else if !m.exec.is_empty() {
+                cmd_exec(&[m.exec.as_str()]);
+            }
+        } else {
+            println!("App bundle not found: {}", target);
+        }
+    } else if crate::user::apps::is_elf64_file(target) {
+        cmd_exec(&[target]);
     } else {
         println!("[Sublime LaunchServices] Opening '{}'...", target);
-        cmd_cat(args);
+        cmd_cat(&[target]);
     }
 }
 
@@ -561,13 +580,13 @@ fn cmd_help() {
     println!("    \x1b[32maudio\x1b[0m [chime|play]                Audio chime and sound playback");
     println!();
     println!("  \x1b[1;33mAPPLICATIONS\x1b[0m");
-    println!("    \x1b[32mdesktop\x1b[0m                           Aqua graphical window compositor");
+    println!("    \x1b[32mdesktop\x1b[0m                           SublimeOS Modern graphical window compositor");
     println!("    \x1b[32mcalc\x1b[0m                              64-bit expression calculator");
     println!("    \x1b[32msnake\x1b[0m                             Classic arcade game");
 }
 
 fn cmd_gui() {
-    println!("\x1b[35m[LaunchServices] Starting SublimeOS Aqua Desktop...\x1b[0m");
+    println!("\x1b[35m[LaunchServices] Starting SublimeOS Modern Desktop...\x1b[0m");
     crate::gui::launch_desktop();
 }
 
@@ -993,8 +1012,8 @@ fn cmd_wifi(args: &[&str]) {
     let sub = args.first().copied().unwrap_or("help");
     match sub {
         "scan" => {
-            println!("Scanning 2.4 GHz and 5 GHz wireless spectrum via PCIe 802.11 hardware...");
-            let aps = crate::net::wifi::WIFI_MANAGER.lock().scan().to_vec();
+            println!("Scanning 2.4 GHz wireless spectrum via PCIe 802.11 hardware...");
+            let aps = crate::net::wifi::scan();
             if aps.is_empty() {
                 println!("  No 802.11 access points detected (no physical Wi-Fi radio attached or no beacons received).");
                 return;
@@ -1016,19 +1035,15 @@ fn cmd_wifi(args: &[&str]) {
             }
             let ssid = args[1];
             let pass = args.get(2).copied();
-            let ifname = crate::net::device::NET_MANAGER
-                .lock()
-                .devices
-                .iter()
-                .find(|(d, _)| d.device_type() == crate::net::device::NetDeviceType::Wireless80211)
+            let ifname = crate::net::wifi::find_active_wireless_device()
                 .map(|(d, _)| alloc::string::String::from(d.name()))
                 .unwrap_or_else(|| alloc::string::String::from("wlan0"));
 
-            println!("\x1b[36mInitiating 802.11 association with '{}'...\x1b[0m", ssid);
-            match crate::net::wifi::WIFI_MANAGER.lock().connect(ssid, pass) {
+            println!("\x1b[36mInitiating 802.11 association with '{}' on {}...\x1b[0m", ssid, ifname);
+            match crate::net::wifi::connect(ssid, pass) {
                 Ok(()) => {
-                    println!("\x1b[32m[OK] Associated with '{}' via 802.11 MAC\x1b[0m", ssid);
-                    println!("Interface: {} (run 'dhcp' or configure IPv4 after 4-way handshake)", ifname);
+                    println!("\x1b[32m[OK] Associated & linked with '{}' on {}\x1b[0m", ssid, ifname);
+                    println!("Run 'dhcp discover {}' to obtain an IPv4 lease.", ifname);
                 }
                 Err(e) => {
                     println!("\x1b[31mwifi connect error: {}\x1b[0m", e);
@@ -1036,11 +1051,7 @@ fn cmd_wifi(args: &[&str]) {
             }
         }
         "status" => {
-            let ifname = crate::net::device::NET_MANAGER
-                .lock()
-                .devices
-                .iter()
-                .find(|(d, _)| d.device_type() == crate::net::device::NetDeviceType::Wireless80211)
+            let ifname = crate::net::wifi::find_active_wireless_device()
                 .map(|(d, _)| alloc::string::String::from(d.name()))
                 .unwrap_or_else(|| alloc::string::String::from("wlan0"));
 
@@ -1048,20 +1059,19 @@ fn cmd_wifi(args: &[&str]) {
             if mgr.is_connected {
                 let b = mgr.current_bssid.unwrap_or([0; 6]);
                 println!("Wi-Fi Status: \x1b[32mConnected\x1b[0m");
-                println!("  Interface:    {} (IEEE 802.11n/ac)", ifname);
+                println!("  Interface:    {} (IEEE 802.11b/g/n)", ifname);
                 println!("  SSID:         {}", mgr.current_ssid.as_deref().unwrap_or("Unknown"));
                 println!("  BSSID:        {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", b[0], b[1], b[2], b[3], b[4], b[5]);
                 println!("  Channel:      {}", mgr.current_channel);
                 println!("  Tx Rate:      {} Mbps", mgr.link_speed_mbps);
-                println!("  Security:     WPA2-Personal (PBKDF2-SHA1 Key Derivation)");
             } else {
                 println!("Wi-Fi Status: \x1b[33mDisconnected\x1b[0m ({} inactive)", ifname);
                 println!("Type 'wifi scan' or 'wifi connect <SSID> [password]' to associate.");
             }
         }
         "disconnect" => {
-            crate::net::wifi::WIFI_MANAGER.lock().disconnect();
-            println!("wlan0: Disconnected from wireless network.");
+            crate::net::wifi::disconnect();
+            println!("Disconnected from wireless network.");
         }
         _ => {
             println!("Usage: wifi [scan | connect <ssid> [passphrase] | status | disconnect]");
@@ -1089,14 +1099,47 @@ fn cmd_dhcp(args: &[&str]) {
             }
         }
         "discover" | "renew" => {
-            let iface = args.get(1).copied().unwrap_or("en0");
+            let iface: alloc::string::String = if let Some(arg_if) = args.get(1).copied() {
+                alloc::string::String::from(arg_if)
+            } else {
+                crate::net::device::NET_MANAGER
+                    .lock()
+                    .get_default_device()
+                    .map(|(d, _)| alloc::string::String::from(d.name()))
+                    .unwrap_or_else(|| alloc::string::String::from("en0"))
+            };
             println!("Sending DHCPDISCOVER on {}...", iface);
-            match crate::net::dhcp::start_dhcp_discovery(iface) {
+            match crate::net::dhcp::start_dhcp_discovery(&iface) {
                 Ok(frame) => {
-                    let net = crate::net::device::NET_MANAGER.lock();
-                    if let Some((dev, _)) = net.get_device(iface) {
-                        let _ = dev.send_packet(&frame);
-                        println!("DHCPDISCOVER transmitted (broadcast)");
+                    let dev_opt = {
+                        let net = crate::net::device::NET_MANAGER.lock();
+                        net.get_device(&iface).map(|(d, _)| d.clone())
+                    };
+                    if let Some(dev) = dev_opt {
+                        if let Err(e) = dev.send_packet(&frame) {
+                            println!("DHCPDISCOVER TX failed on {}: {}", iface, e);
+                            return;
+                        }
+                        println!("DHCPDISCOVER transmitted; awaiting lease offer...");
+                        let mut bound_ip = None;
+                        for _ in 0..300 {
+                            crate::net::poll();
+                            {
+                                let c = crate::net::dhcp::DHCP_CLIENT.lock();
+                                if matches!(c.state, crate::net::dhcp::DhcpState::Bound) {
+                                    bound_ip = c.active_lease.as_ref().map(|l| l.assigned_ip);
+                                    break;
+                                }
+                            }
+                            crate::arch::x86_64::pit::sleep_ms(10);
+                        }
+                        if let Some(ip) = bound_ip {
+                            println!("\x1b[32mDHCP Bound on {}: {}.{}.{}.{}\x1b[0m", iface, ip[0], ip[1], ip[2], ip[3]);
+                        } else {
+                            println!("DHCP timeout on {} (no DHCPOFFER/ACK within 3s)", iface);
+                        }
+                    } else {
+                        println!("DHCP error: interface '{}' not found", iface);
                     }
                 }
                 Err(e) => println!("DHCP discovery error: {}", e),
@@ -1194,8 +1237,7 @@ fn cmd_ifconfig() {
                         cfg.gateway[0], cfg.gateway[1], cfg.gateway[2], cfg.gateway[3]
                     );
                 }
-                let wifi_connected = crate::net::wifi::WIFI_MANAGER.lock().is_connected;
-                let wifi_status = if wifi_connected { "active" } else { "inactive" };
+                let wifi_status = if is_up || crate::net::wifi::is_wifi_connected() { "active" } else { "inactive" };
                 println!("        media: IEEE 802.11 (Wi-Fi 802.11ac 866 Mbps)");
                 println!("        status: {}", wifi_status);
             }

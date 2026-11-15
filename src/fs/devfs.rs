@@ -39,6 +39,8 @@ impl DevFsDirectory {
         entries.insert(String::from("rtc"), Arc::new(IrqSafeSpinlock::new(RtcDev)));
         entries.insert(String::from("fb0"), Arc::new(IrqSafeSpinlock::new(FbDev)));
         entries.insert(String::from("backlight"), Arc::new(IrqSafeSpinlock::new(BacklightDev)));
+        entries.insert(String::from("audio"), Arc::new(IrqSafeSpinlock::new(AudioDev)));
+        entries.insert(String::from("audioctl"), Arc::new(IrqSafeSpinlock::new(AudioCtlDev)));
         entries.insert(String::from("ptmx"), Arc::new(IrqSafeSpinlock::new(crate::tty::pty::PtmxDev)));
         entries.insert(String::from("pts"), Arc::new(IrqSafeSpinlock::new(crate::tty::pty::PtsDirectory)));
         entries.insert(String::from("shm"), Arc::new(IrqSafeSpinlock::new(crate::mm::shm::ShmDirectory)));
@@ -535,6 +537,117 @@ impl InodeOperations for BacklightDev {
         Stat {
             inode: 106,
             size: 4,
+            file_type: FileType::CharDevice,
+            mode: 0o666,
+        }
+    }
+}
+
+/// `/dev/audio` non-blocking PCM audio stream device (accepts 44.1 kHz 16-bit LE stereo PCM).
+pub struct AudioDev;
+
+impl InodeOperations for AudioDev {
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+        let (queued, total, running, vol) = crate::drivers::audio::stream_status();
+        let dev = crate::drivers::audio::active_device_name();
+        let s = alloc::format!(
+            "device={}\nvolume={}\nqueued_samples={}\ntotal_streamed={}\nactive={}\n",
+            dev, vol, queued, total, if running { 1 } else { 0 }
+        );
+        let bytes = s.as_bytes();
+        if offset >= bytes.len() {
+            return Ok(0);
+        }
+        let n = (bytes.len() - offset).min(buf.len());
+        buf[..n].copy_from_slice(&bytes[offset..offset + n]);
+        Ok(n)
+    }
+
+    fn write(&mut self, _offset: usize, buf: &[u8]) -> Result<usize, &'static str> {
+        let aligned_bytes = buf.len() & !3;
+        if aligned_bytes < 4 {
+            return Ok(0);
+        }
+        let mut stage = [0i16; 1024];
+        let mut pushed_bytes = 0usize;
+        for chunk in buf[..aligned_bytes].chunks(2048) {
+            let count = (chunk.len() / 4) * 2;
+            if count == 0 {
+                break;
+            }
+            for (i, pair) in chunk[..count * 2].chunks_exact(2).enumerate() {
+                stage[i] = i16::from_le_bytes([pair[0], pair[1]]);
+            }
+            let pushed = crate::drivers::audio::stream_push_pcm(&stage[..count]);
+            pushed_bytes += pushed * 2;
+            if pushed < count {
+                break;
+            }
+        }
+        Ok(pushed_bytes)
+    }
+
+    fn stat(&self) -> Stat {
+        Stat {
+            inode: 107,
+            size: 0,
+            file_type: FileType::CharDevice,
+            mode: 0o666,
+        }
+    }
+}
+
+/// `/dev/audioctl` character device for stopping/clearing audio playback and setting volume.
+pub struct AudioCtlDev;
+
+impl InodeOperations for AudioCtlDev {
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+        let (queued, _total, running, _eff_vol) = crate::drivers::audio::stream_status();
+        let vol = crate::drivers::audio::get_volume();
+        let muted = if crate::drivers::audio::is_muted() { 1 } else { 0 };
+        let s = alloc::format!(
+            "vol={} queued={} active={} muted={}\n",
+            vol,
+            queued,
+            if running { 1 } else { 0 },
+            muted
+        );
+        let bytes = s.as_bytes();
+        if offset >= bytes.len() {
+            return Ok(0);
+        }
+        let n = (bytes.len() - offset).min(buf.len());
+        buf[..n].copy_from_slice(&bytes[offset..offset + n]);
+        Ok(n)
+    }
+
+    fn write(&mut self, _offset: usize, buf: &[u8]) -> Result<usize, &'static str> {
+        let Ok(cmd) = core::str::from_utf8(buf) else {
+            return Err("Invalid UTF-8 audioctl command");
+        };
+        for tok in cmd.split([';', '\n']) {
+            let line = tok.trim();
+            if line.eq_ignore_ascii_case("stop") {
+                crate::drivers::audio::stream_stop();
+            } else if line.eq_ignore_ascii_case("clear") {
+                crate::drivers::audio::stream_clear();
+            } else if line.eq_ignore_ascii_case("mute") {
+                crate::drivers::audio::set_muted(true);
+            } else if line.eq_ignore_ascii_case("unmute") {
+                crate::drivers::audio::set_muted(false);
+            } else if let Some(rest) = line.strip_prefix("vol ") {
+                if let Ok(v) = rest.trim().parse::<u8>() {
+                    crate::drivers::audio::set_volume(v);
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn stat(&self) -> Stat {
+        Stat {
+            inode: 108,
+            size: 0,
             file_type: FileType::CharDevice,
             mode: 0o666,
         }

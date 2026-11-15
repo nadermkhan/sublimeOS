@@ -94,6 +94,7 @@ impl InodeOperations for RamInode {
                     _ => RamInode::new_file(&[]),
                 };
                 entries.insert(String::from(name), new_node.clone());
+                crate::fs::vfs::bump_vfs_generation();
                 Ok(new_node as Arc<IrqSafeSpinlock<dyn InodeOperations>>)
             }
             RamNodeContent::File(_) => Err("Not a directory"),
@@ -122,6 +123,7 @@ impl InodeOperations for RamInode {
         match self.content {
             RamNodeContent::Directory(ref mut entries) => {
                 entries.remove(name).ok_or("File not found")?;
+                crate::fs::vfs::bump_vfs_generation();
                 Ok(())
             }
             RamNodeContent::File(_) => Err("Not a directory"),
@@ -132,6 +134,28 @@ impl InodeOperations for RamInode {
         match self.content {
             RamNodeContent::Directory(ref mut entries) => {
                 entries.insert(String::from(name), node);
+                crate::fs::vfs::bump_vfs_generation();
+                Ok(())
+            }
+            RamNodeContent::File(_) => Err("Not a directory"),
+        }
+    }
+
+    fn rename(&mut self, old_name: &str, new_name: &str) -> Result<(), &'static str> {
+        if new_name.is_empty() || new_name.contains('/') {
+            return Err("Invalid filename");
+        }
+        match self.content {
+            RamNodeContent::Directory(ref mut entries) => {
+                if old_name == new_name {
+                    return Ok(());
+                }
+                if entries.contains_key(new_name) {
+                    return Err("Destination already exists");
+                }
+                let node = entries.remove(old_name).ok_or("Source file not found")?;
+                entries.insert(String::from(new_name), node);
+                crate::fs::vfs::bump_vfs_generation();
                 Ok(())
             }
             RamNodeContent::File(_) => Err("Not a directory"),

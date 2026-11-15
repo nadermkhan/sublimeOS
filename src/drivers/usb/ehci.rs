@@ -834,9 +834,10 @@ impl EhciController {
         )
     }
 
-    /// Scan all Periodic Interrupt IN pipes and dispatch completed qTD payloads to HID drivers.
+    /// Scan all Periodic Interrupt IN pipes and dispatch completed qTD payloads & typematic repeats to HID drivers.
     pub fn poll_interrupt_pipes(&mut self) -> usize {
         let mut processed = 0usize;
+        let now_ms = crate::arch::x86_64::pit::get_ticks();
 
         for pipe in self.pipes.iter_mut() {
             unsafe {
@@ -845,6 +846,13 @@ impl EhciController {
                 let token = read_volatile(&(*qtd_ptr).token);
 
                 if (token & QTD_STATUS_ACTIVE) != 0 {
+                    if pipe.kind == UsbHidType::Keyboard {
+                        if let Some(ref mut drv) = pipe.kbd_driver {
+                            if drv.tick_repeat(now_ms) {
+                                processed += 1;
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -863,7 +871,8 @@ impl EhciController {
                         UsbHidType::Keyboard if actual >= 3 => {
                             if let Some(report) = UsbKeyboardReport::from_bytes(&local_buf[..actual]) {
                                 if let Some(ref mut drv) = pipe.kbd_driver {
-                                    drv.process_report(&report);
+                                    drv.process_report_at(&report, now_ms);
+                                    let _ = drv.tick_repeat(now_ms);
                                     processed += 1;
                                 }
                             }

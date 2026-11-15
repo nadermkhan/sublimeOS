@@ -683,3 +683,423 @@ pub fn chacha20_poly1305_open(
     chacha20_crypt(key, nonce, 1, &mut plaintext);
     Ok(plaintext)
 }
+
+// ============================================================================
+// IEEE 802.11i WPA2-PSK (AES-128, Key Unwrap RFC 3394, PRF-384, AES-CCMP)
+// ============================================================================
+
+const AES_SBOX: [u8; 256] = [
+    0x63,0x7C,0x77,0x7B,0xF2,0x6B,0x6F,0xC5,0x30,0x01,0x67,0x2B,0xFE,0xD7,0xAB,0x76,
+    0xCA,0x82,0xC9,0x7D,0xFA,0x59,0x47,0xF0,0xAD,0xD4,0xA2,0xAF,0x9C,0xA4,0x72,0xC0,
+    0xB7,0xFD,0x93,0x26,0x36,0x3F,0xF7,0xCC,0x34,0xA5,0xE5,0xF1,0x71,0xD8,0x31,0x15,
+    0x04,0xC7,0x23,0xC3,0x18,0x96,0x05,0x9A,0x07,0x12,0x80,0xE2,0xEB,0x27,0xB2,0x75,
+    0x09,0x83,0x2C,0x1A,0x1B,0x6E,0x5A,0xA0,0x52,0x3B,0xD6,0xB3,0x29,0xE3,0x2F,0x84,
+    0x53,0xD1,0x00,0xED,0x20,0xFC,0xB1,0x5B,0x6A,0xCB,0xBE,0x39,0x4A,0x4C,0x58,0xCF,
+    0xD0,0xEF,0xAA,0xFB,0x43,0x4D,0x33,0x85,0x45,0xF9,0x02,0x7F,0x50,0x3C,0x9F,0xA8,
+    0x51,0xA3,0x40,0x8F,0x92,0x9D,0x38,0xF5,0xBC,0xB6,0xDA,0x21,0x10,0xFF,0xF3,0xD2,
+    0xCD,0x0C,0x13,0xEC,0x5F,0x97,0x44,0x17,0xC4,0xA7,0x7E,0x3D,0x64,0x5D,0x19,0x73,
+    0x60,0x81,0x4F,0xDC,0x22,0x2A,0x90,0x88,0x46,0xEE,0xB8,0x14,0xDE,0x5E,0x0B,0xDB,
+    0xE0,0x32,0x3A,0x0A,0x49,0x06,0x24,0x5C,0xC2,0xD3,0xAC,0x62,0x91,0x95,0xE4,0x79,
+    0xE7,0xC8,0x37,0x6D,0x8D,0xD5,0x4E,0xA9,0x6C,0x56,0xF4,0xEA,0x65,0x7A,0xAE,0x08,
+    0xBA,0x78,0x25,0x2E,0x1C,0xA6,0xB4,0xC6,0xE8,0xDD,0x74,0x1F,0x4B,0xBD,0x8B,0x8A,
+    0x70,0x3E,0xB5,0x66,0x48,0x03,0xF6,0x0E,0x61,0x35,0x57,0xB9,0x86,0xC1,0x1D,0x9E,
+    0xE1,0xF8,0x98,0x11,0x69,0xD9,0x8E,0x94,0x9B,0x1E,0x87,0xE9,0xCE,0x55,0x28,0xDF,
+    0x8C,0xA1,0x89,0x0D,0xBF,0xE6,0x42,0x68,0x41,0x99,0x2D,0x0F,0xB0,0x54,0xBB,0x16,
+];
+
+const AES_INV_SBOX: [u8; 256] = [
+    0x52,0x09,0x6A,0xD5,0x30,0x36,0xA5,0x38,0xBF,0x40,0xA3,0x9E,0x81,0xF3,0xD7,0xFB,
+    0x7C,0xE3,0x39,0x82,0x9B,0x2F,0xFF,0x87,0x34,0x8E,0x43,0x44,0xC4,0xDE,0xE9,0xCB,
+    0x54,0x7B,0x94,0x32,0xA6,0xC2,0x23,0x3D,0xEE,0x4C,0x95,0x0B,0x42,0xFA,0xC3,0x4E,
+    0x08,0x2E,0xA1,0x66,0x28,0xD9,0x24,0xB2,0x76,0x5B,0xA2,0x49,0x6D,0x8B,0xD1,0x25,
+    0x72,0xF8,0xF6,0x64,0x86,0x68,0x98,0x16,0xD4,0xA4,0x5C,0xCC,0x5D,0x65,0xB6,0x92,
+    0x6C,0x70,0x48,0x50,0xFD,0xED,0xB9,0xDA,0x5E,0x15,0x46,0x57,0xA7,0x8D,0x9D,0x84,
+    0x90,0xD8,0xAB,0x00,0x8C,0xBC,0xD3,0x0A,0xF7,0xE4,0x58,0x05,0xB8,0xB3,0x45,0x06,
+    0xD0,0x2C,0x1E,0x8F,0xCA,0x3F,0x0F,0x02,0xC1,0xAF,0xBD,0x03,0x01,0x13,0x8A,0x6B,
+    0x3A,0x91,0x11,0x41,0x4F,0x67,0xDC,0xEA,0x97,0xF2,0xCF,0xCE,0xF0,0xB4,0xE6,0x73,
+    0x96,0xAC,0x74,0x22,0xE7,0xAD,0x35,0x85,0xE2,0xF9,0x37,0xE8,0x1C,0x75,0xDF,0x6E,
+    0x47,0xF1,0x1A,0x71,0x1D,0x29,0xC5,0x89,0x6F,0xB7,0x62,0x0E,0xAA,0x18,0xBE,0x1B,
+    0xFC,0x56,0x3E,0x4B,0xC6,0xD2,0x79,0x20,0x9A,0xDB,0xC0,0xFE,0x78,0xCD,0x5A,0xF4,
+    0x1F,0xDD,0xA8,0x33,0x88,0x07,0xC7,0x31,0xB1,0x12,0x10,0x59,0x27,0x80,0xEC,0x5F,
+    0x60,0x51,0x7F,0xA9,0x19,0xB5,0x4A,0x0D,0x2D,0xE5,0x7A,0x9F,0x93,0xC9,0x9C,0xEF,
+    0xA0,0xE0,0x3B,0x4D,0xAE,0x2A,0xF5,0xB0,0xC8,0xEB,0xBB,0x3C,0x83,0x53,0x99,0x61,
+    0x17,0x2B,0x04,0x7E,0xBA,0x77,0xD6,0x26,0xE1,0x69,0x14,0x63,0x55,0x21,0x0C,0x7D,
+];
+
+#[inline]
+fn xtime(x: u8) -> u8 {
+    (x << 1) ^ (((x >> 7) & 1) * 0x1B)
+}
+
+#[inline]
+fn gf_mul(mut a: u8, mut b: u8) -> u8 {
+    let mut r = 0u8;
+    for _ in 0..8 {
+        if (b & 1) != 0 {
+            r ^= a;
+        }
+        a = xtime(a);
+        b >>= 1;
+    }
+    r
+}
+
+fn aes128_key_schedule(key: &[u8; 16]) -> [[u8; 16]; 11] {
+    const RCON: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36];
+    let mut rk = [[0u8; 16]; 11];
+    rk[0] = *key;
+    for r in 1..=10 {
+        let prev = rk[r - 1];
+        let t = [
+            AES_SBOX[prev[13] as usize] ^ RCON[r - 1],
+            AES_SBOX[prev[14] as usize],
+            AES_SBOX[prev[15] as usize],
+            AES_SBOX[prev[12] as usize],
+        ];
+        for i in 0..4 {
+            rk[r][i] = prev[i] ^ t[i];
+        }
+        for i in 4..16 {
+            rk[r][i] = rk[r][i - 4] ^ prev[i];
+        }
+    }
+    rk
+}
+
+/// FIPS-197 AES-128 single 16-byte block encryption.
+pub fn aes128_encrypt_block(key: &[u8; 16], input: &[u8; 16]) -> [u8; 16] {
+    let rk = aes128_key_schedule(key);
+    let mut s = *input;
+    for i in 0..16 {
+        s[i] ^= rk[0][i];
+    }
+    for r in 1..=10 {
+        for b in &mut s {
+            *b = AES_SBOX[*b as usize];
+        }
+        // ShiftRows (column-major state matrix)
+        let t1 = s[1]; s[1] = s[5]; s[5] = s[9]; s[9] = s[13]; s[13] = t1;
+        let t2 = s[2]; let t6 = s[6]; s[2] = s[10]; s[6] = s[14]; s[10] = t2; s[14] = t6;
+        let t15 = s[15]; s[15] = s[11]; s[11] = s[7]; s[7] = s[3]; s[3] = t15;
+        if r < 10 {
+            for c in 0..4 {
+                let i = c * 4;
+                let (a0, a1, a2, a3) = (s[i], s[i + 1], s[i + 2], s[i + 3]);
+                let x = a0 ^ a1 ^ a2 ^ a3;
+                s[i] ^= x ^ xtime(a0 ^ a1);
+                s[i + 1] ^= x ^ xtime(a1 ^ a2);
+                s[i + 2] ^= x ^ xtime(a2 ^ a3);
+                s[i + 3] ^= x ^ xtime(a3 ^ a0);
+            }
+        }
+        for i in 0..16 {
+            s[i] ^= rk[r][i];
+        }
+    }
+    s
+}
+
+/// FIPS-197 AES-128 single 16-byte block decryption.
+pub fn aes128_decrypt_block(key: &[u8; 16], input: &[u8; 16]) -> [u8; 16] {
+    let rk = aes128_key_schedule(key);
+    let mut s = *input;
+    for i in 0..16 {
+        s[i] ^= rk[10][i];
+    }
+    for r in (0..10).rev() {
+        // InvShiftRows
+        let t13 = s[13]; s[13] = s[9]; s[9] = s[5]; s[5] = s[1]; s[1] = t13;
+        let t2 = s[2]; let t6 = s[6]; s[2] = s[10]; s[6] = s[14]; s[10] = t2; s[14] = t6;
+        let t3 = s[3]; s[3] = s[7]; s[7] = s[11]; s[11] = s[15]; s[15] = t3;
+        for b in &mut s {
+            *b = AES_INV_SBOX[*b as usize];
+        }
+        for i in 0..16 {
+            s[i] ^= rk[r][i];
+        }
+        if r > 0 {
+            for c in 0..4 {
+                let i = c * 4;
+                let (a0, a1, a2, a3) = (s[i], s[i + 1], s[i + 2], s[i + 3]);
+                s[i] = gf_mul(a0, 0x0E) ^ gf_mul(a1, 0x0B) ^ gf_mul(a2, 0x0D) ^ gf_mul(a3, 0x09);
+                s[i + 1] = gf_mul(a0, 0x09) ^ gf_mul(a1, 0x0E) ^ gf_mul(a2, 0x0B) ^ gf_mul(a3, 0x0D);
+                s[i + 2] = gf_mul(a0, 0x0D) ^ gf_mul(a1, 0x09) ^ gf_mul(a2, 0x0E) ^ gf_mul(a3, 0x0B);
+                s[i + 3] = gf_mul(a0, 0x0B) ^ gf_mul(a1, 0x0D) ^ gf_mul(a2, 0x09) ^ gf_mul(a3, 0x0E);
+            }
+        }
+    }
+    s
+}
+
+/// RFC 3394 AES-128 Key Unwrap (used for extracting GTK from EAPOL-Key Msg 3).
+pub fn aes128_key_unwrap(kek: &[u8; 16], wrapped: &[u8]) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    if wrapped.len() < 24 || (wrapped.len() % 8) != 0 {
+        return Err("Invalid RFC 3394 wrapped key length");
+    }
+    let n = (wrapped.len() / 8) - 1;
+    let mut a = [0u8; 8];
+    a.copy_from_slice(&wrapped[..8]);
+    let mut r = alloc::vec::Vec::with_capacity(n);
+    for i in 0..n {
+        let mut blk = [0u8; 8];
+        blk.copy_from_slice(&wrapped[(i + 1) * 8..(i + 2) * 8]);
+        r.push(blk);
+    }
+
+    for j in (0..=5usize).rev() {
+        for i in (1..=n).rev() {
+            let t = (n * j + i) as u64;
+            let a_val = u64::from_be_bytes(a) ^ t;
+            let mut input = [0u8; 16];
+            input[..8].copy_from_slice(&a_val.to_be_bytes());
+            input[8..16].copy_from_slice(&r[i - 1]);
+            let b = aes128_decrypt_block(kek, &input);
+            a.copy_from_slice(&b[..8]);
+            r[i - 1].copy_from_slice(&b[8..16]);
+        }
+    }
+
+    if a != [0xA6; 8] {
+        return Err("RFC 3394 AES Key Unwrap integrity check failed");
+    }
+    let mut out = alloc::vec::Vec::with_capacity(n * 8);
+    for blk in r {
+        out.extend_from_slice(&blk);
+    }
+    Ok(out)
+}
+
+/// IEEE 802.11i PRF-384 (produces 48-byte PTK = KCK[16] || KEK[16] || TK[16]).
+pub fn prf_384(key: &[u8], label: &[u8], data: &[u8]) -> [u8; 48] {
+    let mut out = [0u8; 48];
+    for counter in 0u8..3 {
+        let mut msg = alloc::vec::Vec::with_capacity(label.len() + 1 + data.len() + 1);
+        msg.extend_from_slice(label);
+        msg.push(0x00);
+        msg.extend_from_slice(data);
+        msg.push(counter);
+        let digest = hmac_sha1(key, &msg);
+        let start = (counter as usize) * 20;
+        let copy_len = 20.min(48 - start);
+        out[start..start + copy_len].copy_from_slice(&digest[..copy_len]);
+    }
+    out
+}
+
+/// Derive 48-byte WPA2-PSK Pairwise Transient Key (PTK) from PMK, MACs, ANonce, SNonce.
+pub fn derive_wpa2_ptk(
+    pmk: &[u8; 32],
+    aa: &[u8; 6],
+    spa: &[u8; 6],
+    anonce: &[u8; 32],
+    snonce: &[u8; 32],
+) -> [u8; 48] {
+    let mut data = [0u8; 76];
+    if aa < spa {
+        data[0..6].copy_from_slice(aa);
+        data[6..12].copy_from_slice(spa);
+    } else {
+        data[0..6].copy_from_slice(spa);
+        data[6..12].copy_from_slice(aa);
+    }
+    if anonce < snonce {
+        data[12..44].copy_from_slice(anonce);
+        data[44..76].copy_from_slice(snonce);
+    } else {
+        data[12..44].copy_from_slice(snonce);
+        data[44..76].copy_from_slice(anonce);
+    }
+    prf_384(pmk, b"Pairwise key expansion", &data)
+}
+
+/// Compute 16-byte EAPOL-Key MIC using HMAC-SHA1-128 (WPA2 Key Descriptor Version 2).
+pub fn eapol_mic_hmac_sha1(kck: &[u8; 16], eapol_frame: &[u8]) -> [u8; 16] {
+    let digest = hmac_sha1(kck, eapol_frame);
+    let mut mic = [0u8; 16];
+    mic.copy_from_slice(&digest[..16]);
+    mic
+}
+
+static SNONCE_COUNTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Generate a 32-byte SNonce without RDRAND (safe on Intel Sandy Bridge MacBookPro8,2).
+pub fn generate_snonce(sta_mac: &[u8; 6], bssid: &[u8; 6]) -> [u8; 32] {
+    let tsc = crate::arch::x86_64::pit::read_tsc();
+    let ticks = crate::arch::x86_64::pit::get_ticks();
+    let seq = SNONCE_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let mut seed = alloc::vec::Vec::with_capacity(48);
+    seed.extend_from_slice(&tsc.to_le_bytes());
+    seed.extend_from_slice(&ticks.to_le_bytes());
+    seed.extend_from_slice(&seq.to_le_bytes());
+    seed.extend_from_slice(sta_mac);
+    seed.extend_from_slice(bssid);
+    sha256(&seed)
+}
+
+fn ccmp_build_aad_and_nonce(hdr: &[u8], pn: u64) -> Result<(alloc::vec::Vec<u8>, [u8; 13]), &'static str> {
+    if hdr.len() < 24 {
+        return Err("802.11 header < 24 bytes for AES-CCMP");
+    }
+    let has_qos = (hdr[0] & 0x0C) == 0x08 && (hdr[0] & 0x80) != 0;
+    let hdr_len = if has_qos { 26 } else { 24 };
+    if hdr.len() < hdr_len {
+        return Err("802.11 QoS header truncated for AES-CCMP");
+    }
+
+    // IEEE 802.11i AAD: masked FC (2) + A1 (6) + A2 (6) + A3 (6) + masked SC (2) [+ masked QC (2)]
+    let mut aad = alloc::vec::Vec::with_capacity(if has_qos { 24 } else { 22 });
+    aad.push(hdr[0] & 0x8F);
+    aad.push(hdr[1] & 0xC7);
+    aad.extend_from_slice(&hdr[4..22]); // A1, A2, A3
+    aad.push(hdr[22] & 0x0F);
+    aad.push(0x00);
+    if has_qos {
+        aad.push(hdr[24] & 0x0F);
+        aad.push(0x00);
+    }
+
+    let priority = if has_qos { hdr[24] & 0x0F } else { 0u8 };
+    let mut nonce = [0u8; 13];
+    nonce[0] = priority;
+    nonce[1..7].copy_from_slice(&hdr[10..16]); // A2 = Source/Transmitter Address
+    nonce[7] = ((pn >> 40) & 0xFF) as u8;
+    nonce[8] = ((pn >> 32) & 0xFF) as u8;
+    nonce[9] = ((pn >> 24) & 0xFF) as u8;
+    nonce[10] = ((pn >> 16) & 0xFF) as u8;
+    nonce[11] = ((pn >> 8) & 0xFF) as u8;
+    nonce[12] = (pn & 0xFF) as u8;
+    Ok((aad, nonce))
+}
+
+fn ccmp_cbc_mac(tk: &[u8; 16], nonce: &[u8; 13], aad: &[u8], data: &[u8]) -> [u8; 8] {
+    // B_0: Flags (0x59 => Adata=1, M'=3 -> M=8, L'=1 -> L=2), Nonce (13B), l(m) (2B BE)
+    let mut b0 = [0u8; 16];
+    b0[0] = 0x59;
+    b0[1..14].copy_from_slice(nonce);
+    b0[14] = ((data.len() >> 8) & 0xFF) as u8;
+    b0[15] = (data.len() & 0xFF) as u8;
+
+    let mut x = aes128_encrypt_block(tk, &b0);
+
+    // Encode AAD length (2B BE) + AAD bytes + zero padding to 16B boundary
+    let mut aad_blocks = alloc::vec::Vec::with_capacity(2 + aad.len() + 16);
+    aad_blocks.push(((aad.len() >> 8) & 0xFF) as u8);
+    aad_blocks.push((aad.len() & 0xFF) as u8);
+    aad_blocks.extend_from_slice(aad);
+    while (aad_blocks.len() % 16) != 0 {
+        aad_blocks.push(0);
+    }
+    for blk in aad_blocks.chunks_exact(16) {
+        for i in 0..16 {
+            x[i] ^= blk[i];
+        }
+        x = aes128_encrypt_block(tk, &x);
+    }
+
+    for chunk in data.chunks(16) {
+        for i in 0..chunk.len() {
+            x[i] ^= chunk[i];
+        }
+        x = aes128_encrypt_block(tk, &x);
+    }
+
+    let mut mic = [0u8; 8];
+    mic.copy_from_slice(&x[..8]);
+    mic
+}
+
+fn ccmp_ctr_xor(tk: &[u8; 16], nonce: &[u8; 13], counter_start: u16, data: &mut [u8]) -> [u8; 16] {
+    let mut ctr = [0u8; 16];
+    ctr[0] = 0x01; // L' = 1 (L = 2)
+    ctr[1..14].copy_from_slice(nonce);
+    ctr[14] = 0;
+    ctr[15] = 0;
+    let s0 = aes128_encrypt_block(tk, &ctr);
+
+    let mut idx = 0usize;
+    let mut c = counter_start;
+    while idx < data.len() {
+        ctr[14] = (c >> 8) as u8;
+        ctr[15] = (c & 0xFF) as u8;
+        let keystream = aes128_encrypt_block(tk, &ctr);
+        let take = (data.len() - idx).min(16);
+        for i in 0..take {
+            data[idx + i] ^= keystream[i];
+        }
+        idx += take;
+        c = c.wrapping_add(1);
+    }
+    s0
+}
+
+/// Encrypt an IEEE 802.11 plaintext payload (`LLC/SNAP + data`) with AES-CCMP.
+/// Returns `8-byte CCMP Header || encrypted payload || 8-byte MIC`.
+pub fn ccmp_encrypt_mpdu(
+    tk: &[u8; 16],
+    hdr_24_or_26: &[u8],
+    key_id: u8,
+    pn: u64,
+    plaintext: &[u8],
+) -> Result<alloc::vec::Vec<u8>, &'static str> {
+    let (aad, nonce) = ccmp_build_aad_and_nonce(hdr_24_or_26, pn)?;
+    let raw_mic = ccmp_cbc_mac(tk, &nonce, &aad, plaintext);
+    let mut ciphertext = alloc::vec::Vec::from(plaintext);
+    let s0 = ccmp_ctr_xor(tk, &nonce, 1, &mut ciphertext);
+
+    let mut out = alloc::vec::Vec::with_capacity(8 + ciphertext.len() + 8);
+    out.push((pn & 0xFF) as u8);
+    out.push(((pn >> 8) & 0xFF) as u8);
+    out.push(0x00);
+    out.push(((key_id & 0x03) << 6) | 0x20); // ExtIV = 1
+    out.push(((pn >> 16) & 0xFF) as u8);
+    out.push(((pn >> 24) & 0xFF) as u8);
+    out.push(((pn >> 32) & 0xFF) as u8);
+    out.push(((pn >> 40) & 0xFF) as u8);
+    out.extend_from_slice(&ciphertext);
+    for i in 0..8 {
+        out.push(raw_mic[i] ^ s0[i]);
+    }
+    Ok(out)
+}
+
+/// Decrypt an IEEE 802.11 Protected MPDU (`hdr_and_body` starting at 802.11 MAC header).
+/// Returns `(plaintext, pn, key_id)` after verifying the 8-byte CCMP MIC.
+pub fn ccmp_decrypt_mpdu(
+    key: &[u8; 16],
+    hdr_and_body: &[u8],
+) -> Result<(alloc::vec::Vec<u8>, u64, u8), &'static str> {
+    if hdr_and_body.len() < 24 {
+        return Err("CCMP frame too short");
+    }
+    let has_qos = (hdr_and_body[0] & 0x0C) == 0x08 && (hdr_and_body[0] & 0x80) != 0;
+    let hdr_len = if has_qos { 26 } else { 24 };
+    if hdr_and_body.len() < hdr_len + 16 {
+        return Err("CCMP frame shorter than header + CCMP IV + MIC");
+    }
+    let hdr = &hdr_and_body[..hdr_len];
+    let ccmp_hdr = &hdr_and_body[hdr_len..hdr_len + 8];
+    if (ccmp_hdr[3] & 0x20) == 0 {
+        return Err("CCMP ExtIV bit missing");
+    }
+    let key_id = (ccmp_hdr[3] >> 6) & 0x03;
+    let pn = (ccmp_hdr[0] as u64)
+        | ((ccmp_hdr[1] as u64) << 8)
+        | ((ccmp_hdr[4] as u64) << 16)
+        | ((ccmp_hdr[5] as u64) << 24)
+        | ((ccmp_hdr[6] as u64) << 32)
+        | ((ccmp_hdr[7] as u64) << 40);
+
+    let enc_end = hdr_and_body.len() - 8;
+    let mut plaintext = alloc::vec::Vec::from(&hdr_and_body[hdr_len + 8..enc_end]);
+    let enc_mic = &hdr_and_body[enc_end..];
+
+    let (aad, nonce) = ccmp_build_aad_and_nonce(hdr, pn)?;
+    let s0 = ccmp_ctr_xor(key, &nonce, 1, &mut plaintext);
+    let calc_mic = ccmp_cbc_mac(key, &nonce, &aad, &plaintext);
+    for i in 0..8 {
+        if (calc_mic[i] ^ s0[i]) != enc_mic[i] {
+            return Err("AES-CCMP MIC verification failure");
+        }
+    }
+    Ok((plaintext, pn, key_id))
+}

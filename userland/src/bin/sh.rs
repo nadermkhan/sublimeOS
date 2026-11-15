@@ -554,7 +554,7 @@ fn execute_single_cmd(trimmed: &str, env: &mut BTreeMap<String, String>) -> i32 
         println!("    power [off|restart] Safely shut down or restart computer");
         println!();
         println!("  \x1b[1;36mApplications & Pipelines:\x1b[0m");
-        println!("    desktop             Aqua graphical window compositor");
+        println!("    desktop             SublimeOS Modern graphical window compositor");
         println!("    calc                64-bit expression calculator");
         println!("    snake               Classic arcade game");
         println!("    <cmd1> | <cmd2>     UNIX pipeline between processes");

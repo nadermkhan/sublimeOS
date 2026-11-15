@@ -45,23 +45,30 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     mm::pmm::init(mb_info);
     mm::vmm::VMM.lock().init();
     mm::heap::HEAP_ALLOCATOR.init();
-    let _ = drivers::vbe::init_early_gop();
+    if drivers::vbe::init_early_gop() {
+        let _ = gui::boot_splash::start();
+    }
 
     // 2.1. Initialize Local APIC, I/O APIC, and SMP Multiprocessing Subsystem
+    gui::boot_splash::set_stage(22, "Initializing SMP & Interrupts...");
     arch::x86_64::init_apic_smp();
 
     // 3. Initialize Preemptive Multitasking Scheduler
+    gui::boot_splash::set_stage(36, "Starting Scheduler & Core Tasks...");
     task::scheduler::init();
 
     // 4. Initialize Virtual File System (VFS, RamFS, DevFS, ProcFS)
+    gui::boot_splash::set_stage(50, "Mounting Virtual Filesystem...");
     fs::init();
 
     // 5. Initialize Device Drivers (Keyboard, Mouse, PCI, Storage, USB)
+    gui::boot_splash::set_stage(64, "Probing PCI, Storage & USB Devices...");
     drivers::init();
     fs::mount_storage_devices();
     user::init_userland();
 
     // 6. Initialize Master Network Subsystem (Ethernet, Wi-Fi 802.11, Loopback)
+    gui::boot_splash::set_stage(78, "Initializing Network & Virtual Consoles...");
     net::init();
 
     // 7. Initialize Master TTY Subsystem & Virtual Consoles
@@ -73,6 +80,7 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     arch::x86_64::rtc::init();
 
     // 8. Run Kernel Self-Test Suite to verify all subsystems
+    gui::boot_splash::set_stage(88, "Running Kernel Diagnostics...");
     arch::x86_64::pit::IN_KERNEL_TESTS.store(true, core::sync::atomic::Ordering::SeqCst);
     tests::run_all_tests();
     arch::x86_64::pit::IN_KERNEL_TESTS.store(false, core::sync::atomic::Ordering::SeqCst);
@@ -82,9 +90,12 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     let _ = drivers::keyboard::poll_ps2_controller();
     drivers::usb::poll_hid_nonblocking();
 
-    // Clear test output for quiet boot so userland starts with clean screen & SublimeOS logo
-    if let Some(mut con) = drivers::gop_console::GOP_CONSOLE.try_lock() {
-        con.clear_screen();
+    gui::boot_splash::set_stage(100, "Launching SublimeOS Desktop...");
+    // Clear test output only if graphical boot splash is not owning the transition
+    if !gui::boot_splash::is_active() {
+        if let Some(mut con) = drivers::gop_console::GOP_CONSOLE.try_lock() {
+            con.clear_screen();
+        }
     }
 
     // 9. Launch SublimeOS Userland Master Init (PID 1) in Ring 3

@@ -30,6 +30,7 @@ const EMPTY_CELL: ScreenChar = ScreenChar {
 
 static GOP_CONSOLE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static GUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+static BOOT_SPLASH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 struct EarlyLogBuffer {
     data: [u8; EARLY_LOG_CAP],
@@ -1087,7 +1088,32 @@ pub fn is_active() -> bool {
 
 /// Suppress/resume GOP text output while `gui::launch_desktop()` owns the compositor.
 pub fn set_gui_active(active: bool) {
+    if active {
+        BOOT_SPLASH_ACTIVE.store(false, Ordering::Release);
+    }
     GUI_ACTIVE.store(active, Ordering::Release);
+}
+
+/// Suppress/resume GOP text output while graphical boot splash owns the framebuffer.
+pub fn set_boot_splash_active(active: bool) {
+    BOOT_SPLASH_ACTIVE.store(active, Ordering::Release);
+}
+
+/// True while the graphical boot splash suppresses raw console text rendering.
+#[inline(always)]
+pub fn is_boot_splash_active() -> bool {
+    BOOT_SPLASH_ACTIVE.load(Ordering::Acquire)
+}
+
+#[inline(always)]
+fn is_lfb_text_suppressed() -> bool {
+    GUI_ACTIVE.load(Ordering::Relaxed) || BOOT_SPLASH_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// True while `gui::launch_desktop()` owns the graphical framebuffer.
+#[inline(always)]
+pub fn is_gui_active() -> bool {
+    GUI_ACTIVE.load(Ordering::Acquire)
 }
 
 /// Bind `GopConsole` to a mapped GOP framebuffer and replay buffered early boot logs.
@@ -1131,7 +1157,7 @@ pub fn write_fmt(args: fmt::Arguments) {
         return;
     }
 
-    if GUI_ACTIVE.load(Ordering::Relaxed) {
+    if is_lfb_text_suppressed() {
         return;
     }
 
@@ -1150,7 +1176,7 @@ pub fn write_fmt(args: fmt::Arguments) {
 
 /// Stream a single slice/byte from `TtyManager` to GOP console if active.
 pub fn tty_write_bytes(bytes: &[u8]) {
-    if !is_active() || GUI_ACTIVE.load(Ordering::Relaxed) {
+    if !is_active() || is_lfb_text_suppressed() {
         return;
     }
     if let Some(mut con) = GOP_CONSOLE.try_lock() {
@@ -1160,7 +1186,7 @@ pub fn tty_write_bytes(bytes: &[u8]) {
 
 /// Flush an entire virtual TTY screen buffer onto the GOP console during TTY switches.
 pub fn flush_tty_console(console: &VirtualConsole) {
-    if !is_active() || GUI_ACTIVE.load(Ordering::Relaxed) {
+    if !is_active() || is_lfb_text_suppressed() {
         return;
     }
     if let Some(mut con) = GOP_CONSOLE.try_lock() {
@@ -1168,8 +1194,9 @@ pub fn flush_tty_console(console: &VirtualConsole) {
     }
 }
 
-/// Switch GOP console out of GUI compositor suppression into visible high-contrast panic output.
+/// Switch GOP console out of GUI compositor or boot splash suppression into visible high-contrast panic output.
 pub fn enter_panic_mode() {
+    let was_splash = BOOT_SPLASH_ACTIVE.swap(false, Ordering::AcqRel);
     GUI_ACTIVE.store(false, Ordering::Release);
     if !is_active() {
         return;
@@ -1180,13 +1207,17 @@ pub fn enter_panic_mode() {
     if let Some(mut con) = GOP_CONSOLE.try_lock() {
         con.bg_rgb = (16, 20, 26);
         con.fg_rgb = (255, 102, 102);
-        con.write_bytes(b"\n");
+        if was_splash {
+            con.clear_screen();
+        } else {
+            con.write_bytes(b"\n");
+        }
     }
 }
 
 /// Scroll console view up by `lines` into historical buffer (e.g., Shift+PageUp or Shift+Up)
 pub fn scroll_up(lines: usize) {
-    if !is_active() || GUI_ACTIVE.load(Ordering::Relaxed) {
+    if !is_active() || is_lfb_text_suppressed() {
         return;
     }
     if let Some(mut con) = GOP_CONSOLE.try_lock() {
@@ -1196,7 +1227,7 @@ pub fn scroll_up(lines: usize) {
 
 /// Scroll console view down by `lines` towards live screen (e.g., Shift+PageDown or Shift+Down)
 pub fn scroll_down(lines: usize) {
-    if !is_active() || GUI_ACTIVE.load(Ordering::Relaxed) {
+    if !is_active() || is_lfb_text_suppressed() {
         return;
     }
     if let Some(mut con) = GOP_CONSOLE.try_lock() {
@@ -1206,7 +1237,7 @@ pub fn scroll_down(lines: usize) {
 
 /// Reset console view back to live output (offset 0)
 pub fn reset_scroll_view() {
-    if !is_active() || GUI_ACTIVE.load(Ordering::Relaxed) {
+    if !is_active() || is_lfb_text_suppressed() {
         return;
     }
     if let Some(mut con) = GOP_CONSOLE.try_lock() {

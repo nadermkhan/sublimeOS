@@ -606,6 +606,37 @@ unsafe fn find_acpi_rsdp(st: *const efi::SystemTable) -> Option<(u32, [u8; 36], 
     }
 }
 
+unsafe fn find_smbios_table(st: *const efi::SystemTable) -> Option<(u8, u8, *const u8, usize)> {
+    // Check SMBIOS 3.0 (64-bit entry point) first, then SMBIOS 2.x (32-bit entry point).
+    let ep3 = efi::find_config_table(st, &efi::SMBIOS3_TABLE_GUID) as *const u8;
+    if !ep3.is_null() {
+        let sig = core::slice::from_raw_parts(ep3, 5);
+        if sig == b"_SM3_" {
+            let major = *ep3.add(7);
+            let minor = *ep3.add(8);
+            let table_len = core::ptr::read_unaligned(ep3.add(0x0C) as *const u32) as usize;
+            let table_addr = core::ptr::read_unaligned(ep3.add(0x10) as *const u64) as *const u8;
+            if !table_addr.is_null() && table_len > 0 {
+                return Some((major, minor, table_addr, table_len));
+            }
+        }
+    }
+    let ep2 = efi::find_config_table(st, &efi::SMBIOS_TABLE_GUID) as *const u8;
+    if !ep2.is_null() {
+        let sig = core::slice::from_raw_parts(ep2, 4);
+        if sig == b"_SM_" {
+            let major = *ep2.add(6);
+            let minor = *ep2.add(7);
+            let table_len = core::ptr::read_unaligned(ep2.add(0x16) as *const u16) as usize;
+            let table_addr = core::ptr::read_unaligned(ep2.add(0x18) as *const u32) as usize as *const u8;
+            if !table_addr.is_null() && table_len > 0 {
+                return Some((major, minor, table_addr, table_len));
+            }
+        }
+    }
+    None
+}
+
 #[inline]
 fn efi_mem_to_e820(typ: u32) -> u32 {
     match typ {
@@ -653,6 +684,8 @@ unsafe fn write_u64(base: *mut u8, offset: usize, val: u64) {
     core::ptr::write_unaligned(base.add(offset) as *mut u64, val);
 }
 
+const MB2_BUF_PAGES: usize = 8;
+
 unsafe fn build_multiboot2_info(
     mb2_phys: u64,
     mmap_buf: *mut u8,
@@ -660,15 +693,24 @@ unsafe fn build_multiboot2_info(
     desc_size: usize,
     gop: Option<GopInfo>,
     acpi: Option<(u32, [u8; 36], usize)>,
+    smbios: Option<(u8, u8, *const u8, usize)>,
 ) {
     let base = mb2_phys as *mut u8;
-    write_bytes(base, 0, PAGE_SIZE * 4);
+    let max_bytes = PAGE_SIZE * MB2_BUF_PAGES;
+    write_bytes(base, 0, max_bytes);
 
     let count = mmap_size / desc_size;
     sort_memory_map(mmap_buf, count, desc_size);
 
     // Offset 0..8: total_size (patched at end) + reserved = 0.
     let mut off = 8usize;
+
+    // Emit Tag 2 (Bootloader Name).
+    let bl_name = b"SublimeOS UEFI Loader\0";
+    write_u32(base, off, 2);
+    write_u32(base, off + 4, (8 + bl_name.len()) as u32);
+    copy_nonoverlapping(bl_name.as_ptr(), base.add(off + 8), bl_name.len());
+    off = align_up(off + 8 + bl_name.len(), 8);
 
     // Emit Tag 4 (Basic MemInfo) placeholder first; patch mem_lower / mem_upper after E820 walk.
     let tag4_off = off;
@@ -783,6 +825,20 @@ unsafe fn build_multiboot2_info(
         off = align_up(off + 8 + copy_len, 8);
     }
 
+    // Emit Tag 13 (SMBIOS Tables inline copy) if buffer capacity allows.
+    if let Some((major, minor, tbl_ptr, tbl_len)) = smbios {
+        let avail = max_bytes.saturating_sub(off + 32);
+        let copy_len = tbl_len.min(avail);
+        if copy_len > 0 {
+            write_u32(base, off, 13);
+            write_u32(base, off + 4, (16 + copy_len) as u32);
+            *base.add(off + 8) = major;
+            *base.add(off + 9) = minor;
+            copy_nonoverlapping(tbl_ptr, base.add(off + 16), copy_len);
+            off = align_up(off + 16 + copy_len, 8);
+        }
+    }
+
     // Emit Tag 0 (End Tag).
     write_u32(base, off, 0);
     write_u32(base, off + 4, 8);
@@ -867,14 +923,15 @@ pub extern "efiapi" fn efi_main(image_handle: efi::Handle, st: *mut efi::SystemT
         }
         ((*bs).free_pages)(file_phys, align_up(file_size, PAGE_SIZE) / PAGE_SIZE);
 
-        // 4. Query GOP Linear Framebuffer & ACPI RSDP before ExitBootServices.
+        // 4. Query GOP Linear Framebuffer, ACPI RSDP & SMBIOS before ExitBootServices.
         let gop = init_gop(bs);
         let acpi = find_acpi_rsdp(st);
+        let smbios = find_smbios_table(st);
 
         // 5. Allocate Multiboot2 info buffer (< 1 GiB) and MemoryMap buffer BEFORE ExitBootServices.
         let mb2_phys = match alloc_pages_avoiding(
             bs,
-            4,
+            MB2_BUF_PAGES,
             0x3FFF_0000,
             efi::EFI_LOADER_DATA,
             kernel_avoid,
@@ -948,6 +1005,7 @@ pub extern "efiapi" fn efi_main(image_handle: efi::Handle, st: *mut efi::SystemT
             desc_size,
             gop,
             acpi,
+            smbios,
         );
 
         let tramp_size = (&tramp_code_end as *const u8 as usize)

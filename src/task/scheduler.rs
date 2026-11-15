@@ -266,6 +266,28 @@ pub fn set_current_user_context(pid: u64, cr3: u64, kstack_top: u64) {
     }
 }
 
+/// Update the current thread's CR3 and name during `sys_execve` image replacement.
+pub fn set_current_thread_exec(cr3: u64, name: &str) {
+    let sched = SCHEDULER.lock();
+    let cpu_id = if sched.per_cpu.is_empty() {
+        0
+    } else {
+        (crate::arch::x86_64::apic::get_apic_id() as usize).min(sched.per_cpu.len() - 1)
+    };
+    let curr_opt = if !sched.per_cpu.is_empty() {
+        sched.per_cpu[cpu_id].current_thread.as_ref()
+    } else {
+        sched.current_thread.as_ref()
+    };
+    if let Some(curr) = curr_opt {
+        let mut t = curr.lock();
+        if cr3 != 0 {
+            t.cr3 = cr3;
+        }
+        t.name = alloc::string::String::from(name);
+    }
+}
+
 /// Wake any sleeping scheduler threads belonging to `pid` (e.g., on child exit).
 pub fn wake_pid(pid: u64) {
     if pid == 0 {
@@ -801,6 +823,41 @@ pub fn get_task_list() -> Vec<(ThreadId, String, ThreadState, u64)> {
     for task in sched.sleeping_queue.iter() {
         let t = task.lock();
         list.push((t.tid, t.name.clone(), t.state, t.total_ticks));
+    }
+
+    list
+}
+
+/// Get detailed task list including assigned CPU core ID and accumulated CPU ticks.
+pub fn get_task_list_detailed() -> Vec<(ThreadId, String, ThreadState, u32, u64)> {
+    let sched = SCHEDULER.lock();
+    let mut list = Vec::new();
+
+    for rq in sched.per_cpu.iter() {
+        if let Some(ref curr) = rq.current_thread {
+            let t = curr.lock();
+            list.push((t.tid, t.name.clone(), t.state, rq.cpu_id, t.total_ticks));
+        }
+        for task in rq.ready_queue.iter() {
+            let t = task.lock();
+            list.push((t.tid, t.name.clone(), t.state, rq.cpu_id, t.total_ticks));
+        }
+    }
+
+    if sched.per_cpu.is_empty() {
+        if let Some(ref curr) = sched.current_thread {
+            let t = curr.lock();
+            list.push((t.tid, t.name.clone(), t.state, t.current_cpu, t.total_ticks));
+        }
+        for task in sched.ready_queue.iter() {
+            let t = task.lock();
+            list.push((t.tid, t.name.clone(), t.state, t.current_cpu, t.total_ticks));
+        }
+    }
+
+    for task in sched.sleeping_queue.iter() {
+        let t = task.lock();
+        list.push((t.tid, t.name.clone(), t.state, t.current_cpu, t.total_ticks));
     }
 
     list

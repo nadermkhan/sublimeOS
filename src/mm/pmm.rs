@@ -269,7 +269,7 @@ impl PhysicalMemoryManager {
     }
 
     pub fn get_used_frames(&self) -> usize {
-        self.used_frames
+        self.stats().1
     }
 }
 

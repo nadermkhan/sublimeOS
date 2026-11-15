@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "libgui"
+version = "0.1.0"
+
+[[package]]
 name = "sublime-userland"
 version = "1.0.0"
+dependencies = [
+ "libgui",
+]

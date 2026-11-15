@@ -10,11 +10,17 @@ extern "C" {
 
 static mut ARGC: usize = 0;
 static mut ARGV: *const *const u8 = core::ptr::null();
+static mut ENVP: *const *const u8 = core::ptr::null();
 
 #[no_mangle]
 pub unsafe extern "C" fn cosmic_entry(argc: usize, argv: *const *const u8) -> i32 {
     ARGC = argc;
     ARGV = argv;
+    ENVP = if !argv.is_null() {
+        argv.add(argc + 1)
+    } else {
+        core::ptr::null()
+    };
     main()
 }
 
@@ -56,6 +62,42 @@ pub fn args() -> alloc::vec::Vec<&'static str> {
         }
     }
     v
+}
+
+/// Retrieve all `KEY=VALUE` environment variables passed on initial process stack.
+pub fn env() -> alloc::vec::Vec<&'static str> {
+    let mut v = alloc::vec::Vec::new();
+    unsafe {
+        if ENVP.is_null() {
+            return v;
+        }
+        for i in 0..128 {
+            let ptr = *ENVP.add(i);
+            if ptr.is_null() {
+                break;
+            }
+            let mut len = 0;
+            while *ptr.add(len) != 0 {
+                len += 1;
+            }
+            if let Ok(s) = core::str::from_utf8(core::slice::from_raw_parts(ptr, len)) {
+                v.push(s);
+            }
+        }
+    }
+    v
+}
+
+/// Look up an environment variable by key (returns slice after `KEY=`).
+pub fn getenv(key: &str) -> Option<&'static str> {
+    for entry in env() {
+        if let Some((k, val)) = entry.split_once('=') {
+            if k == key {
+                return Some(val);
+            }
+        }
+    }
+    None
 }
 
 // Low-level Syscall Primitives
@@ -110,6 +152,33 @@ pub unsafe fn syscall3(num: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         in("rdi") a1,
         in("rsi") a2,
         in("rdx") a3,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack, preserves_flags)
+    );
+    ret
+}
+
+#[inline(always)]
+pub unsafe fn syscall6(
+    num: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+    a6: u64,
+) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "syscall",
+        inlateout("rax") num => ret,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        in("r10") a4,
+        in("r8") a5,
+        in("r9") a6,
         out("rcx") _,
         out("r11") _,
         options(nostack, preserves_flags)
@@ -197,6 +266,32 @@ pub fn read_to_string(path: &str) -> Result<alloc::string::String, isize> {
         if let Ok(s) = core::str::from_utf8(&buf[..n as usize]) {
             res.push_str(s);
         }
+    }
+    close(fd as usize);
+    Ok(res)
+}
+
+/// Read up to `max_bytes` raw bytes from `path` (e.g. ELF64 headers or binary files).
+pub fn read_bytes(path: &str, max_bytes: usize) -> Result<alloc::vec::Vec<u8>, isize> {
+    let mut path_buf = [0u8; 256];
+    let bytes = path.as_bytes();
+    let len = bytes.len().min(255);
+    path_buf[..len].copy_from_slice(&bytes[..len]);
+    path_buf[len] = 0;
+
+    let fd = unsafe { syscall3(2, path_buf.as_ptr() as u64, O_RDONLY as u64, 0) as isize };
+    if fd < 0 {
+        return Err(fd);
+    }
+    let mut res = alloc::vec::Vec::new();
+    let mut buf = [0u8; 512];
+    while res.len() < max_bytes {
+        let want = (max_bytes - res.len()).min(buf.len());
+        let n = read(fd as usize, &mut buf[..want]);
+        if n <= 0 {
+            break;
+        }
+        res.extend_from_slice(&buf[..n as usize]);
     }
     close(fd as usize);
     Ok(res)
@@ -324,6 +419,32 @@ pub fn waitpid(pid: isize, status: &mut i32, options: i32) -> isize {
     unsafe { syscall3(61, pid as u64, status as *mut i32 as u64, options as u64) as isize }
 }
 
+pub fn kill(pid: usize, sig: i32) -> isize {
+    unsafe { syscall2(62, pid as u64, sig as u64) as isize }
+}
+
+/// Replace the current process image with the ELF64 binary at `path` (POSIX `execve`, syscall 59).
+pub fn execve(path: &str, argv: &[&str]) -> isize {
+    let mut path_buf = [0u8; 256];
+    let pb = path.as_bytes();
+    let plen = pb.len().min(255);
+    path_buf[..plen].copy_from_slice(&pb[..plen]);
+    path_buf[plen] = 0;
+
+    let mut storage = alloc::vec::Vec::with_capacity(argv.len());
+    let mut ptrs = alloc::vec::Vec::with_capacity(argv.len() + 1);
+    for &arg in argv {
+        let mut s = alloc::vec::Vec::with_capacity(arg.len() + 1);
+        s.extend_from_slice(arg.as_bytes());
+        s.push(0);
+        ptrs.push(s.as_ptr());
+        storage.push(s);
+    }
+    ptrs.push(core::ptr::null());
+
+    unsafe { syscall3(59, path_buf.as_ptr() as u64, ptrs.as_ptr() as u64, 0) as isize }
+}
+
 pub fn sched_yield() {
     unsafe {
         syscall0(24);
@@ -381,6 +502,172 @@ pub fn shutdown() -> ! {
     }
 }
 
+pub const AF_UNIX: i32 = 1;
+pub const SOCK_STREAM: i32 = 1;
+pub const PROT_READ: i32 = 0x1;
+pub const PROT_WRITE: i32 = 0x2;
+pub const MAP_SHARED: i32 = 0x01;
+
+#[repr(C)]
+pub struct SockAddrUn {
+    pub sun_family: u16,
+    pub sun_path: [u8; 108],
+}
+
+pub fn socket(domain: i32, sock_type: i32, protocol: i32) -> isize {
+    unsafe { syscall3(41, domain as u64, sock_type as u64, protocol as u64) as isize }
+}
+
+pub fn connect_unix(fd: usize, path: &str) -> isize {
+    let mut addr = SockAddrUn {
+        sun_family: AF_UNIX as u16,
+        sun_path: [0u8; 108],
+    };
+    let bytes = path.as_bytes();
+    let len = bytes.len().min(107);
+    addr.sun_path[..len].copy_from_slice(&bytes[..len]);
+    unsafe {
+        syscall3(
+            42,
+            fd as u64,
+            &addr as *const SockAddrUn as u64,
+            core::mem::size_of::<SockAddrUn>() as u64,
+        ) as isize
+    }
+}
+
+pub fn sendto(fd: usize, buf: &[u8]) -> isize {
+    unsafe { syscall6(44, fd as u64, buf.as_ptr() as u64, buf.len() as u64, 0, 0, 0) as isize }
+}
+
+pub fn recvfrom(fd: usize, buf: &mut [u8]) -> isize {
+    unsafe {
+        syscall6(
+            45,
+            fd as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            0,
+            0,
+            0,
+        ) as isize
+    }
+}
+
+pub fn ftruncate(fd: usize, length: usize) -> isize {
+    unsafe { syscall2(77, fd as u64, length as u64) as isize }
+}
+
+pub fn mmap(addr: u64, length: usize, prot: i32, flags: i32, fd: i32, offset: u64) -> isize {
+    unsafe {
+        syscall6(
+            9,
+            addr,
+            length as u64,
+            prot as u64,
+            flags as u64,
+            fd as u64,
+            offset,
+        ) as isize
+    }
+}
+
+pub fn munmap(addr: *mut u8, length: usize) -> isize {
+    unsafe { syscall2(11, addr as u64, length as u64) as isize }
+}
+
+/// Real Ring-3 `libgui::ipc::WmOs` implementation backed by AF_UNIX + `/dev/shm/*` syscalls.
+pub struct SublimeWmOs;
+
+impl libgui::ipc::WmOs for SublimeWmOs {
+    fn connect_unix(&mut self, path: &str) -> Result<usize, i32> {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(fd as i32);
+        }
+        let rc = connect_unix(fd as usize, path);
+        if rc < 0 {
+            close(fd as usize);
+            return Err(rc as i32);
+        }
+        Ok(fd as usize)
+    }
+
+    fn send_all(&mut self, fd: usize, data: &[u8]) -> Result<usize, i32> {
+        let mut sent = 0usize;
+        while sent < data.len() {
+            let n = sendto(fd, &data[sent..]);
+            if n < 0 {
+                return Err(n as i32);
+            }
+            if n == 0 {
+                return Err(-32);
+            }
+            sent += n as usize;
+        }
+        Ok(sent)
+    }
+
+    fn recv_nonblocking(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize, i32> {
+        let n = recvfrom(fd, buf);
+        if n < 0 {
+            Err(n as i32)
+        } else {
+            Ok(n as usize)
+        }
+    }
+
+    fn open_shm_rw_create(&mut self, name: &str) -> Result<usize, i32> {
+        let mut path = alloc::string::String::from("/dev/shm/");
+        path.push_str(name);
+        let fd = open(&path, O_CREAT | O_RDWR, 0o666);
+        if fd < 0 {
+            Err(fd as i32)
+        } else {
+            Ok(fd as usize)
+        }
+    }
+
+    fn ftruncate(&mut self, fd: usize, len: usize) -> Result<(), i32> {
+        let rc = ftruncate(fd, len);
+        if rc < 0 {
+            Err(rc as i32)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn mmap_shared(&mut self, fd: usize, len: usize) -> Result<*mut u8, i32> {
+        let res = mmap(0, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd as i32, 0);
+        if res < 0 {
+            Err(res as i32)
+        } else {
+            Ok(res as usize as *mut u8)
+        }
+    }
+
+    fn munmap(&mut self, ptr: *mut u8, len: usize) -> Result<(), i32> {
+        let rc = munmap(ptr, len);
+        if rc < 0 {
+            Err(rc as i32)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn close(&mut self, fd: usize) {
+        let _ = close(fd);
+    }
+
+    fn getpid(&mut self) -> u32 {
+        getpid() as u32
+    }
+
+    fn sleep_ms(&mut self, ms: u64) {
+        sleep_ms(ms);
+    }
+}
+
 // I/O & Formatting
 pub struct Stdout;
 
@@ -419,20 +706,79 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     exit(1);
 }
 
-// Userland Heap Allocator (backed by sys_brk)
+// Userland Heap Allocator (backed by sys_brk with free-list reuse)
+struct FreeNode {
+    next: *mut FreeNode,
+    cap: usize,
+}
+
+struct AllocState {
+    lock: core::sync::atomic::AtomicBool,
+    free_head: core::sync::atomic::AtomicUsize,
+}
+
+static ALLOC_STATE: AllocState = AllocState {
+    lock: core::sync::atomic::AtomicBool::new(false),
+    free_head: core::sync::atomic::AtomicUsize::new(0),
+};
+
+impl AllocState {
+    fn lock_guard(&self) {
+        while self
+            .lock
+            .compare_exchange(
+                false,
+                true,
+                core::sync::atomic::Ordering::Acquire,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+    }
+
+    fn unlock_guard(&self) {
+        self.lock.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
+
 struct UserAllocator;
 
 unsafe impl core::alloc::GlobalAlloc for UserAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align();
-        let size = layout.size();
+        let align = layout.align().max(core::mem::align_of::<FreeNode>());
+        let size = layout.size().max(core::mem::size_of::<FreeNode>());
+        ALLOC_STATE.lock_guard();
+
+        let mut prev: *mut FreeNode = core::ptr::null_mut();
+        let mut cur = ALLOC_STATE.free_head.load(core::sync::atomic::Ordering::Relaxed) as *mut FreeNode;
+        while !cur.is_null() {
+            if (cur as usize) & (align - 1) == 0 && (*cur).cap >= size {
+                let next = (*cur).next;
+                if prev.is_null() {
+                    ALLOC_STATE
+                        .free_head
+                        .store(next as usize, core::sync::atomic::Ordering::Relaxed);
+                } else {
+                    (*prev).next = next;
+                }
+                ALLOC_STATE.unlock_guard();
+                return cur as *mut u8;
+            }
+            prev = cur;
+            cur = (*cur).next;
+        }
+
         let cur_brk = brk(0);
         if cur_brk == 0 {
+            ALLOC_STATE.unlock_guard();
             return core::ptr::null_mut();
         }
         let aligned_brk = (cur_brk + align - 1) & !(align - 1);
         let new_brk = aligned_brk + size;
         let res = brk(new_brk);
+        ALLOC_STATE.unlock_guard();
         if res >= new_brk {
             aligned_brk as *mut u8
         } else {
@@ -440,8 +786,23 @@ unsafe impl core::alloc::GlobalAlloc for UserAllocator {
         }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {
-        // Bump allocator: no-op dealloc for simple userland processes
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        if ptr.is_null() || (ptr as usize) < 0x1000 {
+            return;
+        }
+        let cap = layout.size().max(core::mem::size_of::<FreeNode>());
+        if (ptr as usize) % core::mem::align_of::<FreeNode>() != 0 {
+            return;
+        }
+        ALLOC_STATE.lock_guard();
+        let node = ptr as *mut FreeNode;
+        let head = ALLOC_STATE.free_head.load(core::sync::atomic::Ordering::Relaxed) as *mut FreeNode;
+        (*node).next = head;
+        (*node).cap = cap;
+        ALLOC_STATE
+            .free_head
+            .store(node as usize, core::sync::atomic::Ordering::Relaxed);
+        ALLOC_STATE.unlock_guard();
     }
 }
 

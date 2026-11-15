@@ -9,12 +9,59 @@ const KEYBOARD_DATA_PORT: u16 = 0x60;
 const KEYBOARD_STATUS_PORT: u16 = 0x64;
 const KEYBOARD_CMD_PORT: u16 = 0x64;
 
+const TYPEMATIC_DELAY_MS: u64 = 450;
+const TYPEMATIC_INTERVAL_MS: u64 = 33;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemShortcut {
+    ToggleStartMenu,
+    AltTab,
+    AltF4,
+    ToggleSpotlight,
+    ShowDesktop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuiInputEvent {
+    Shortcut(SystemShortcut),
+    FunctionKey {
+        num: u8,
+        mods: libgui::event::Modifiers,
+    },
+    KeyDown {
+        key: libgui::event::KeyCode,
+        ch: Option<char>,
+        mods: libgui::event::Modifiers,
+    },
+    KeyUp {
+        key: libgui::event::KeyCode,
+        mods: libgui::event::Modifiers,
+    },
+}
+
+static GUI_EVENT_QUEUE: IrqSafeSpinlock<VecDeque<GuiInputEvent>> = IrqSafeSpinlock::new(VecDeque::new());
+
+pub fn push_gui_event(ev: GuiInputEvent) {
+    let mut q = GUI_EVENT_QUEUE.lock();
+    if q.len() < 128 {
+        q.push_back(ev);
+    }
+}
+
+pub fn pop_gui_event() -> Option<GuiInputEvent> {
+    GUI_EVENT_QUEUE.lock().pop_front()
+}
+
 pub struct KeyboardDriver {
     shift_pressed: bool,
     caps_lock: bool,
     ctrl_pressed: bool,
     alt_pressed: bool,
+    super_pressed: bool,
+    super_used_combo: bool,
     extended: bool,
+    held_key: Option<(u8, bool)>,
+    next_repeat_ms: u64,
     buffer: VecDeque<u8>,
 }
 
@@ -25,47 +72,106 @@ impl KeyboardDriver {
             caps_lock: false,
             ctrl_pressed: false,
             alt_pressed: false,
+            super_pressed: false,
+            super_used_combo: false,
             extended: false,
+            held_key: None,
+            next_repeat_ms: 0,
             buffer: VecDeque::new(),
         }
     }
 
+    #[inline]
+    fn current_mods(&self) -> libgui::event::Modifiers {
+        libgui::event::Modifiers {
+            shift: self.shift_pressed,
+            ctrl: self.ctrl_pressed,
+            alt: self.alt_pressed,
+        }
+    }
+
     pub fn handle_scancode(&mut self, scancode: u8) {
+        let now_ms = crate::arch::x86_64::pit::get_ticks();
+        self.handle_scancode_at(scancode, now_ms);
+    }
+
+    pub fn handle_scancode_at(&mut self, scancode: u8, now_ms: u64) {
         if scancode == 0xE0 {
             self.extended = true;
             return;
         }
 
+        let gui_active = crate::drivers::gop_console::is_gui_active();
+
         if self.extended {
             self.extended = false;
-            // Extended keys (release has bit 7 set)
+            let base = scancode & 0x7F;
             if (scancode & 0x80) != 0 {
+                match base {
+                    0x1D => self.ctrl_pressed = false,
+                    0x38 => self.alt_pressed = false,
+                    0x5B | 0x5C => {
+                        let fire_tap = self.super_pressed && !self.super_used_combo;
+                        self.super_pressed = false;
+                        self.super_used_combo = false;
+                        if gui_active && fire_tap {
+                            push_gui_event(GuiInputEvent::Shortcut(SystemShortcut::ToggleStartMenu));
+                        }
+                    }
+                    _ => {}
+                }
+                if self.held_key == Some((base, true)) {
+                    self.held_key = None;
+                }
+                if gui_active {
+                    if let Some(kc) = Self::extended_scancode_to_keycode(base) {
+                        push_gui_event(GuiInputEvent::KeyUp {
+                            key: kc,
+                            mods: self.current_mods(),
+                        });
+                    }
+                }
                 return;
             }
 
             match scancode {
-                0x48 => {
-                    if self.shift_pressed {
-                        crate::drivers::gop_console::scroll_up(1);
-                    } else {
-                        self.push_escape_seq(b"[A");
-                    }
+                0x1D => {
+                    self.ctrl_pressed = true;
+                    return;
                 }
-                0x50 => {
-                    if self.shift_pressed {
-                        crate::drivers::gop_console::scroll_down(1);
-                    } else {
-                        self.push_escape_seq(b"[B");
-                    }
+                0x38 => {
+                    self.alt_pressed = true;
+                    return;
                 }
-                0x49 => crate::drivers::gop_console::scroll_up(5),   // Page Up
-                0x51 => crate::drivers::gop_console::scroll_down(5), // Page Down
-                0x4D => self.push_escape_seq(b"[C"),  // Right Arrow
-                0x4B => self.push_escape_seq(b"[D"),  // Left Arrow
-                0x47 => self.push_escape_seq(b"[H"),  // Home
-                0x4F => self.push_escape_seq(b"[F"),  // End
-                0x53 => self.push_escape_seq(b"[3~"), // Delete
+                0x5B | 0x5C => {
+                    self.super_pressed = true;
+                    self.super_used_combo = false;
+                    return;
+                }
                 _ => {}
+            }
+
+            if self.super_pressed {
+                self.super_used_combo = true;
+            }
+            if gui_active && self.alt_pressed {
+                if let Some(kc) = match scancode {
+                    0x48 => Some(libgui::event::KeyCode::Up),
+                    0x4B => Some(libgui::event::KeyCode::Left),
+                    0x4D => Some(libgui::event::KeyCode::Right),
+                    _ => None,
+                } {
+                    self.held_key = None;
+                    push_gui_event(GuiInputEvent::KeyDown {
+                        key: kc,
+                        ch: None,
+                        mods: self.current_mods(),
+                    });
+                    return;
+                }
+            }
+            if self.emit_extended(scancode, gui_active) {
+                self.arm_repeat((scancode, true), now_ms);
             }
             return;
         }
@@ -84,11 +190,61 @@ impl KeyboardDriver {
             // CapsLock toggled
             0x3A => self.caps_lock = !self.caps_lock,
 
-            // Alt + F1..F4 Virtual Console Switching
-            0x3B if self.alt_pressed => crate::tty::switch_tty(1),
-            0x3C if self.alt_pressed => crate::tty::switch_tty(2),
-            0x3D if self.alt_pressed => crate::tty::switch_tty(3),
-            0x3E if self.alt_pressed => crate::tty::switch_tty(4),
+            // Alt+Tab / Alt+F4 / Ctrl+Esc / Win+R / Win+D real-OS global shortcuts in GUI mode
+            0x0F if gui_active && self.alt_pressed => {
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::Shortcut(SystemShortcut::AltTab));
+            }
+            0x3E if gui_active && self.alt_pressed => {
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::Shortcut(SystemShortcut::AltF4));
+            }
+            0x01 if gui_active && self.ctrl_pressed => {
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::Shortcut(SystemShortcut::ToggleStartMenu));
+            }
+            0x13 if gui_active && self.super_pressed => {
+                self.super_used_combo = true;
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::Shortcut(SystemShortcut::ToggleSpotlight));
+            }
+            0x20 if gui_active && self.super_pressed => {
+                self.super_used_combo = true;
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::Shortcut(SystemShortcut::ShowDesktop));
+            }
+
+            // Alt + F1..F4 Virtual Console Switching (CLI / text mode)
+            0x3B if self.alt_pressed && !gui_active => {
+                self.held_key = None;
+                crate::tty::switch_tty(1);
+            }
+            0x3C if self.alt_pressed && !gui_active => {
+                self.held_key = None;
+                crate::tty::switch_tty(2);
+            }
+            0x3D if self.alt_pressed && !gui_active => {
+                self.held_key = None;
+                crate::tty::switch_tty(3);
+            }
+            0x3E if self.alt_pressed && !gui_active => {
+                self.held_key = None;
+                crate::tty::switch_tty(4);
+            }
+
+            // F1..F12 in GUI mode
+            c @ (0x3B..=0x44 | 0x57 | 0x58) if gui_active => {
+                self.held_key = None;
+                let num = match c {
+                    0x3B..=0x44 => (c - 0x3B) + 1,
+                    0x57 => 11,
+                    _ => 12,
+                };
+                push_gui_event(GuiInputEvent::FunctionKey {
+                    num,
+                    mods: self.current_mods(),
+                });
+            }
 
             // Ctrl + '=' (0x0D or keypad 0x4E): Zoom in (2x scale / 16x32)
             0x0D | 0x4E if self.ctrl_pressed => crate::drivers::gop_console::set_font_scale(2),
@@ -96,18 +252,189 @@ impl KeyboardDriver {
             0x0C | 0x4A if self.ctrl_pressed => crate::drivers::gop_console::set_font_scale(1),
 
             // Key releases (break codes have bit 7 set)
-            code if (code & 0x80) != 0 => {}
-
-            // Key presses (make codes)
-            code => {
-                if let Some(ch) = self.scancode_to_char(code) {
-                    crate::drivers::gop_console::reset_scroll_view();
-                    if self.buffer.len() < 256 {
-                        self.buffer.push_back(ch);
+            code if (code & 0x80) != 0 => {
+                let base = code & 0x7F;
+                if self.held_key == Some((base, false)) {
+                    self.held_key = None;
+                }
+                if gui_active {
+                    if let Some(kc) = self.normal_scancode_to_keycode(base) {
+                        push_gui_event(GuiInputEvent::KeyUp {
+                            key: kc,
+                            mods: self.current_mods(),
+                        });
                     }
                 }
             }
+
+            // GUI modifier chords (Ctrl+H, Ctrl+Shift+N, Shift+Tab, Alt+D, Alt+Enter)
+            0x23 if gui_active && self.ctrl_pressed => {
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::KeyDown {
+                    key: libgui::event::KeyCode::Char('h'),
+                    ch: Some('h'),
+                    mods: self.current_mods(),
+                });
+            }
+            0x31 if gui_active && self.ctrl_pressed && self.shift_pressed => {
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::KeyDown {
+                    key: libgui::event::KeyCode::Char('n'),
+                    ch: Some('n'),
+                    mods: self.current_mods(),
+                });
+            }
+            0x0F if gui_active && self.shift_pressed && !self.ctrl_pressed && !self.alt_pressed => {
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::KeyDown {
+                    key: libgui::event::KeyCode::Tab,
+                    ch: None,
+                    mods: self.current_mods(),
+                });
+            }
+            0x20 if gui_active && self.alt_pressed => {
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::KeyDown {
+                    key: libgui::event::KeyCode::Char('d'),
+                    ch: Some('d'),
+                    mods: self.current_mods(),
+                });
+            }
+            0x1C if gui_active && self.alt_pressed => {
+                self.held_key = None;
+                push_gui_event(GuiInputEvent::KeyDown {
+                    key: libgui::event::KeyCode::Enter,
+                    ch: None,
+                    mods: self.current_mods(),
+                });
+            }
+
+            // Key presses (make codes)
+            code => {
+                if self.super_pressed {
+                    self.super_used_combo = true;
+                }
+                if self.emit_normal(code) {
+                    self.arm_repeat((code, false), now_ms);
+                }
+            }
         }
+    }
+
+    fn arm_repeat(&mut self, key: (u8, bool), now_ms: u64) {
+        if self.held_key == Some(key) {
+            self.next_repeat_ms = now_ms.saturating_add(TYPEMATIC_INTERVAL_MS);
+        } else {
+            self.held_key = Some(key);
+            self.next_repeat_ms = now_ms.saturating_add(TYPEMATIC_DELAY_MS);
+        }
+    }
+
+    fn extended_scancode_to_keycode(base: u8) -> Option<libgui::event::KeyCode> {
+        match base {
+            0x48 => Some(libgui::event::KeyCode::Up),
+            0x50 => Some(libgui::event::KeyCode::Down),
+            0x4B => Some(libgui::event::KeyCode::Left),
+            0x4D => Some(libgui::event::KeyCode::Right),
+            0x47 => Some(libgui::event::KeyCode::Home),
+            0x4F => Some(libgui::event::KeyCode::End),
+            0x49 => Some(libgui::event::KeyCode::PageUp),
+            0x51 => Some(libgui::event::KeyCode::PageDown),
+            0x53 => Some(libgui::event::KeyCode::Delete),
+            _ => None,
+        }
+    }
+
+    fn normal_scancode_to_keycode(&self, base: u8) -> Option<libgui::event::KeyCode> {
+        self.scancode_to_char(base).map(libgui::event::KeyCode::from_byte)
+    }
+
+    fn emit_extended(&mut self, scancode: u8, gui_active: bool) -> bool {
+        match scancode {
+            0x48 => {
+                if self.shift_pressed && !gui_active {
+                    crate::drivers::gop_console::scroll_up(1);
+                } else {
+                    self.push_escape_seq(b"[A");
+                }
+                true
+            }
+            0x50 => {
+                if self.shift_pressed && !gui_active {
+                    crate::drivers::gop_console::scroll_down(1);
+                } else {
+                    self.push_escape_seq(b"[B");
+                }
+                true
+            }
+            0x49 => {
+                if gui_active {
+                    self.push_escape_seq(b"[5~");
+                } else {
+                    crate::drivers::gop_console::scroll_up(5);
+                }
+                true
+            }
+            0x51 => {
+                if gui_active {
+                    self.push_escape_seq(b"[6~");
+                } else {
+                    crate::drivers::gop_console::scroll_down(5);
+                }
+                true
+            }
+            0x4D => {
+                self.push_escape_seq(b"[C");
+                true
+            }
+            0x4B => {
+                self.push_escape_seq(b"[D");
+                true
+            }
+            0x47 => {
+                self.push_escape_seq(b"[H");
+                true
+            }
+            0x4F => {
+                self.push_escape_seq(b"[F");
+                true
+            }
+            0x53 => {
+                self.push_escape_seq(b"[3~");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_normal(&mut self, code: u8) -> bool {
+        if let Some(ch) = self.scancode_to_char(code) {
+            crate::drivers::gop_console::reset_scroll_view();
+            if self.buffer.len() < 256 {
+                self.buffer.push_back(ch);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Generate software typematic auto-repeat when a key remains held down cleanly.
+    pub fn tick_repeat(&mut self, now_ms: u64) -> bool {
+        let Some((code, extended)) = self.held_key else {
+            return false;
+        };
+        if now_ms < self.next_repeat_ms {
+            return false;
+        }
+        let gui_active = crate::drivers::gop_console::is_gui_active();
+        let emitted = if extended {
+            self.emit_extended(code, gui_active)
+        } else {
+            self.emit_normal(code)
+        };
+        self.next_repeat_ms = now_ms.saturating_add(TYPEMATIC_INTERVAL_MS);
+        emitted
     }
 
     fn push_escape_seq(&mut self, seq: &[u8]) {
@@ -277,7 +604,20 @@ pub fn init() {
                 }
             }
 
-            // 4. Send 0xF4 (Enable Scanning) to keyboard and drain ACK (0xFA)
+            // 4. Configure typematic rate (0xF3 -> 0x22: 500ms initial delay, ~26.7 Hz) and enable scanning (0xF4)
+            if ps2_wait_write() {
+                outb(KEYBOARD_DATA_PORT, 0xF3);
+                if ps2_wait_read() {
+                    let _ = inb(KEYBOARD_DATA_PORT);
+                }
+                if ps2_wait_write() {
+                    outb(KEYBOARD_DATA_PORT, 0x22);
+                    if ps2_wait_read() {
+                        let _ = inb(KEYBOARD_DATA_PORT);
+                    }
+                }
+            }
+
             if ps2_wait_write() {
                 outb(KEYBOARD_DATA_PORT, 0xF4);
                 if ps2_wait_read() {
@@ -301,7 +641,18 @@ pub fn init() {
     }
 }
 
-/// Non-blocking read of the next typed character (checks buffer, then polls PS/2, USB HID, and UART).
+/// Returns true if any buffered keyboard bytes are waiting to be consumed.
+pub fn has_pending_input() -> bool {
+    !KEYBOARD.lock().buffer.is_empty() || !GUI_EVENT_QUEUE.lock().is_empty()
+}
+
+/// Advance software typematic key repeat for held PS/2 keys (safe when hardware stops repeating).
+pub fn poll_typematic() -> bool {
+    let now_ms = crate::arch::x86_64::pit::get_ticks();
+    KEYBOARD.lock().tick_repeat(now_ms)
+}
+
+/// Non-blocking read of the next typed character (checks buffer, then polls PS/2, USB HID, typematic repeat, and UART).
 pub fn read_char() -> Option<u8> {
     if let Some(ch) = KEYBOARD.lock().buffer.pop_front() {
         return Some(ch);
@@ -312,6 +663,9 @@ pub fn read_char() -> Option<u8> {
 
     // Poll USB HID host controllers (works even when LAPIC timer IRQ is masked during syscalls)
     crate::drivers::usb::poll_hid_nonblocking();
+
+    // Tick PS/2 software typematic repeat fallback
+    poll_typematic();
 
     // Check COM1 serial input fallback
     if let Some(ser_ch) = crate::arch::x86_64::serial::read_rx_char() {

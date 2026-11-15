@@ -28,13 +28,17 @@ impl UsbSubsystem {
 
 pub static USB: IrqSafeSpinlock<UsbSubsystem> = IrqSafeSpinlock::new(UsbSubsystem::new());
 
-/// Non-blocking poll of EHCI Periodic Interrupt pipes from timer ticks.
-pub fn poll_hid_nonblocking() {
+/// Non-blocking poll of EHCI Periodic Interrupt pipes from timer ticks or input loops.
+pub fn poll_hid_nonblocking() -> bool {
+    let mut any = false;
     if let Some(mut usb) = USB.try_lock() {
         for ehci in usb.ehci_controllers.iter_mut() {
-            ehci.poll_interrupt_pipes();
+            if ehci.poll_interrupt_pipes() > 0 {
+                any = true;
+            }
         }
     }
+    any
 }
 
 /// Emergency poll of USB keyboards and trackpads during kernel panic.

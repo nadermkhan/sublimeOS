@@ -13,6 +13,7 @@ pub struct MouseState {
     pub left_button: bool,
     pub right_button: bool,
     pub middle_button: bool,
+    pub scroll_delta: i32,
     pub screen_width: i32,
     pub screen_height: i32,
 }
@@ -25,6 +26,7 @@ impl MouseState {
             left_button: false,
             right_button: false,
             middle_button: false,
+            scroll_delta: 0,
             screen_width: 1024,
             screen_height: 768,
         }
@@ -34,13 +36,15 @@ impl MouseState {
 pub static MOUSE: IrqSafeSpinlock<MouseState> = IrqSafeSpinlock::new(MouseState::new());
 
 struct MouseDriverInternal {
-    packet: [u8; 3],
+    packet: [u8; 4],
     cycle: u8,
+    has_wheel: bool,
 }
 
 static INTERNAL_MOUSE: IrqSafeSpinlock<MouseDriverInternal> = IrqSafeSpinlock::new(MouseDriverInternal {
-    packet: [0; 3],
+    packet: [0; 4],
     cycle: 0,
+    has_wheel: false,
 });
 
 unsafe fn mouse_wait_write() -> bool {
@@ -104,29 +108,53 @@ pub fn handle_mouse_byte(byte: u8) {
         }
         2 => {
             internal.packet[2] = byte;
-            internal.cycle = 0;
-            let flags = internal.packet[0];
-            let raw_x = internal.packet[1];
-            let raw_y = internal.packet[2];
-            if (flags & 0xC0) != 0 {
-                return; // Discard overflow packets
+            if internal.has_wheel {
+                internal.cycle = 3;
+                return;
             }
-            let x_sign = (flags & 0x10) != 0;
-            let y_sign = (flags & 0x20) != 0;
-            let delta_x: i32 = if x_sign { (raw_x as i8) as i32 } else { raw_x as i32 };
-            let delta_y: i32 = if y_sign { (raw_y as i8) as i32 } else { raw_y as i32 };
-            let mut mouse = MOUSE.lock();
-            mouse.x = (mouse.x + delta_x).clamp(0, mouse.screen_width - 1);
-            mouse.y = (mouse.y - delta_y).clamp(0, mouse.screen_height - 1);
-            mouse.left_button = (flags & 0x01) != 0;
-            mouse.right_button = (flags & 0x02) != 0;
-            mouse.middle_button = (flags & 0x04) != 0;
-            let (mx, my) = (mouse.x, mouse.y);
-            drop(mouse);
-            crate::drivers::gpu::i915::set_cursor_position(mx, my);
+            internal.cycle = 0;
+            commit_ps2_packet(&internal.packet, false);
+        }
+        3 => {
+            internal.packet[3] = byte;
+            internal.cycle = 0;
+            commit_ps2_packet(&internal.packet, true);
         }
         _ => internal.cycle = 0,
     }
+}
+
+fn commit_ps2_packet(packet: &[u8; 4], has_wheel: bool) {
+    let flags = packet[0];
+    let raw_x = packet[1];
+    let raw_y = packet[2];
+    if (flags & 0xC0) != 0 {
+        return; // Discard overflow packets
+    }
+    let x_sign = (flags & 0x10) != 0;
+    let y_sign = (flags & 0x20) != 0;
+    let delta_x: i32 = if x_sign { (raw_x as i8) as i32 } else { raw_x as i32 };
+    let delta_y: i32 = if y_sign { (raw_y as i8) as i32 } else { raw_y as i32 };
+    let wheel_dz: i32 = if has_wheel {
+        // Low 4 bits are signed Z (-8..7); positive = scroll down in PS/2 Intellimouse
+        let z = (packet[3] & 0x0F) as i8;
+        let signed_z = if (z & 0x08) != 0 { (z | !0x0F) as i32 } else { z as i32 };
+        -signed_z
+    } else {
+        0
+    };
+    let mut mouse = MOUSE.lock();
+    mouse.x = (mouse.x + delta_x).clamp(0, mouse.screen_width - 1);
+    mouse.y = (mouse.y - delta_y).clamp(0, mouse.screen_height - 1);
+    mouse.left_button = (flags & 0x01) != 0;
+    mouse.right_button = (flags & 0x02) != 0;
+    mouse.middle_button = (flags & 0x04) != 0;
+    if wheel_dz != 0 {
+        mouse.scroll_delta += wheel_dz;
+    }
+    let (mx, my) = (mouse.x, mouse.y);
+    drop(mouse);
+    crate::drivers::gpu::i915::set_cursor_position(mx, my);
 }
 
 fn mouse_irq_handler(_ctx: &mut InterruptContext) {
@@ -184,9 +212,21 @@ pub fn init(width: i32, height: i32) {
                 }
             }
 
-            // 4. Configure mouse defaults and enable streaming
+            // 4. Configure mouse defaults, probe Intellimouse Z-axis scroll wheel, and enable streaming
             mouse_write(0xF6);
             let _ = mouse_read();
+            for rate in [200u8, 100, 80] {
+                mouse_write(0xF3);
+                let _ = mouse_read();
+                mouse_write(rate);
+                let _ = mouse_read();
+            }
+            mouse_write(0xF2);
+            let id_ack = mouse_read();
+            let dev_id = mouse_read();
+            if id_ack == 0xFA && (dev_id == 3 || dev_id == 4) {
+                INTERNAL_MOUSE.lock().has_wheel = true;
+            }
             mouse_write(0xF4);
             let _ = mouse_read();
 
@@ -227,4 +267,11 @@ pub fn apply_relative_event(buttons: u8, dx: i8, dy: i8) {
     let (mx, my) = (mouse.x, mouse.y);
     drop(mouse);
     crate::drivers::gpu::i915::set_cursor_position(mx, my);
+}
+
+pub fn take_scroll_delta() -> i32 {
+    let mut mouse = MOUSE.lock();
+    let d = mouse.scroll_delta;
+    mouse.scroll_delta = 0;
+    d
 }

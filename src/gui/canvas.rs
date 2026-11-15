@@ -11,6 +11,7 @@ pub struct Canvas {
     allocated_pages: usize,
     contiguous_phys: Option<u64>,
     mapped_virt: bool,
+    base_clip: Option<(i32, i32, i32, i32)>,
     clip: Option<(i32, i32, i32, i32)>,
 }
 
@@ -47,20 +48,56 @@ impl Canvas {
             allocated_pages: total_pages,
             contiguous_phys,
             mapped_virt,
+            base_clip: None,
             clip: None,
         }
     }
 
-    pub fn set_clip_rect(&mut self, x: i32, y: i32, w: i32, h: i32) {
+    pub fn set_base_clip(&mut self, x: i32, y: i32, w: i32, h: i32) {
         let x0 = x.max(0);
         let y0 = y.max(0);
         let x1 = (x + w.max(0)).min(self.width as i32);
         let y1 = (y + h.max(0)).min(self.height as i32);
+        self.base_clip = Some((x0, y0, x1, y1));
+        self.clip = self.base_clip;
+    }
+
+    pub fn clear_base_clip(&mut self) {
+        self.base_clip = None;
+        self.clip = None;
+    }
+
+    pub fn set_clip_rect(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        let mut x0 = x.max(0);
+        let mut y0 = y.max(0);
+        let mut x1 = (x + w.max(0)).min(self.width as i32);
+        let mut y1 = (y + h.max(0)).min(self.height as i32);
+        if let Some((bx0, by0, bx1, by1)) = self.base_clip {
+            x0 = x0.max(bx0);
+            y0 = y0.max(by0);
+            x1 = x1.min(bx1);
+            y1 = y1.min(by1);
+            if x1 < x0 {
+                x1 = x0;
+            }
+            if y1 < y0 {
+                y1 = y0;
+            }
+        }
         self.clip = Some((x0, y0, x1, y1));
     }
 
     pub fn clear_clip_rect(&mut self) {
-        self.clip = None;
+        self.clip = self.base_clip;
+    }
+
+    /// Borrow this framebuffer as a `libgui::gfx::Surface`, honoring the current clip rectangle.
+    pub fn with_surface<R>(&mut self, f: impl FnOnce(&mut libgui::gfx::Surface) -> R) -> R {
+        let mut surf = libgui::gfx::Surface::from_slice(self.width as i32, self.height as i32, self.buffer);
+        if let Some((x0, y0, x1, y1)) = self.clip {
+            surf.push_clip(libgui::gfx::Rect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0)));
+        }
+        f(&mut surf)
     }
 
     #[inline(always)]

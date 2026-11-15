@@ -33,6 +33,9 @@ pub fn get_next_input_char() -> Option<u8> {
 
     // 3. Polled fallback for USB HID controllers
     crate::drivers::usb::poll_hid_nonblocking();
+    if !crate::arch::x86_64::pit::IN_KERNEL_TESTS.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::net::poll_periodic();
+    }
     if let Some(ch) = crate::drivers::keyboard::read_char() {
         return Some(ch);
     }

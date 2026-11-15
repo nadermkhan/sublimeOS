@@ -194,6 +194,22 @@ impl<'a> ElfBinary<'a> {
         addr_space: &mut AddressSpace,
         args: &[&str],
     ) -> Result<(u64, u64), &'static str> {
+        const DEFAULT_ENV: &[&str] = &[
+            "PATH=/usr/local/bin:/bin",
+            "HOME=/Users/sublime",
+            "USER=sublime",
+            "OS=SublimeOS",
+            "DISPLAY=/run/wm.sock",
+        ];
+        self.load_into_address_space_with_args_env(addr_space, args, DEFAULT_ENV)
+    }
+
+    pub fn load_into_address_space_with_args_env(
+        &self,
+        addr_space: &mut AddressSpace,
+        args: &[&str],
+        envs: &[&str],
+    ) -> Result<(u64, u64), &'static str> {
         let vmm = VMM.lock();
         let pml4 = unsafe { &mut *(phys_to_virt(addr_space.pml4_phys) as *mut crate::mm::vmm::PageTable) };
 
@@ -292,9 +308,9 @@ impl<'a> ElfBinary<'a> {
             vma_type: VmaType::Stack,
         });
 
-        // Set up initial stack with System V AMD64 ABI argc, argv, and strings
+        // Set up initial stack with System V AMD64 ABI argc, argv, envp, and strings
         let user_rsp = if !top_virt_frame.is_null() {
-            setup_user_stack_args(top_virt_frame, USER_STACK_TOP, args)
+            setup_user_stack_args_env(top_virt_frame, USER_STACK_TOP, args, envs)
         } else {
             USER_STACK_TOP - 24
         };
@@ -303,10 +319,15 @@ impl<'a> ElfBinary<'a> {
     }
 }
 
-/// Set up System V AMD64 initial user stack: [argc, argv[0], ..., argv[N], NULL, envp NULL, string data].
+/// Set up System V AMD64 initial user stack: [argc, argv..., NULL, envp..., NULL, strings...].
 /// Ensures initial user_rsp % 16 == 8 so that 'pop rdi' leaves rsp 16-byte aligned before 'call'.
-fn setup_user_stack_args(top_page: *mut u8, user_stack_top: u64, args: &[&str]) -> u64 {
-    if args.is_empty() {
+fn setup_user_stack_args_env(
+    top_page: *mut u8,
+    user_stack_top: u64,
+    args: &[&str],
+    envs: &[&str],
+) -> u64 {
+    if args.is_empty() && envs.is_empty() {
         let sp_offset = 4096 - 24;
         unsafe {
             let ptr = top_page.add(sp_offset) as *mut u64;
@@ -319,11 +340,12 @@ fn setup_user_stack_args(top_page: *mut u8, user_stack_top: u64, args: &[&str]) 
 
     let mut str_offset = 4096usize;
     let mut arg_vaddrs = alloc::vec::Vec::new();
+    let mut env_vaddrs = alloc::vec::Vec::new();
 
     for arg in args {
         let bytes = arg.as_bytes();
-        let len = bytes.len() + 1; // include null terminator
-        if str_offset < len + 256 {
+        let len = bytes.len() + 1;
+        if str_offset < len + 384 {
             break;
         }
         str_offset -= len;
@@ -335,11 +357,26 @@ fn setup_user_stack_args(top_page: *mut u8, user_stack_top: u64, args: &[&str]) 
         arg_vaddrs.push(vaddr);
     }
 
+    for env in envs {
+        let bytes = env.as_bytes();
+        let len = bytes.len() + 1;
+        if str_offset < len + 256 {
+            break;
+        }
+        str_offset -= len;
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), top_page.add(str_offset), bytes.len());
+            *top_page.add(str_offset + bytes.len()) = 0;
+        }
+        let vaddr = user_stack_top - (4096 - str_offset as u64);
+        env_vaddrs.push(vaddr);
+    }
+
     // Align str_offset down to 8 bytes
     str_offset &= !0x7;
 
-    // Entries: argc (1), argv pointers (arg_vaddrs.len()), argv NULL (1), envp NULL (1)
-    let total_entries = 3 + arg_vaddrs.len();
+    // Entries: argc (1), argv ptrs, argv NULL (1), envp ptrs, envp NULL (1)
+    let total_entries = 3 + arg_vaddrs.len() + env_vaddrs.len();
     let table_bytes = total_entries * 8;
     let mut sp_offset = str_offset.saturating_sub(table_bytes);
 
@@ -349,18 +386,18 @@ fn setup_user_stack_args(top_page: *mut u8, user_stack_top: u64, args: &[&str]) 
 
     unsafe {
         let mut ptr = top_page.add(sp_offset) as *mut u64;
-        // 1. argc
         *ptr = arg_vaddrs.len() as u64;
         ptr = ptr.add(1);
-        // 2. argv[0..argc]
         for &vaddr in &arg_vaddrs {
             *ptr = vaddr;
             ptr = ptr.add(1);
         }
-        // 3. argv NULL sentinel
         *ptr = 0;
         ptr = ptr.add(1);
-        // 4. envp NULL sentinel
+        for &vaddr in &env_vaddrs {
+            *ptr = vaddr;
+            ptr = ptr.add(1);
+        }
         *ptr = 0;
     }
 

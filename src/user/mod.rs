@@ -1,3 +1,4 @@
+pub mod apps;
 pub mod binaries;
 pub mod builder;
 pub mod libc;
@@ -18,6 +19,12 @@ pub fn init_userland() {
     let grep_elf = binaries::generate_grep_binary();
     let wc_elf = binaries::generate_wc_binary();
     let edit_elf = binaries::generate_edit_binary();
+    let studio_elf = binaries::generate_studio_binary();
+    let paint_elf = binaries::generate_paint_binary();
+    let appcenter_elf = binaries::generate_appcenter_binary();
+    let player_elf = binaries::generate_player_binary();
+    let code_elf = binaries::generate_code_binary();
+    let music_elf = binaries::generate_music_binary();
     let dyntest_elf = binaries::generate_dyntest_binary();
     let windowserver_elf = binaries::generate_windowserver_binary();
     let telnetd_elf = binaries::generate_telnetd_binary();
@@ -47,6 +54,12 @@ pub fn init_userland() {
     let _ = crate::shell::pipeline::write_file_to_vfs("/bin/grep", &grep_elf, false);
     let _ = crate::shell::pipeline::write_file_to_vfs("/bin/wc", &wc_elf, false);
     let _ = crate::shell::pipeline::write_file_to_vfs("/bin/edit", &edit_elf, false);
+    let _ = crate::shell::pipeline::write_file_to_vfs("/bin/studio", &studio_elf, false);
+    let _ = crate::shell::pipeline::write_file_to_vfs("/bin/paint", &paint_elf, false);
+    let _ = crate::shell::pipeline::write_file_to_vfs("/bin/appcenter", &appcenter_elf, false);
+    let _ = crate::shell::pipeline::write_file_to_vfs("/bin/player", &player_elf, false);
+    let _ = crate::shell::pipeline::write_file_to_vfs("/bin/code", &code_elf, false);
+    let _ = crate::shell::pipeline::write_file_to_vfs("/bin/music", &music_elf, false);
     let _ = crate::shell::pipeline::write_file_to_vfs("/bin/dyntest", &dyntest_elf, false);
     let _ = crate::shell::pipeline::write_file_to_vfs("/bin/windowserver", &windowserver_elf, false);
     let _ = crate::shell::pipeline::write_file_to_vfs("/bin/telnetd", &telnetd_elf, false);
@@ -74,10 +87,21 @@ pub fn launch_init() -> ! {
     let vfs = crate::fs::vfs::VFS.lock();
     let file = vfs.open("/bin/init", 0).expect("Failed to open /bin/init for PID 1 boot");
     drop(vfs);
-    let mut buf = alloc::vec![0u8; 131072];
-    let n = file.read(&mut buf).expect("Failed to read /bin/init for PID 1 boot");
+    let size_hint = {
+        let st = file.inode.lock().stat();
+        (st.size as usize).clamp(4096, 8 * 1024 * 1024)
+    };
+    let mut buf = alloc::vec::Vec::with_capacity(size_hint);
+    let mut chunk = alloc::vec![0u8; 65536];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(m) => buf.extend_from_slice(&chunk[..m]),
+            Err(e) => panic!("Failed to read /bin/init for PID 1 boot: {}", e),
+        }
+    }
 
-    crate::task::user::spawn_init_process(&buf[..n])
+    crate::task::user::spawn_init_process(&buf)
         .expect("Kernel panic: Failed to spawn /bin/init (PID 1) in Ring 3");
 
     // Retire the kernel boot thread so the scheduler immediately dispatches PID 1

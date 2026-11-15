@@ -319,6 +319,7 @@ impl Tg3Device {
         let mmio_base = crate::mm::vmm::map_mmio_range(mmio_phys, 64 * 1024)?;
 
         unsafe {
+            pci.ensure_d0_power_state();
             PciBus::enable_bus_mastering(pci.bus, pci.device, pci.function);
         }
 
@@ -365,6 +366,30 @@ impl Tg3Device {
     unsafe fn reg_write32_flush(mmio: u64, offset: u64, val: u32) {
         Self::reg_write32(mmio, offset, val);
         let _ = Self::reg_read32(mmio, offset);
+    }
+
+    /// Read a 16-bit register from the Broadcom MII/GMII PHY via MI_COM (0x044C).
+    unsafe fn mii_read_phy(mmio: u64, phy_addr: u8, reg: u8) -> u16 {
+        const TG3_MI_COM: u64 = 0x044C;
+        const MI_COM_BUSY: u32 = 1 << 29;
+        const MI_COM_CMD_READ: u32 = 0x02 << 26;
+        let req = MI_COM_BUSY
+            | MI_COM_CMD_READ
+            | (((phy_addr as u32) & 0x1F) << 21)
+            | (((reg as u32) & 0x1F) << 16);
+        Self::reg_write32(mmio, TG3_MI_COM, req);
+        for i in 0..256u32 {
+            let val = Self::reg_read32(mmio, TG3_MI_COM);
+            if (val & MI_COM_BUSY) == 0 {
+                return (val & 0xFFFF) as u16;
+            }
+            if i < 16 {
+                core::hint::spin_loop();
+            } else {
+                crate::arch::x86_64::pit::delay_us(5);
+            }
+        }
+        0xFFFF
     }
 
     /// Initialize Tigon3 host endianness, MAC address readback, Status Block,
@@ -463,7 +488,15 @@ impl Tg3Device {
         Self::reg_write32(mmio, TG3_SNDDATAI_MODE, 0x0000_0002);
         Self::reg_write32(mmio, TG3_HOSTCC_MODE, 0x0000_0002);
 
-        Self::reg_write32(mmio, TG3_MAC_MODE, 0x0000_0008); // GMII / Gigabit port mode
+        // Set MAC port mode: GMII (0x08) for 1000BASE-T or MII (0x04) for 10/100 copper link
+        let mut port_mode = 0x0000_0008u32;
+        let bmsr = Self::mii_read_phy(mmio, 1, 0x01);
+        if bmsr != 0 && bmsr != 0xFFFF {
+            let gbe_sts = Self::mii_read_phy(mmio, 1, 0x0A);
+            let is_1000 = (gbe_sts & 0x0C00) != 0;
+            port_mode = if is_1000 { 0x0000_0008 } else { 0x0000_0004 };
+        }
+        Self::reg_write32(mmio, TG3_MAC_MODE, port_mode);
         Self::reg_write32(mmio, TG3_MAC_RX_MODE, 0x0000_0002); // Enable MAC RX
         Self::reg_write32(mmio, TG3_MAC_TX_MODE, 0x0000_0002); // Enable MAC TX
 
@@ -489,7 +522,13 @@ impl NetDevice for Tg3Device {
         }
 
         let mut dma = self.dma.lock();
+        let hw_tx_cons = unsafe { read_volatile(&(*dma.status_block()).idx[0].tx_consumer) } as usize
+            % TG3_RING_LEN;
         let slot = (dma.tx_prod_idx as usize) % TG3_RING_LEN;
+        let next_prod = (slot + 1) % TG3_RING_LEN;
+        if next_prod == hw_tx_cons {
+            return Err("BCM57765 TX descriptor ring full");
+        }
         let tx_ring_virt = phys_to_virt(dma.tx_ring_frame) as *mut Tg3TxDesc;
         let buf_virt = dma.tx_slot_virt(slot);
         let buf_phys = dma.tx_slot_phys(slot);
@@ -509,9 +548,9 @@ impl NetDevice for Tg3Device {
             );
             fence(Ordering::SeqCst);
 
-            let next_prod = ((slot + 1) % TG3_RING_LEN) as u32;
-            dma.tx_prod_idx = next_prod;
-            Self::reg_write32_flush(self.mmio_base, TG3_GRCMBOX_SNDHOST_PROD_0_LO, next_prod);
+            let next_prod_u32 = next_prod as u32;
+            dma.tx_prod_idx = next_prod_u32;
+            Self::reg_write32_flush(self.mmio_base, TG3_GRCMBOX_SNDHOST_PROD_0_LO, next_prod_u32);
         }
 
         Ok(())
@@ -561,7 +600,12 @@ impl NetDevice for Tg3Device {
 
     fn is_link_up(&self) -> bool {
         let status = unsafe { Self::reg_read32(self.mmio_base, TG3_MAC_STATUS) };
-        (status & MAC_STATUS_PCS_SYNCED) != 0
+        if (status & MAC_STATUS_PCS_SYNCED) != 0 {
+            return true;
+        }
+        // On copper PHY (BCM57765 GMII), bit 1 of TG3_MAC_STATUS (MI_INTERRUPT/CFG_CHANGED) or MII BMSR (reg 1 bit 2) reports link
+        let mii_bmsr = unsafe { Self::mii_read_phy(self.mmio_base, 1, 0x01) };
+        (mii_bmsr != 0xFFFF) && (mii_bmsr & 0x0004) != 0
     }
 
     fn device_type(&self) -> NetDeviceType {

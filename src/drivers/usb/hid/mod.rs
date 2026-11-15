@@ -16,12 +16,17 @@ pub enum UsbHidType {
     Mouse,
 }
 
+const HID_TYPEMATIC_DELAY_MS: u64 = 450;
+const HID_TYPEMATIC_INTERVAL_MS: u64 = 33;
+
 pub struct UsbHidDevice {
     pub name: String,
     pub dev_type: UsbHidType,
     pub prev_modifiers: u8,
     pub prev_keys: [u8; 6],
     pub prev_buttons: u8,
+    held_key: Option<u8>,
+    next_repeat_ms: u64,
 }
 
 impl UsbHidDevice {
@@ -32,11 +37,18 @@ impl UsbHidDevice {
             prev_modifiers: 0,
             prev_keys: [0; 6],
             prev_buttons: 0,
+            held_key: None,
+            next_repeat_ms: 0,
         }
     }
 
     /// Process standard 8-byte or Apple 10-byte USB HID Keyboard Report.
     pub fn process_keyboard_report(&mut self, report: &[u8]) {
+        let now_ms = crate::arch::x86_64::pit::get_ticks();
+        self.process_keyboard_report_at(report, now_ms);
+    }
+
+    pub fn process_keyboard_report_at(&mut self, report: &[u8], now_ms: u64) {
         if report.len() < 8 {
             return;
         }
@@ -54,17 +66,11 @@ impl UsbHidDevice {
         let mut kb = KEYBOARD.lock();
 
         // 1. Process Modifiers
-        // Left Ctrl (bit 0)
         Self::handle_modifier_bit(&mut kb, modifiers, self.prev_modifiers, 0x01, 0x1D);
-        // Left Shift (bit 1)
         Self::handle_modifier_bit(&mut kb, modifiers, self.prev_modifiers, 0x02, 0x2A);
-        // Left Alt (bit 2)
         Self::handle_modifier_bit(&mut kb, modifiers, self.prev_modifiers, 0x04, 0x38);
-        // Right Ctrl (bit 4)
         Self::handle_modifier_bit(&mut kb, modifiers, self.prev_modifiers, 0x10, 0x1D);
-        // Right Shift (bit 5)
         Self::handle_modifier_bit(&mut kb, modifiers, self.prev_modifiers, 0x20, 0x36);
-        // Right Alt (bit 6)
         Self::handle_modifier_bit(&mut kb, modifiers, self.prev_modifiers, 0x40, 0x38);
 
         self.prev_modifiers = modifiers;
@@ -72,11 +78,14 @@ impl UsbHidDevice {
         // 2. Detect Released Keys (in prev_keys but not in new keys)
         for &old_k in &self.prev_keys {
             if old_k != 0 && !keys.contains(&old_k) {
+                if self.held_key == Some(old_k) {
+                    self.held_key = None;
+                }
                 if let Some((scancode, extended)) = hid_usage_to_ps2(old_k) {
                     if extended {
-                        kb.handle_scancode(0xE0);
+                        kb.handle_scancode_at(0xE0, now_ms);
                     }
-                    kb.handle_scancode(scancode | 0x80); // Break code
+                    kb.handle_scancode_at(scancode | 0x80, now_ms);
                 }
             }
         }
@@ -86,14 +95,38 @@ impl UsbHidDevice {
             if new_k != 0 && !self.prev_keys.contains(&new_k) {
                 if let Some((scancode, extended)) = hid_usage_to_ps2(new_k) {
                     if extended {
-                        kb.handle_scancode(0xE0);
+                        kb.handle_scancode_at(0xE0, now_ms);
                     }
-                    kb.handle_scancode(scancode); // Make code
+                    kb.handle_scancode_at(scancode, now_ms);
+                    if new_k != 0x39 {
+                        self.held_key = Some(new_k);
+                        self.next_repeat_ms = now_ms.saturating_add(HID_TYPEMATIC_DELAY_MS);
+                    }
                 }
             }
         }
 
         self.prev_keys = keys;
+    }
+
+    /// Drive software typematic repeat for held keys on this HID device.
+    pub fn tick_repeat(&mut self, now_ms: u64) -> bool {
+        let Some(k) = self.held_key else {
+            return false;
+        };
+        if now_ms < self.next_repeat_ms {
+            return false;
+        }
+        if let Some((scancode, extended)) = hid_usage_to_ps2(k) {
+            let mut kb = KEYBOARD.lock();
+            if extended {
+                kb.handle_scancode_at(0xE0, now_ms);
+            }
+            kb.handle_scancode_at(scancode, now_ms);
+            self.next_repeat_ms = now_ms.saturating_add(HID_TYPEMATIC_INTERVAL_MS);
+            return true;
+        }
+        false
     }
 
     fn handle_modifier_bit(
@@ -133,6 +166,12 @@ impl UsbHidDevice {
         mouse.left_button = (buttons & 0x01) != 0;
         mouse.right_button = (buttons & 0x02) != 0;
         mouse.middle_button = (buttons & 0x04) != 0;
+        if report.len() >= 4 {
+            let dz = report[3] as i8;
+            if dz != 0 {
+                mouse.scroll_delta += dz as i32;
+            }
+        }
 
         self.prev_buttons = buttons;
     }

@@ -1,5 +1,6 @@
 extern crate alloc;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{fence, Ordering};
 use crate::drivers::pci::{PciBus, PciDevice};
@@ -123,13 +124,53 @@ pub struct HdaController {
     pub num_iss: u8,
     pub num_oss: u8,
     pub output_stream_base: u64,
+    pub sample_rate: u32,
+    pub stream_fmt: u16,
     pub is_ready: bool,
+    pub codec_vendor_id: u32,
+    pub codec_subsys_id: u32,
+    pub cs4206_apple_quirk: bool,
     pub dma_ring: HdaDmaRing,
     stream_lock: IrqSafeSpinlock<()>,
 }
 
 unsafe impl Send for HdaController {}
 unsafe impl Sync for HdaController {}
+
+/// Build the HDA `(nid, verb)` sequence verified on Apple Inc. MacBookPro8,2 Cirrus Logic CS4206 (`0x10134206`):
+/// enables AFG (`0x01`) GPIOs `1 & 3` (`0x0A`), binds Stream 1 Ch 0 @ `48 kHz 16-bit 2ch` (`0x20011`) across
+/// Headphone (`0x02->0x09`), Bass Speaker (`0x03->0x0a`), and Main Speaker (`0x04->0x0b`), unmuted at `0x72`.
+pub fn build_cs4206_apple_init_verbs() -> Vec<(u8, u32)> {
+    alloc::vec![
+        // AFG power & GPIO rails (IO[1]=1, IO[3]=1 -> 0x0A)
+        (0x01, 0x70500),
+        (0x01, 0x7160A),
+        (0x01, 0x7170A),
+        (0x01, 0x7150A),
+        // DAC 0x02 (Headphone), 0x03 (Bass Speaker), 0x04 (Main Speaker)
+        (0x02, 0x70500),
+        (0x02, 0x70610),
+        (0x02, 0x20011),
+        (0x02, 0x3B072),
+        (0x03, 0x70500),
+        (0x03, 0x70610),
+        (0x03, 0x20011),
+        (0x03, 0x3B072),
+        (0x04, 0x70500),
+        (0x04, 0x70610),
+        (0x04, 0x20011),
+        (0x04, 0x3B072),
+        // Output Pins: 0x09 (HP Jack), 0x0a (Bass Speaker), 0x0b (Main Speaker)
+        (0x09, 0x70500),
+        (0x09, 0x707C0),
+        (0x0A, 0x70500),
+        (0x0A, 0x70740),
+        (0x0A, 0x70C02),
+        (0x0B, 0x70500),
+        (0x0B, 0x70740),
+        (0x0B, 0x70C02),
+    ]
+}
 
 impl HdaController {
     pub fn new(pci: PciDevice) -> Result<Arc<Self>, &'static str> {
@@ -145,7 +186,20 @@ impl HdaController {
         let dma_ring = HdaDmaRing::allocate()?;
 
         unsafe {
+            pci.ensure_d0_power_state();
             PciBus::enable_bus_mastering(pci.bus, pci.device, pci.function);
+
+            // Intel 6-Series / C200 PCH HDA coherency setup: force TCSEL (0x44) -> TC0 and clear DEVCFG (0x48) No-Snoop
+            if pci.vendor_id == 0x8086 {
+                let tcsel = PciBus::read_config_byte(pci.bus, pci.device, pci.function, 0x44);
+                if (tcsel & 0x07) != 0 {
+                    PciBus::write_config_byte(pci.bus, pci.device, pci.function, 0x44, tcsel & !0x07);
+                }
+                let devcfg = PciBus::read_config_word(pci.bus, pci.device, pci.function, 0x48);
+                if (devcfg & (1 << 11)) != 0 {
+                    PciBus::write_config_word(pci.bus, pci.device, pci.function, 0x48, devcfg & !(1 << 11));
+                }
+            }
 
             let mut controller = Self {
                 pci,
@@ -153,7 +207,12 @@ impl HdaController {
                 num_iss: 0,
                 num_oss: 0,
                 output_stream_base: 0,
+                sample_rate: 44100,
+                stream_fmt: 0x4011,
                 is_ready: false,
+                codec_vendor_id: 0,
+                codec_subsys_id: 0,
+                cs4206_apple_quirk: false,
                 dma_ring,
                 stream_lock: IrqSafeSpinlock::new(()),
             };
@@ -163,19 +222,47 @@ impl HdaController {
         }
     }
 
+    pub fn active_sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    #[inline]
+    unsafe fn read_sd_ctl24(&self, sd_base: u64) -> u32 {
+        read_volatile((sd_base + SD_CTL) as *const u32) & 0x00FF_FFFF
+    }
+
+    /// Write 24-bit SD_CTL safely without modifying byte offset 0x03 (W1C SD_STS).
+    /// When asserting RUN or SRST, upper byte [23:16] (stream ID) is written first so STRM latches before RUN.
+    #[inline]
+    unsafe fn write_sd_ctl24(&self, sd_base: u64, val: u32) {
+        let v = val & 0x00FF_FFFF;
+        let lo16 = (v & 0xFFFF) as u16;
+        let hi8 = ((v >> 16) & 0xFF) as u8;
+        if (v & (SD_CTL_RUN | SD_CTL_SRST)) != 0 {
+            write_volatile((sd_base + SD_CTL + 2) as *mut u8, hi8);
+            write_volatile((sd_base + SD_CTL) as *mut u16, lo16);
+        } else {
+            write_volatile((sd_base + SD_CTL) as *mut u16, lo16);
+            write_volatile((sd_base + SD_CTL + 2) as *mut u8, hi8);
+        }
+    }
+
     unsafe fn send_immediate_verb(&self, codec_addr: u8, nid: u8, verb: u32) -> Option<u32> {
         let icis_ptr = (self.mmio_base + REG_ICIS) as *mut u16;
         let icoi_ptr = (self.mmio_base + REG_ICOI) as *mut u32;
         let icii_ptr = (self.mmio_base + REG_ICII) as *const u32;
 
-        // Wait if Immediate Command Busy is set
-        let mut timeout = 2_000;
-        while (read_volatile(icis_ptr) & 0x0001) != 0 && timeout > 0 {
-            core::hint::spin_loop();
-            timeout -= 1;
-        }
-        if timeout == 0 {
-            return None;
+        // Wait if Immediate Command Busy is set (up to ~5 ms)
+        let mut busy_waits = 0u32;
+        while (read_volatile(icis_ptr) & 0x0001) != 0 {
+            if busy_waits < 32 {
+                core::hint::spin_loop();
+            } else if busy_waits < 532 {
+                crate::arch::x86_64::pit::delay_us(10);
+            } else {
+                return None;
+            }
+            busy_waits += 1;
         }
 
         // Clear prior Immediate Result Valid (bit 1) + submit verb
@@ -186,29 +273,149 @@ impl HdaController {
         write_volatile(icoi_ptr, cmd);
         write_volatile(icis_ptr, 0x0001);
 
-        timeout = 4_000;
-        while timeout > 0 {
+        for attempt in 0..532u32 {
             let st = read_volatile(icis_ptr);
             if (st & 0x0003) == 0x0002 {
                 return Some(read_volatile(icii_ptr));
             }
-            core::hint::spin_loop();
-            timeout -= 1;
+            if attempt < 32 {
+                core::hint::spin_loop();
+            } else {
+                crate::arch::x86_64::pit::delay_us(10);
+            }
         }
         None
     }
 
-    unsafe fn configure_first_codec(&self) {
+    #[inline]
+    fn unity_gain_from_caps(caps: u32) -> u32 {
+        let offset = caps & 0x7F;
+        let num_steps = (caps >> 8) & 0x7F;
+        offset.min(num_steps).min(0x7F)
+    }
+
+    unsafe fn decode_connection_list(&self, cad: u8, nid: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        let len_resp = self.send_immediate_verb(cad, nid, 0xF000E).unwrap_or(0);
+        let long_form = (len_resp & 0x80) != 0;
+        let count = (len_resp & 0x7F) as usize;
+        if count == 0 {
+            return out;
+        }
+        let step = if long_form { 2 } else { 4 };
+        let mut idx = 0usize;
+        let mut prev_nid: Option<u8> = None;
+        while idx < count {
+            let word = self
+                .send_immediate_verb(cad, nid, 0xF0200 | (idx as u32 & 0xFF))
+                .unwrap_or(0);
+            if long_form {
+                for lane in 0..2 {
+                    if idx + lane >= count {
+                        break;
+                    }
+                    let raw = ((word >> (lane * 16)) & 0xFFFF) as u16;
+                    let is_range = (raw & 0x8000) != 0;
+                    let entry = (raw & 0x00FF) as u8;
+                    if is_range {
+                        if let Some(prev) = prev_nid {
+                            for n in prev.saturating_add(1)..=entry {
+                                out.push(n);
+                            }
+                        }
+                    } else {
+                        out.push(entry);
+                    }
+                    prev_nid = Some(entry);
+                }
+            } else {
+                for lane in 0..4 {
+                    if idx + lane >= count {
+                        break;
+                    }
+                    let raw = ((word >> (lane * 8)) & 0xFF) as u8;
+                    let is_range = (raw & 0x80) != 0;
+                    let entry = raw & 0x7F;
+                    if is_range {
+                        if let Some(prev) = prev_nid {
+                            for n in prev.saturating_add(1)..=entry {
+                                out.push(n);
+                            }
+                        }
+                    } else {
+                        out.push(entry);
+                    }
+                    prev_nid = Some(entry);
+                }
+            }
+            idx += step;
+        }
+        out
+    }
+
+    unsafe fn unmute_output_amp(&self, cad: u8, nid: u8, wcaps: u32, afg_out_caps: u32) {
+        if (wcaps & (1 << 2)) == 0 {
+            return;
+        }
+        let caps = if (wcaps & (1 << 3)) != 0 {
+            self.send_immediate_verb(cad, nid, 0xF0012).unwrap_or(afg_out_caps)
+        } else {
+            afg_out_caps
+        };
+        let gain = Self::unity_gain_from_caps(caps);
+        let _ = self.send_immediate_verb(cad, nid, 0x3B000 | gain);
+    }
+
+    unsafe fn unmute_input_amp(&self, cad: u8, nid: u8, idx: usize, wcaps: u32, afg_in_caps: u32) {
+        if (wcaps & (1 << 1)) == 0 {
+            return;
+        }
+        let caps = if (wcaps & (1 << 3)) != 0 {
+            self.send_immediate_verb(cad, nid, 0xF000D).unwrap_or(afg_in_caps)
+        } else {
+            afg_in_caps
+        };
+        let gain = Self::unity_gain_from_caps(caps);
+        let _ = self.send_immediate_verb(cad, nid, 0x37000 | ((idx as u32 & 0x0F) << 8) | gain);
+    }
+
+    fn select_pcm_format(pcm_caps: u32) -> Option<(u32, u16)> {
+        if (pcm_caps & (1 << 17)) == 0 {
+            return None;
+        }
+        if (pcm_caps & (1 << 5)) != 0 {
+            Some((44100, 0x4011))
+        } else if (pcm_caps & (1 << 6)) != 0 {
+            Some((48000, 0x0011))
+        } else {
+            None
+        }
+    }
+
+    unsafe fn configure_codecs(&mut self) {
         let statests = read_volatile((self.mmio_base + REG_STATESTS) as *const u16);
         if statests == 0 {
             return;
         }
 
-        for cad in 0u8..4 {
+        #[derive(Clone)]
+        struct WidgetInfo {
+            nid: u8,
+            wcaps: u32,
+            wtype: u8,
+            pincaps: u32,
+            def_cfg: u32,
+            conns: Vec<u8>,
+        }
+
+        for cad in 0u8..15 {
             if (statests & (1 << cad)) == 0 {
                 continue;
             }
-            // Query Root Node subordinate node count (param 0x04)
+            let vendor_id = self.send_immediate_verb(cad, 0, 0xF0000).unwrap_or(0);
+            if vendor_id != 0 {
+                self.codec_vendor_id = vendor_id;
+            }
             let sub = match self.send_immediate_verb(cad, 0, 0xF0004) {
                 Some(v) => v,
                 None => continue,
@@ -221,70 +428,195 @@ impl HdaController {
                 if (func_grp & 0xFF) != 0x01 {
                     continue;
                 }
-                // Power D0 on AFG (verb 0x705, data 0x00)
+                let subsys_id = self.send_immediate_verb(cad, afg, 0xF2000).unwrap_or(0);
+                if subsys_id != 0 {
+                    self.codec_subsys_id = subsys_id;
+                }
                 let _ = self.send_immediate_verb(cad, afg, 0x70500);
 
-                let widgets = self.send_immediate_verb(cad, afg, 0xF0004).unwrap_or(0);
-                let start_nid = ((widgets >> 16) & 0xFF) as u8;
-                let num_nids = (widgets & 0xFF) as u8;
-
-                let mut dac_configured = false;
-                let mut pin_configured = false;
-                for nid in start_nid..start_nid.saturating_add(num_nids) {
-                    let wcaps = self.send_immediate_verb(cad, nid, 0xF0009).unwrap_or(0);
-                    let wtype = (wcaps >> 20) & 0x0F;
-                    if wtype == 0x00 && !dac_configured {
-                        // Audio Output (DAC): power D0, bind stream 1 ch 0, set format 0x4011
-                        let _ = self.send_immediate_verb(cad, nid, 0x70500);
-                        let _ = self.send_immediate_verb(cad, nid, 0x70610);
-                        let _ = self.send_immediate_verb(cad, nid, 0x24011);
-                        let _ = self.send_immediate_verb(cad, nid, 0x3B07F); // unmute out amp L/R
-                        dac_configured = true;
-                    } else if wtype == 0x04 && !pin_configured {
-                        // Pin Complex (Line Out / Speaker / HP): power D0 + Pin Control OUT (0x40) + unmute
-                        let pincaps = self.send_immediate_verb(cad, nid, 0xF000C).unwrap_or(0);
-                        if (pincaps & (1 << 4)) != 0 {
-                            let _ = self.send_immediate_verb(cad, nid, 0x70500);
-                            let _ = self.send_immediate_verb(cad, nid, 0x70740);
-                            let _ = self.send_immediate_verb(cad, nid, 0x3B07F);
-                            pin_configured = true;
+                let is_apple = (subsys_id >> 16) == 0x106B
+                    || crate::drivers::platform::apple::ApplePlatformHardware::is_smc_present();
+                if vendor_id == 0x1013_4206 && is_apple {
+                    crate::arch::x86_64::pit::delay_ms(10);
+                    let verbs = build_cs4206_apple_init_verbs();
+                    for (idx, &(nid, verb)) in verbs.iter().enumerate() {
+                        let target_nid = if nid == 0x01 { afg } else { nid };
+                        let _ = self.send_immediate_verb(cad, target_nid, verb);
+                        // Allow speaker amplifier power rails (GPIO 0x0A) to settle before configuring DACs/Pins
+                        if idx == 3 {
+                            crate::arch::x86_64::pit::delay_ms(10);
                         }
                     }
-                    if dac_configured && pin_configured {
-                        return;
+                    self.sample_rate = 48000;
+                    self.stream_fmt = 0x0011;
+                    self.cs4206_apple_quirk = true;
+                    return;
+                }
+                let afg_pcm_caps = self.send_immediate_verb(cad, afg, 0xF000A).unwrap_or(0);
+                let afg_in_caps = self.send_immediate_verb(cad, afg, 0xF000D).unwrap_or(0);
+                let afg_out_caps = self.send_immediate_verb(cad, afg, 0xF0012).unwrap_or(0);
+
+                let widgets_resp = self.send_immediate_verb(cad, afg, 0xF0004).unwrap_or(0);
+                let start_nid = ((widgets_resp >> 16) & 0xFF) as u8;
+                let num_nids = (widgets_resp & 0xFF) as u8;
+
+                let mut widgets = Vec::with_capacity(num_nids as usize);
+                for nid in start_nid..start_nid.saturating_add(num_nids) {
+                    let wcaps = self.send_immediate_verb(cad, nid, 0xF0009).unwrap_or(0);
+                    let wtype = ((wcaps >> 20) & 0x0F) as u8;
+                    let pincaps = if wtype == 0x04 {
+                        self.send_immediate_verb(cad, nid, 0xF000C).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let def_cfg = if wtype == 0x04 {
+                        self.send_immediate_verb(cad, nid, 0xF1C00).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let conns = if (wcaps & (1 << 8)) != 0 || wtype == 0x04 || wtype == 0x02 || wtype == 0x03 {
+                        self.decode_connection_list(cad, nid)
+                    } else {
+                        Vec::new()
+                    };
+                    widgets.push(WidgetInfo { nid, wcaps, wtype, pincaps, def_cfg, conns });
+                }
+
+                // Collect valid analog output pins: prioritize Line Out (0x00), Speaker (0x01), HP Out (0x02).
+                let mut priority_pins = Vec::new();
+                let mut fallback_pins = Vec::new();
+                for (i, w) in widgets.iter().enumerate() {
+                    if w.wtype != 0x04 || (w.pincaps & (1 << 4)) == 0 || (w.wcaps & (1 << 9)) != 0 {
+                        continue;
                     }
+                    let port_conn = (w.def_cfg >> 30) & 0x03;
+                    if port_conn == 1 {
+                        continue; // Jack has no physical connection
+                    }
+                    let dev = ((w.def_cfg >> 20) & 0x0F) as u8;
+                    if dev == 0x00 || dev == 0x01 || dev == 0x02 {
+                        priority_pins.push(i);
+                    } else {
+                        fallback_pins.push(i);
+                    }
+                }
+                let chosen_pins = if !priority_pins.is_empty() { priority_pins } else { fallback_pins };
+                if chosen_pins.is_empty() {
+                    continue;
+                }
+
+                let find_idx = |nid: u8| -> Option<usize> {
+                    widgets.iter().position(|w| w.nid == nid)
+                };
+
+                let mut configured_any = false;
+                for pin_wi in chosen_pins {
+                    // BFS upstream from output pin to nearest non-digital Audio Output DAC (wtype == 0x00).
+                    let mut queue: Vec<(usize, Vec<(usize, usize)>)> = Vec::new();
+                    let mut visited = alloc::vec![false; widgets.len()];
+                    visited[pin_wi] = true;
+                    queue.push((pin_wi, Vec::new()));
+                    let mut found_path: Option<(usize, Vec<(usize, usize)>)> = None;
+                    let mut head = 0usize;
+                    while head < queue.len() && found_path.is_none() {
+                        let (cur_wi, path) = (queue[head].0, queue[head].1.clone());
+                        head += 1;
+                        if path.len() >= 6 {
+                            continue;
+                        }
+                        for (conn_idx, &src_nid) in widgets[cur_wi].conns.iter().enumerate() {
+                            let Some(src_wi) = find_idx(src_nid) else { continue };
+                            if (widgets[src_wi].wcaps & (1 << 9)) != 0 {
+                                continue;
+                            }
+                            let mut next_path = path.clone();
+                            next_path.push((cur_wi, conn_idx));
+                            if widgets[src_wi].wtype == 0x00 {
+                                found_path = Some((src_wi, next_path));
+                                break;
+                            }
+                            if !visited[src_wi] {
+                                visited[src_wi] = true;
+                                queue.push((src_wi, next_path));
+                            }
+                        }
+                    }
+
+                    let Some((dac_wi, hops)) = found_path else { continue };
+                    let dac = &widgets[dac_wi];
+                    let dac_pcm_caps = if (dac.wcaps & (1 << 10)) != 0 {
+                        self.send_immediate_verb(cad, dac.nid, 0xF000A).unwrap_or(afg_pcm_caps)
+                    } else {
+                        afg_pcm_caps
+                    };
+                    if let Some((sr, fmt)) = Self::select_pcm_format(dac_pcm_caps) {
+                        self.sample_rate = sr;
+                        self.stream_fmt = fmt;
+                    } else if let Some((sr, fmt)) = Self::select_pcm_format(afg_pcm_caps) {
+                        self.sample_rate = sr;
+                        self.stream_fmt = fmt;
+                    }
+
+                    // Power D0 + configure DAC
+                    let _ = self.send_immediate_verb(cad, dac.nid, 0x70500);
+                    let _ = self.send_immediate_verb(cad, dac.nid, 0x70610);
+                    let _ = self.send_immediate_verb(cad, dac.nid, 0x20000 | (self.stream_fmt as u32));
+                    self.unmute_output_amp(cad, dac.nid, dac.wcaps, afg_out_caps);
+
+                    // Configure intermediate widgets & Pin along discovered upstream path
+                    for &(dst_wi, conn_idx) in hops.iter().rev() {
+                        let w = &widgets[dst_wi];
+                        let _ = self.send_immediate_verb(cad, w.nid, 0x70500);
+                        if w.conns.len() > 1 && (w.wtype == 0x03 || w.wtype == 0x04) {
+                            let _ = self.send_immediate_verb(cad, w.nid, 0x70100 | (conn_idx as u32 & 0xFF));
+                        }
+                        if w.wtype == 0x02 {
+                            self.unmute_input_amp(cad, w.nid, conn_idx, w.wcaps, afg_in_caps);
+                        }
+                        self.unmute_output_amp(cad, w.nid, w.wcaps, afg_out_caps);
+                    }
+
+                    let pin = &widgets[pin_wi];
+                    let pin_ctl = if (pin.pincaps & (1 << 3)) != 0 { 0x707C0 } else { 0x70740 };
+                    let _ = self.send_immediate_verb(cad, pin.nid, pin_ctl);
+                    if (pin.pincaps & (1 << 16)) != 0 {
+                        let _ = self.send_immediate_verb(cad, pin.nid, 0x70C02);
+                    }
+                    configured_any = true;
+                }
+
+                if configured_any {
+                    return;
                 }
             }
         }
     }
 
     unsafe fn reset_output_stream(&self, sd_base: u64) {
-        let sd_ctl_ptr = (sd_base + SD_CTL) as *mut u32;
         let sd_sts_ptr = (sd_base + SD_STS) as *mut u8;
 
         // Clear RUN bit and wait for engine halt
-        let mut ctl = read_volatile(sd_ctl_ptr);
-        ctl &= !SD_CTL_RUN;
-        write_volatile(sd_ctl_ptr, ctl);
+        let ctl = self.read_sd_ctl24(sd_base) & !SD_CTL_RUN;
+        self.write_sd_ctl24(sd_base, ctl);
         let mut timeout = 10_000;
-        while (read_volatile(sd_ctl_ptr) & SD_CTL_RUN) != 0 && timeout > 0 {
+        while (self.read_sd_ctl24(sd_base) & SD_CTL_RUN) != 0 && timeout > 0 {
             core::hint::spin_loop();
             timeout -= 1;
         }
 
         // Assert Stream Reset (SRST = 1), wait for SRST latch, then deassert
-        ctl = read_volatile(sd_ctl_ptr) | SD_CTL_SRST;
-        write_volatile(sd_ctl_ptr, ctl);
+        let srst_ctl = self.read_sd_ctl24(sd_base) | SD_CTL_SRST;
+        self.write_sd_ctl24(sd_base, srst_ctl);
         timeout = 10_000;
-        while (read_volatile(sd_ctl_ptr) & SD_CTL_SRST) == 0 && timeout > 0 {
+        while (self.read_sd_ctl24(sd_base) & SD_CTL_SRST) == 0 && timeout > 0 {
             core::hint::spin_loop();
             timeout -= 1;
         }
 
-        ctl = read_volatile(sd_ctl_ptr) & !SD_CTL_SRST;
-        write_volatile(sd_ctl_ptr, ctl);
+        let clear_srst = self.read_sd_ctl24(sd_base) & !SD_CTL_SRST;
+        self.write_sd_ctl24(sd_base, clear_srst);
         timeout = 10_000;
-        while (read_volatile(sd_ctl_ptr) & SD_CTL_SRST) != 0 && timeout > 0 {
+        while (self.read_sd_ctl24(sd_base) & SD_CTL_SRST) != 0 && timeout > 0 {
             core::hint::spin_loop();
             timeout -= 1;
         }
@@ -294,7 +626,6 @@ impl HdaController {
     }
 
     unsafe fn program_output_stream(&self, sd_base: u64, cbl_bytes: u32, lvi: u16) {
-        let sd_ctl_ptr = (sd_base + SD_CTL) as *mut u32;
         let sd_bdlpl_ptr = (sd_base + SD_BDLPL) as *mut u32;
         let sd_bdlpu_ptr = (sd_base + SD_BDLPU) as *mut u32;
         let sd_cbl_ptr = (sd_base + SD_CBL) as *mut u32;
@@ -307,14 +638,14 @@ impl HdaController {
         write_volatile(sd_bdlpl_ptr, bdl_low);
         write_volatile(sd_bdlpu_ptr, bdl_high);
 
-        // Cyclic Buffer Length, Last Valid Index, Format (44.1kHz, 16-bit, stereo = 0x4011)
+        // Cyclic Buffer Length, Last Valid Index, Negotiated Format (44.1kHz or 48kHz, 16-bit, stereo)
         write_volatile(sd_cbl_ptr, cbl_bytes);
         write_volatile(sd_lvi_ptr, lvi);
-        write_volatile(sd_fmt_ptr, 0x4011);
+        write_volatile(sd_fmt_ptr, self.stream_fmt);
 
         // Assign Stream Number = 1 (bits 23:20)
-        let ctl = (read_volatile(sd_ctl_ptr) & !(0x0F << SD_CTL_STRM_SHIFT)) | (1 << SD_CTL_STRM_SHIFT);
-        write_volatile(sd_ctl_ptr, ctl);
+        let ctl = (self.read_sd_ctl24(sd_base) & !(0x0F << SD_CTL_STRM_SHIFT)) | (1 << SD_CTL_STRM_SHIFT);
+        self.write_sd_ctl24(sd_base, ctl);
     }
 
     unsafe fn init_hardware(&mut self) -> Result<(), &'static str> {
@@ -339,13 +670,15 @@ impl HdaController {
             return Err("Intel HDA controller failed to exit CRST reset");
         }
 
-        // Allow codecs brief time to assert STATESTS frame wakeup
-        for _ in 0..2_000 {
-            core::hint::spin_loop();
-        }
+        // Allow codecs >= 521 us per Intel HDA Spec Section 4.3 to assert STATESTS frame wakeup
+        crate::arch::x86_64::pit::delay_us(1000);
 
-        // 3. Read GCAP to determine number of input/output stream descriptors
+        // 3. Read GCAP to determine 64-bit DMA support (bit 0 = 64OK) and stream counts
         let gcap = read_volatile((self.mmio_base + REG_GCAP) as *const u16);
+        let has_64ok = (gcap & 0x0001) != 0;
+        if !has_64ok && ((self.dma_ring.bdl_phys >> 32) != 0 || (self.dma_ring.pcm_phys >> 32) != 0) {
+            return Err("Intel HDA controller lacks 64OK support for >=4GiB DMA frame");
+        }
         self.num_iss = ((gcap >> 8) & 0x0F) as u8;
         self.num_oss = ((gcap >> 12) & 0x0F) as u8;
         if self.num_oss == 0 {
@@ -355,8 +688,8 @@ impl HdaController {
         // Output streams begin immediately after input streams: offset 0x80 + (num_iss * 0x20)
         self.output_stream_base = self.mmio_base + 0x80 + (self.num_iss as u64 * 0x20);
 
-        // 4. Configure DAC / Pin codec routing if an HDA codec responded
-        self.configure_first_codec();
+        // 4. Configure DAC / Mixer / Selector / Pin codec routing if an HDA codec responded
+        self.configure_codecs();
 
         // 5. Reset Output Stream 0 and program real BDL physical DMA ring descriptors
         let sd_base = self.output_stream_base;
@@ -366,13 +699,16 @@ impl HdaController {
         self.is_ready = true;
         let (bdl_lo, bdl_hi) = self.read_bdl_registers();
         kinfo!(
-            "Intel HDA Hardware DMA Ring active (BAR0: 0x{:X}, Streams: {} In/{} Out, BDL: 0x{:08X}_{:08X}, PCM: 0x{:X})",
-            self.mmio_base,
+            "Intel HDA Hardware DMA Ring active (Codec: 0x{:08X}, Subsys: 0x{:08X}, CS4206-Apple: {}, Rate: {} Hz, 64OK: {}, Streams: {} In/{} Out, BDL: 0x{:08X}_{:08X})",
+            self.codec_vendor_id,
+            self.codec_subsys_id,
+            self.cs4206_apple_quirk,
+            self.sample_rate,
+            has_64ok,
             self.num_iss,
             self.num_oss,
             bdl_hi,
-            bdl_lo,
-            self.dma_ring.pcm_phys
+            bdl_lo
         );
 
         Ok(())
@@ -389,17 +725,7 @@ impl HdaController {
         let sd_base = self.output_stream_base;
 
         unsafe {
-            // Stop previous transfer cleanly before rewriting PCM ring descriptors
-            let sd_ctl_ptr = (sd_base + SD_CTL) as *mut u32;
-            let ctl = read_volatile(sd_ctl_ptr);
-            if (ctl & SD_CTL_RUN) != 0 {
-                write_volatile(sd_ctl_ptr, ctl & !SD_CTL_RUN);
-                let mut timeout = 5_000;
-                while (read_volatile(sd_ctl_ptr) & SD_CTL_RUN) != 0 && timeout > 0 {
-                    core::hint::spin_loop();
-                    timeout -= 1;
-                }
-            }
+            self.reset_output_stream(sd_base);
 
             // Copy up to HDA_RING_BYTES of 16-bit PCM samples into physical DMA memory; zero remainder
             let max_i16 = HDA_RING_BYTES / 2;
@@ -417,9 +743,8 @@ impl HdaController {
 
             // Start asynchronous autonomous hardware DMA (Stream 1 + IOCE + RUN); CPU returns immediately!
             let active_ctl = (1 << SD_CTL_STRM_SHIFT) | SD_CTL_IOCE | SD_CTL_RUN;
-            write_volatile(sd_ctl_ptr, active_ctl);
-            // Read back to flush posted PCIe MMIO write buffer
-            let _ = read_volatile(sd_ctl_ptr);
+            self.write_sd_ctl24(sd_base, active_ctl);
+            let _ = self.read_sd_ctl24(sd_base);
         }
     }
 
@@ -429,10 +754,26 @@ impl HdaController {
         }
         let _guard = self.stream_lock.lock();
         unsafe {
-            let sd_ctl_ptr = (self.output_stream_base + SD_CTL) as *mut u32;
-            write_volatile(sd_ctl_ptr, read_volatile(sd_ctl_ptr) & !SD_CTL_RUN);
-            let _ = read_volatile(sd_ctl_ptr);
+            let ctl = self.read_sd_ctl24(self.output_stream_base) & !SD_CTL_RUN;
+            self.write_sd_ctl24(self.output_stream_base, ctl);
+            let _ = self.read_sd_ctl24(self.output_stream_base);
         }
+    }
+
+    /// Non-blocking stop for IRQ context: clears SD_CTL.RUN without spin-wait or blocking lock acquire.
+    pub fn try_stop_stream(&self) -> bool {
+        if !self.is_ready {
+            return false;
+        }
+        let Some(_guard) = self.stream_lock.try_lock() else {
+            return false;
+        };
+        unsafe {
+            let ctl = self.read_sd_ctl24(self.output_stream_base) & !SD_CTL_RUN;
+            self.write_sd_ctl24(self.output_stream_base, ctl);
+            let _ = self.read_sd_ctl24(self.output_stream_base);
+        }
+        true
     }
 
     pub fn is_stream_running(&self) -> bool {
@@ -440,7 +781,7 @@ impl HdaController {
             return false;
         }
         for _ in 0..5_000 {
-            if unsafe { (read_volatile((self.output_stream_base + SD_CTL) as *const u32) & SD_CTL_RUN) != 0 } {
+            if unsafe { (self.read_sd_ctl24(self.output_stream_base) & SD_CTL_RUN) != 0 } {
                 return true;
             }
             core::hint::spin_loop();
@@ -455,6 +796,67 @@ impl HdaController {
         unsafe { read_volatile((self.output_stream_base + SD_LPIB) as *const u32) }
     }
 
+    pub fn is_running_fast(&self) -> bool {
+        if !self.is_ready {
+            return false;
+        }
+        unsafe { (self.read_sd_ctl24(self.output_stream_base) & SD_CTL_RUN) != 0 }
+    }
+
+    /// Write raw interleaved PCM bytes into the cyclic hardware DMA ring at byte `ring_offset`.
+    pub fn write_ring_bytes(&self, ring_offset: usize, data: &[u8]) {
+        if !self.is_ready || data.is_empty() {
+            return;
+        }
+        let ring = self.dma_ring.ring_bytes;
+        let off = ring_offset % ring;
+        let first = data.len().min(ring - off);
+        unsafe {
+            let dst = self.dma_ring.pcm_virt as *mut u8;
+            core::ptr::copy_nonoverlapping(data.as_ptr(), dst.add(off), first);
+            if first < data.len() {
+                let rem = (data.len() - first).min(ring);
+                core::ptr::copy_nonoverlapping(data.as_ptr().add(first), dst, rem);
+            }
+            fence(Ordering::SeqCst);
+        }
+    }
+
+    /// Zero a byte range `[ring_offset .. ring_offset + len)` inside the cyclic DMA ring.
+    pub fn zero_ring_bytes(&self, ring_offset: usize, len: usize) {
+        if !self.is_ready || len == 0 {
+            return;
+        }
+        let ring = self.dma_ring.ring_bytes;
+        let off = ring_offset % ring;
+        let clamped = len.min(ring);
+        let first = clamped.min(ring - off);
+        unsafe {
+            let dst = self.dma_ring.pcm_virt as *mut u8;
+            core::ptr::write_bytes(dst.add(off), 0, first);
+            if first < clamped {
+                core::ptr::write_bytes(dst, 0, clamped - first);
+            }
+            fence(Ordering::SeqCst);
+        }
+    }
+
+    /// Reset output stream (clearing LPIB to 0) and arm Intel HDA DMA ring continuously.
+    pub fn ensure_ring_running(&self) {
+        if !self.is_ready || self.is_running_fast() {
+            return;
+        }
+        let _guard = self.stream_lock.lock();
+        let sd_base = self.output_stream_base;
+        unsafe {
+            self.reset_output_stream(sd_base);
+            self.program_output_stream(sd_base, HDA_RING_BYTES as u32, (HDA_BDL_ENTRIES - 1) as u16);
+            let active_ctl = (1 << SD_CTL_STRM_SHIFT) | SD_CTL_IOCE | SD_CTL_RUN;
+            self.write_sd_ctl24(sd_base, active_ctl);
+            let _ = self.read_sd_ctl24(sd_base);
+        }
+    }
+
     pub fn read_bdl_registers(&self) -> (u32, u32) {
         if self.output_stream_base == 0 {
             return (0, 0);
@@ -463,6 +865,19 @@ impl HdaController {
             let low = read_volatile((self.output_stream_base + SD_BDLPL) as *const u32);
             let high = read_volatile((self.output_stream_base + SD_BDLPU) as *const u32);
             (low, high)
+        }
+    }
+
+    /// Return `(sd_ctl24, sd_sts, sd_lpib)` for bare-metal DMA stream health diagnostics.
+    pub fn debug_stream_snapshot(&self) -> (u32, u8, u32) {
+        if !self.is_ready || self.output_stream_base == 0 {
+            return (0, 0, 0);
+        }
+        unsafe {
+            let ctl = self.read_sd_ctl24(self.output_stream_base);
+            let sts = read_volatile((self.output_stream_base + SD_STS) as *const u8);
+            let lpib = read_volatile((self.output_stream_base + SD_LPIB) as *const u32);
+            (ctl, sts, lpib)
         }
     }
 }

@@ -36,6 +36,26 @@ pub fn init() {
     kinfo!("Network Subsystem online (lo0, en0, wlan0 ready)");
 }
 
+static LAST_NET_POLL_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Throttled background network polling helper (safe in GUI/shell loops at <= 40 Hz; NOT in IRQ context).
+pub fn poll_periodic() {
+    let now = crate::arch::x86_64::pit::get_ticks();
+    let prev = LAST_NET_POLL_TICK.load(core::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(prev) >= 25
+        && LAST_NET_POLL_TICK
+            .compare_exchange(
+                prev,
+                now,
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+    {
+        poll();
+    }
+}
+
 /// Poll all active network interfaces for incoming packets and dispatch to protocol handlers.
 pub fn poll() {
     let net = NET_MANAGER.lock();

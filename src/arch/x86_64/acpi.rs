@@ -76,6 +76,85 @@ pub fn map_acpi_phys(phys_addr: u64, size: usize) -> Option<u64> {
     }
 }
 
+/// Extract a 6-byte IEEE MAC address from the two 32-bit little-endian PCIe Device Serial Number
+/// words (`+0x04` lower DWORD, `+0x08` upper DWORD), matching Broadcom/Apple DSN layout.
+#[inline]
+pub fn extract_dsn_mac(dsn_lo: u32, dsn_hi: u32) -> [u8; 6] {
+    let lo = dsn_lo.to_le_bytes();
+    let hi = dsn_hi.to_le_bytes();
+    [lo[1], lo[0], hi[1], lo[2], hi[3], hi[2]]
+}
+
+/// Locate the PCIe Extended Capability `cap_id` via ACPI MCFG ECAM (segment 0) and read
+/// 64-bit Device Serial Number MAC (`cap_id = 0x0003`) for `(bus, device, function)`.
+pub fn read_pcie_ecam_mac_dsn(bus: u8, device: u8, function: u8) -> Option<[u8; 6]> {
+    let mcfg_phys = ACPI.lock().mcfg_addr;
+    if mcfg_phys == 0 {
+        return None;
+    }
+    let hdr_virt = map_acpi_phys(mcfg_phys, 64)?;
+    let table_len = unsafe { core::ptr::read_unaligned((hdr_virt + 4) as *const u32) } as usize;
+    if table_len < 60 || table_len > 4096 {
+        return None;
+    }
+    let mcfg_virt = if table_len > 64 {
+        map_acpi_phys(mcfg_phys, table_len)?
+    } else {
+        hdr_virt
+    };
+    let table_ptr = mcfg_virt as *const u8;
+    if !validate_checksum(table_ptr, table_len) {
+        return None;
+    }
+
+    // MCFG header is 36B SDT + 8B reserved = 44B, followed by 16B allocation descriptors
+    let mut ecam_base = 0u64;
+    let mut off = 44usize;
+    while off + 16 <= table_len {
+        let base_addr = unsafe { core::ptr::read_unaligned(table_ptr.add(off) as *const u64) };
+        let seg = unsafe { core::ptr::read_unaligned(table_ptr.add(off + 8) as *const u16) };
+        let start_bus = unsafe { *table_ptr.add(off + 10) };
+        let end_bus = unsafe { *table_ptr.add(off + 11) };
+        if seg == 0 && bus >= start_bus && bus <= end_bus && base_addr != 0 {
+            let rel_bus = (bus - start_bus) as u64;
+            ecam_base = base_addr + ((rel_bus << 20) | ((device as u64) << 15) | ((function as u64) << 12));
+            break;
+        }
+        off += 16;
+    }
+    if ecam_base == 0 {
+        return None;
+    }
+
+    let cfg_virt = map_mmio_range(ecam_base, 4096).ok()?;
+    let mut cap_off = 0x100usize;
+    for _ in 0..32 {
+        if cap_off < 0x100 || cap_off + 12 > 0x1000 {
+            break;
+        }
+        let hdr = unsafe { core::ptr::read_volatile((cfg_virt + cap_off as u64) as *const u32) };
+        if hdr == 0 || hdr == 0xFFFF_FFFF {
+            break;
+        }
+        let cap_id = (hdr & 0xFFFF) as u16;
+        if cap_id == 0x0003 {
+            let dsn_lo = unsafe { core::ptr::read_volatile((cfg_virt + cap_off as u64 + 4) as *const u32) };
+            let dsn_hi = unsafe { core::ptr::read_volatile((cfg_virt + cap_off as u64 + 8) as *const u32) };
+            let mac = extract_dsn_mac(dsn_lo, dsn_hi);
+            if mac != [0; 6] && mac != [0xFF; 6] && (mac[0] & 0x01) == 0 {
+                return Some(mac);
+            }
+            return None;
+        }
+        let next = ((hdr >> 20) & 0xFFC) as usize;
+        if next == 0 || next == cap_off {
+            break;
+        }
+        cap_off = next;
+    }
+    None
+}
+
 fn validate_checksum(ptr: *const u8, len: usize) -> bool {
     if len == 0 {
         return false;

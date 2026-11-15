@@ -2,7 +2,7 @@ use alloc::format;
 use crate::drivers::platform::smbios::get_hardware_telemetry;
 use crate::gui::canvas::Canvas;
 use crate::gui::color::Color;
-use crate::gui::font::{draw_string, draw_string_bold, draw_string_ellipsis};
+use crate::gui::font::{draw_ui_string, draw_ui_string_ellipsis, draw_ui_string_sized};
 
 pub struct AboutApp;
 
@@ -12,54 +12,64 @@ impl AboutApp {
     }
 
     pub fn render(&self, canvas: &mut Canvas, x: i32, y: i32, w: i32, h: i32) {
-        canvas.fill_rect(x, y, w, h, Color::XP_FACE);
+        let theme = libgui::gfx::current_theme();
+        canvas.fill_rect(x, y, w, h, Color::from_libgui(theme.face));
 
-        // 1. Top Classic Blue SublimeOS Banner
-        let banner_h = 66;
-        canvas.draw_gradient_h(x, y, w, banner_h, Color::XP_TITLE_TOP, Color::rgb(78, 152, 245));
-        canvas.fill_rect(x, y + banner_h, w, 3, Color::XP_ORANGE_GLOW);
+        // 1. Flat Metro Header Banner (Material You / Win8.1 contrast-aware foreground)
+        let banner_h = 68;
+        canvas.fill_rect(x, y, w, banner_h, Color::from_libgui(theme.title_top));
+        let banner_fg = Color::from_libgui(libgui::gfx::contrast_text_on(theme.title_top));
+        let banner_sub = Color::lerp(banner_fg, Color::from_libgui(theme.title_top), 55);
 
-        // SublimeOS 4-diamond prism emblem in banner
+        // SublimeOS Prismatic 'S' emblem in banner
         let ex = x + 18;
-        let ey = y + 16;
-        canvas.fill_rounded_rect(ex, ey, 34, 34, 6, Color::argb(0x33, 255, 255, 255));
-        canvas.fill_rect(ex + 6, ey + 6, 10, 10, Color::rgb(125, 225, 255));
-        canvas.fill_rect(ex + 18, ey + 6, 10, 10, Color::WHITE);
-        canvas.fill_rect(ex + 6, ey + 18, 10, 10, Color::rgb(110, 245, 165));
-        canvas.fill_rect(ex + 18, ey + 18, 10, 10, Color::rgb(255, 210, 95));
+        let ey = y + 17;
+        canvas.fill_rect(ex, ey, 34, 34, Color::argb(38, 255, 255, 255));
+        crate::gui::desktop::draw_sublime_logo(
+            canvas,
+            ex + 4,
+            ey + 4,
+            26,
+            banner_fg,
+            Color::rgb(96, 205, 255),
+        );
 
-        draw_string_bold(canvas, x + 64, y + 15, "SublimeOS", Color::WHITE);
-        draw_string_ellipsis(
+        draw_ui_string_sized(canvas, x + 64, y + 12, 20, true, "SublimeOS", banner_fg);
+        draw_ui_string_ellipsis(
             canvas,
             x + 64,
-            y + 36,
-            "Desktop Workstation Edition 1.0 (KiteKernel)",
-            Color::rgb(218, 236, 255),
+            y + 39,
+            "Modern Desktop Workstation 1.0 (KiteKernel)",
+            banner_sub,
             w - 76,
         );
 
-        // 2. White Information Card
+        // 2. Clean Flat White Information Card
         let card_x = x + 16;
         let card_y = y + banner_h + 14;
         let card_w = (w - 32).max(180);
         let card_h = (h - banner_h - 30).max(120);
-        canvas.fill_rect(card_x, card_y, card_w, card_h, Color::WHITE);
-        canvas.draw_rect(card_x, card_y, card_w, card_h, Color::XP_SHADOW);
+        canvas.fill_rect(card_x, card_y, card_w, card_h, Color::from_libgui(theme.face_light));
+        canvas.draw_rect(card_x, card_y, card_w, card_h, Color::from_libgui(theme.border_shadow));
 
         let hw = get_hardware_telemetry();
         let gfx = crate::drivers::vbe::VBE.lock();
         let gfx_desc = format!("UEFI GOP {}x{} @ {}bpp", gfx.width, gfx.height, gfx.bpp);
         drop(gfx);
 
+        let fg = Color::from_libgui(theme.text_primary);
+        let sub = Color::from_libgui(theme.text_secondary);
+        let lnk = Color::from_libgui(theme.text_link);
+
         let rows: [(&str, &str, Color); 8] = [
-            ("OS Version:  ", "SublimeOS 1.0.0 (Build 100.2026)", Color::XP_TEXT_BLACK),
-            ("Architecture:", "x86_64 SMP + APIC + KiteKernel", Color::XP_TEXT_BLACK),
-            ("Processor:   ", &hw.chip, Color::XP_TEXT_BLACK),
-            ("Cores:       ", &hw.cores_threads, Color::XP_TEXT_BLACK),
-            ("Memory:      ", &hw.memory_summary, Color::XP_TEXT_BLACK),
-            ("Graphics:    ", gfx_desc.as_str(), Color::XP_TEXT_LINK),
-            ("Hardware:    ", &hw.model_name, Color::XP_TEXT_GRAY),
-            ("Firmware:    ", &hw.system_firmware, Color::XP_TEXT_GRAY),
+            ("OS Version:  ", "SublimeOS 1.0.0 (Build 100.2026)", fg),
+            ("Architecture:", "x86_64 SMP + APIC + KiteKernel", fg),
+            ("Processor:   ", &hw.chip, fg),
+            ("Cores:       ", &hw.cores_threads, fg),
+            ("Memory:      ", &hw.memory_summary, fg),
+            ("Graphics:    ", gfx_desc.as_str(), lnk),
+            ("Hardware:    ", &hw.model_name, sub),
+            ("Firmware:    ", &hw.system_firmware, sub),
         ];
 
         let tx = card_x + 12;
@@ -69,17 +79,17 @@ impl AboutApp {
             if cy + 16 > card_y + card_h - 24 {
                 break;
             }
-            draw_string(canvas, tx, cy, label, Color::XP_TEXT_GRAY);
-            draw_string_ellipsis(canvas, tx + 106, cy, val, *col, max_val_w);
+            draw_ui_string(canvas, tx, cy, label, sub);
+            draw_ui_string_ellipsis(canvas, tx + 106, cy, val, *col, max_val_w);
             cy += 21;
         }
 
-        draw_string_ellipsis(
+        draw_ui_string_ellipsis(
             canvas,
             tx,
             card_y + card_h - 22,
             "Copyright (C) 2026 Nader Mahbub Khan. All rights reserved.",
-            Color::XP_TEXT_GRAY,
+            sub,
             card_w - 24,
         );
     }

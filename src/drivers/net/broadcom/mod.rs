@@ -4,6 +4,7 @@
 //! - [`b43`]: Broadcom BCM4331 Dual-Band 802.11n Wireless (`14E4:4331`) via BCMA & b43 microcode
 
 pub mod b43;
+pub mod b43_phy_ht;
 pub mod tg3;
 
 pub const BROADCOM_PCI_VENDOR: u16 = 0x14E4;

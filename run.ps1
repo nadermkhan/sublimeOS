@@ -1,7 +1,9 @@
 param(
     [switch]$Headless,
     [switch]$Graphic,
-    [switch]$Debug
+    [switch]$Debug,
+    [ValidateSet("none", "dsound", "sdl", "wav")]
+    [string]$AudioBackend = "none"
 )
 
 $qemu = "C:\msys64\mingw64\bin\qemu-system-x86_64.exe"
@@ -22,7 +24,9 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host "        Launching SublimeOS in QEMU           " -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-$qemuArgs = @("-kernel", $kernelElf, "-m", "128M", "-audiodev", "none,id=snd0", "-device", "intel-hda", "-device", "hda-duplex,audiodev=snd0")
+$selectedAudio = if ($Headless) { "none" } else { $AudioBackend }
+$audiodevArg = if ($selectedAudio -eq "wav") { "wav,id=snd0,path=qemu_audio.wav" } else { "$selectedAudio,id=snd0" }
+$qemuArgs = @("-kernel", $kernelElf, "-m", "128M", "-audiodev", $audiodevArg, "-device", "intel-hda", "-device", "hda-duplex,audiodev=snd0")
 
 if ($Headless) {
     Write-Host "Starting QEMU in headless terminal mode (COM1 serial stdio)..." -ForegroundColor Green

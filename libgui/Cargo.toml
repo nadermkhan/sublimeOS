@@ -1,0 +1,6 @@
+[package]
+name = "libgui"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nader Mahbub Khan <muhammadnadermahbubkhan@gmail.com>"]
+description = "SublimeOS shared no_std 2D graphics, TinyTTF font engine, layout, widgets, and compositor IPC"

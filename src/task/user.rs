@@ -150,12 +150,114 @@ pub fn spawn_user_process(data: &[u8], args: &[&str], wait: bool) -> Result<i32,
     let ppid = crate::task::process::get_current_pid();
     let proc_name = args.first().copied().unwrap_or("user_bin");
     let pid = crate::task::process::alloc_process_with_space(proc_name, ppid, address_space);
+    if !wait {
+        crate::task::process::mark_detached(pid);
+    }
     crate::task::scheduler::spawn_user_thread(pid, proc_name, pml4_phys, user_rip, user_rsp);
 
     if wait {
         Ok(crate::task::process::wait_for_child_exit(pid))
     } else {
         Ok(pid as i32)
+    }
+}
+
+/// Run an ELF64 CLI binary in Ring 3 while capturing its `stdout`/`stderr` through a kernel pipe.
+pub fn spawn_user_binary_capture(
+    data: &[u8],
+    args: &[&str],
+    cwd: &str,
+    timeout_ms: u64,
+) -> Result<(i32, alloc::string::String), &'static str> {
+    let elf = ElfBinary::parse(data)?;
+    let mut address_space = AddressSpace::new().ok_or("Failed to create user process address space")?;
+    let envs = [
+        "PATH=/usr/local/bin:/bin",
+        "HOME=/Users/sublime",
+        "USER=sublime",
+        "OS=SublimeOS",
+        "DISPLAY=/run/wm.sock",
+    ];
+    let (user_rip, user_rsp) = elf.load_into_address_space_with_args_env(&mut address_space, args, &envs)?;
+
+    if crate::user::linker::DynamicLinker::is_dynamic(&elf) {
+        let mut linker = crate::user::linker::DynamicLinker::new();
+        linker.link_binary(&elf, &mut address_space)?;
+    }
+
+    let (pipe_r, pipe_w) = crate::ipc::pipe::create_pipe();
+    let read_file = alloc::sync::Arc::new(crate::fs::vfs::File::new(pipe_r, 0));
+    let write_file = alloc::sync::Arc::new(crate::fs::vfs::File::new(pipe_w, 0));
+
+    let pml4_phys = address_space.pml4_phys;
+    let ppid = crate::task::process::get_current_pid();
+    let proc_name = args
+        .first()
+        .copied()
+        .unwrap_or("user_bin")
+        .rsplit('/')
+        .next()
+        .unwrap_or("user_bin");
+    let pid = crate::task::process::alloc_process_with_space(proc_name, ppid, address_space);
+    if let Some(proc) = crate::task::process::get_process(pid) {
+        let mut p = proc.lock();
+        p.cwd = alloc::string::String::from(cwd);
+        while p.fd_table.len() < 3 {
+            p.fd_table.push(None);
+        }
+        p.fd_table[1] = Some(write_file.clone());
+        p.fd_table[2] = Some(write_file);
+    }
+    crate::task::scheduler::spawn_user_thread(pid, proc_name, pml4_phys, user_rip, user_rsp);
+
+    let start_tick = crate::arch::x86_64::pit::get_ticks();
+    let mut out = alloc::vec::Vec::new();
+    let mut chunk = [0u8; 512];
+    let mut exit_code: Option<i32> = None;
+
+    loop {
+        while let Ok(n) = read_file.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            if out.len() < 32768 {
+                out.extend_from_slice(&chunk[..n]);
+            }
+        }
+
+        if exit_code.is_none() {
+            if let Some(proc) = crate::task::process::get_process(pid) {
+                let p = proc.lock();
+                if let crate::task::process::ProcessState::Zombie(c) = p.state {
+                    exit_code = Some(c);
+                }
+            } else {
+                exit_code = Some(0);
+            }
+        }
+
+        if let Some(code) = exit_code {
+            while let Ok(n) = read_file.read(&mut chunk) {
+                if n == 0 || out.len() >= 32768 {
+                    break;
+                }
+                out.extend_from_slice(&chunk[..n]);
+            }
+            crate::task::process::mark_detached(pid);
+            crate::task::process::reap_detached_zombies();
+            let s = alloc::string::String::from_utf8_lossy(&out).into_owned();
+            return Ok((code, s));
+        }
+
+        if crate::arch::x86_64::pit::get_ticks().saturating_sub(start_tick) >= timeout_ms {
+            crate::task::process::mark_detached(pid);
+            let _ = crate::task::process::sys_kill(pid as i32, 9);
+            crate::task::process::reap_detached_zombies();
+            let s = alloc::string::String::from_utf8_lossy(&out).into_owned();
+            return Ok((-1, s));
+        }
+
+        crate::task::scheduler::sleep_ms(5);
     }
 }
 

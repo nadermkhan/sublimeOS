@@ -373,7 +373,7 @@ pub fn map_mmio_range(phys_addr: u64, size: usize) -> Result<u64, &'static str> 
 
     let vmm = VMM.lock();
     let kernel_pml4 = vmm.get_kernel_pml4();
-    let flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_NO_CACHE;
+    let flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_NO_CACHE | PAGE_WRITE_THROUGH;
 
     for i in 0..pages {
         let p = phys_aligned + (i as u64 * 4096);

@@ -62,6 +62,78 @@ impl ShmObject {
         self.size = new_size;
         Ok(())
     }
+
+    /// Blit ARGB32 (`0x00RRGGBB` / `0xAARRGGBB`) pixels directly from this SHM
+    /// object's physical frames into a destination pixel buffer with clipping.
+    pub fn blit_argb_to_canvas(
+        &self,
+        src_w: i32,
+        src_h: i32,
+        dst: &mut [u32],
+        dst_w: i32,
+        dst_h: i32,
+        dst_x: i32,
+        dst_y: i32,
+        clip: (i32, i32, i32, i32),
+    ) {
+        if src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 || self.size < 4 {
+            return;
+        }
+        let (cx0, cy0, cw, ch) = clip;
+        if cw <= 0 || ch <= 0 {
+            return;
+        }
+        let x0 = dst_x.max(cx0).max(0);
+        let y0 = dst_y.max(cy0).max(0);
+        let x1 = (dst_x + src_w).min(cx0 + cw).min(dst_w);
+        let y1 = (dst_y + src_h).min(cy0 + ch).min(dst_h);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        let max_src_pixels = self.size / 4;
+        for dy in y0..y1 {
+            let sy = (dy - dst_y) as usize;
+            let sx_start = (x0 - dst_x) as usize;
+            let cols = (x1 - x0) as usize;
+            let src_pix_start = sy * (src_w as usize) + sx_start;
+            if src_pix_start >= max_src_pixels {
+                break;
+            }
+            let avail_cols = cols.min(max_src_pixels - src_pix_start);
+            let dst_row_start = (dy as usize) * (dst_w as usize) + (x0 as usize);
+            if dst_row_start + avail_cols > dst.len() {
+                break;
+            }
+
+            let mut copied = 0usize;
+            while copied < avail_cols {
+                let byte_off = (src_pix_start + copied) * 4;
+                let page_idx = byte_off / PAGE_SIZE;
+                let off_in_page = byte_off % PAGE_SIZE;
+                if page_idx >= self.frames.len() {
+                    return;
+                }
+                let page_bytes_left = PAGE_SIZE - off_in_page;
+                let pix_in_chunk = (avail_cols - copied).min(page_bytes_left / 4);
+                let virt = phys_to_virt(self.frames[page_idx]);
+                if pix_in_chunk > 0 {
+                    unsafe {
+                        let src_ptr = (virt + off_in_page as u64) as *const u32;
+                        core::ptr::copy_nonoverlapping(
+                            src_ptr,
+                            dst[dst_row_start + copied..].as_mut_ptr(),
+                            pix_in_chunk,
+                        );
+                    }
+                    copied += pix_in_chunk;
+                } else {
+                    // Straddles a page boundary only if unaligned (u32 is 4-byte aligned, so unreachable)
+                    break;
+                }
+            }
+        }
+    }
 }
 
 impl InodeOperations for ShmObject {

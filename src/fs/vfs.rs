@@ -2,7 +2,20 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::IrqSafeSpinlock;
+
+static VFS_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+#[inline]
+pub fn vfs_generation() -> u64 {
+    VFS_GENERATION.load(Ordering::Relaxed)
+}
+
+#[inline]
+pub fn bump_vfs_generation() {
+    VFS_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
@@ -69,6 +82,10 @@ pub trait InodeOperations: Send + Sync {
         Err("Cannot add child node to this Inode")
     }
 
+    fn rename(&mut self, _old_name: &str, _new_name: &str) -> Result<(), &'static str> {
+        Err("Rename not supported")
+    }
+
     fn truncate(&mut self, _size: usize) -> Result<(), &'static str> {
         Ok(())
     }
@@ -123,6 +140,9 @@ impl File {
         }
         let bytes_written = self.inode.lock().write(*off, buf)?;
         *off += bytes_written;
+        if bytes_written > 0 {
+            bump_vfs_generation();
+        }
         Ok(bytes_written)
     }
 

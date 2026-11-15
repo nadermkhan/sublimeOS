@@ -426,7 +426,7 @@ impl NetDevice for WifiDevice {
     }
 
     fn is_link_up(&self) -> bool {
-        crate::net::wifi::WIFI_MANAGER.lock().is_connected
+        crate::net::wifi::is_wifi_connected()
     }
 
     fn device_type(&self) -> NetDeviceType {

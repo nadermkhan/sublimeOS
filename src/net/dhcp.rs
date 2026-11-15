@@ -335,6 +335,7 @@ pub fn apply_dhcp_lease(interface_name: &str, lease: DhcpLease) {
         cfg.gateway = lease.router;
         cfg.dns = lease.dns_server;
         net.set_interface_config(interface_name, cfg);
+        net.set_default_device(interface_name);
 
         {
             let mut client = DHCP_CLIENT.lock();

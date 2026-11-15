@@ -41,12 +41,28 @@ fn spawn_from_user_cmd(path_ptr: *const u8, wait: bool) -> i64 {
             },
         };
         drop(vfs);
-        let mut buf = alloc::vec![0u8; 131072];
-        let n = match file.read(&mut buf) {
-            Ok(n) => n,
-            Err(_) => return -5, // -EIO
+        let size_hint = {
+            let st = file.inode.lock().stat();
+            (st.size as usize).clamp(4096, 8 * 1024 * 1024)
         };
-        match crate::task::user::spawn_user_process(&buf[..n], &parts[..], wait) {
+        let mut buf = alloc::vec::Vec::with_capacity(size_hint);
+        let mut chunk = alloc::vec![0u8; 65536];
+        loop {
+            match file.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(m) => {
+                    buf.extend_from_slice(&chunk[..m]);
+                    if buf.len() >= 8 * 1024 * 1024 {
+                        break;
+                    }
+                }
+                Err(_) => return -5, // -EIO
+            }
+        }
+        if buf.is_empty() {
+            return -8; // -ENOEXEC
+        }
+        match crate::task::user::spawn_user_process(&buf, &parts[..], wait) {
             Ok(res) => res as i64,
             Err(_) => -8, // -ENOEXEC
         }
@@ -121,7 +137,12 @@ pub extern "C" fn syscall_dispatcher(
         }
         SYS_SPAWN => spawn_from_user_cmd(a1 as *const u8, true),
         SYS_SPAWN_ASYNC => spawn_from_user_cmd(a1 as *const u8, false),
-        SYS_EXECVE => crate::task::process::sys_execve(a1 as *const u8, a2 as *const *const u8, a3 as *const *const u8) as i64,
+        SYS_EXECVE => crate::task::process::sys_execve_with_frame(
+            a1 as *const u8,
+            a2 as *const *const u8,
+            a3 as *const *const u8,
+            frame as *mut SyscallFrame,
+        ) as i64,
         SYS_REBOOT => {
             crate::arch::x86_64::acpi::poweroff();
         }

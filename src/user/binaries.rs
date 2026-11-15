@@ -13,6 +13,12 @@ pub static COMPILED_LS: &[u8] = include_bytes!("../../userland/target/x86_64-unk
 pub static COMPILED_GREP: &[u8] = include_bytes!("../../userland/target/x86_64-unknown-linux-none/release/grep");
 pub static COMPILED_WC: &[u8] = include_bytes!("../../userland/target/x86_64-unknown-linux-none/release/wc");
 pub static COMPILED_EDIT: &[u8] = include_bytes!("../../userland/target/x86_64-unknown-linux-none/release/edit");
+pub static COMPILED_STUDIO: &[u8] = include_bytes!("../../userland/target/x86_64-unknown-linux-none/release/studio");
+pub static COMPILED_PAINT: &[u8] = include_bytes!("../../userland/target/x86_64-unknown-linux-none/release/paint");
+pub static COMPILED_APPCENTER: &[u8] = include_bytes!("../../userland/target/x86_64-unknown-linux-none/release/appcenter");
+pub static COMPILED_PLAYER: &[u8] = include_bytes!("../../userland/target/x86_64-unknown-linux-none/release/player");
+pub static COMPILED_CODE: &[u8] = include_bytes!("../../userland/target/x86_64-unknown-linux-none/release/code");
+pub static COMPILED_MUSIC: &[u8] = include_bytes!("../../userland/target/x86_64-unknown-linux-none/release/music");
 
 /// Return the compiled `/bin/init` ELF64 user binary.
 pub fn generate_init_binary() -> Vec<u8> {
@@ -67,6 +73,36 @@ pub fn generate_wc_binary() -> Vec<u8> {
 /// Return the compiled `/bin/edit` ELF64 user binary.
 pub fn generate_edit_binary() -> Vec<u8> {
     COMPILED_EDIT.to_vec()
+}
+
+/// Return the compiled `/bin/studio` ELF64 Ring-3 GUI binary.
+pub fn generate_studio_binary() -> Vec<u8> {
+    COMPILED_STUDIO.to_vec()
+}
+
+/// Return the compiled `/bin/paint` ELF64 Ring-3 GUI binary.
+pub fn generate_paint_binary() -> Vec<u8> {
+    COMPILED_PAINT.to_vec()
+}
+
+/// Return the compiled `/bin/player` ELF64 Ring-3 Media Player binary.
+pub fn generate_player_binary() -> Vec<u8> {
+    COMPILED_PLAYER.to_vec()
+}
+
+/// Return the compiled `/bin/code` ELF64 Ring-3 Code Editor binary.
+pub fn generate_code_binary() -> Vec<u8> {
+    COMPILED_CODE.to_vec()
+}
+
+/// Return the compiled `/bin/music` ELF64 Ring-3 Music Player binary.
+pub fn generate_music_binary() -> Vec<u8> {
+    COMPILED_MUSIC.to_vec()
+}
+
+/// Return the compiled `/bin/appcenter` ELF64 Ring-3 GUI binary.
+pub fn generate_appcenter_binary() -> Vec<u8> {
+    COMPILED_APPCENTER.to_vec()
 }
 
 /// Build the `/lib/ld-cosmic.so` dynamic linker runtime.

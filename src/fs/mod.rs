@@ -60,18 +60,143 @@ pub fn init() {
 
     // /Applications/
     let apps_utilities = RamInode::new_dir();
-    apps_utilities.lock().add_child("Terminal.app", RamInode::new_file(b"Sublime 64-bit executable Terminal\n"));
-    apps_utilities.lock().add_child("Activity Monitor.app", RamInode::new_file(b"Sublime 64-bit executable ActivityMonitor\n"));
-    apps_utilities.lock().add_child("Console.app", RamInode::new_file(b"Sublime 64-bit executable Console\n"));
+    apps_utilities.lock().add_child(
+        "Terminal.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Terminal\nBuiltin=Terminal\nCategory=Utilities\nComment=SublimeOS Command Prompt & ELF Runner\n"),
+    );
+    apps_utilities.lock().add_child(
+        "Task Manager.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Task Manager\nBuiltin=Sysmon\nCategory=Utilities\nComment=Processes, Memory & Network Monitor\n"),
+    );
+    apps_utilities.lock().add_child(
+        "Calculator.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Calculator\nBuiltin=Calculator\nCategory=Utilities\nComment=Standard Metro Calculator\n"),
+    );
+    apps_utilities.lock().add_child(
+        "Notepad.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Notepad\nBuiltin=TextEdit\nCategory=Utilities\nComment=Plain Text & Code Editor\n"),
+    );
     applications.lock().add_child("Utilities", apps_utilities);
-    applications.lock().add_child("Finder.app", RamInode::new_file(b"Sublime 64-bit executable Finder\n"));
-    applications.lock().add_child("System Settings.app", RamInode::new_file(b"Sublime 64-bit executable SystemSettings\n"));
+    applications.lock().add_child(
+        "File Explorer.app",
+        RamInode::new_file(b"[SublimeApp]\nName=File Explorer\nBuiltin=FileManager\nCategory=System\nComment=Browse Files, Drives & Applications\n"),
+    );
+    applications.lock().add_child(
+        "Control Panel.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Control Panel\nBuiltin=Settings\nCategory=System\nComment=Personalization, Network & Sound\n"),
+    );
+    applications.lock().add_child(
+        "Widget Studio.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Widget Studio\nExec=/bin/studio\nCategory=Developer\nTerminal=false\nComment=Ring-3 ComCtl32 & UxTheme Demo App\n"),
+    );
+    applications.lock().add_child(
+        "Sublime Paint.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Sublime Paint\nExec=/bin/paint\nCategory=Graphics\nTerminal=false\nComment=Ring-3 Drawing & BMP Wallpaper Creator\n"),
+    );
+    applications.lock().add_child(
+        "App Center.app",
+        RamInode::new_file(b"[SublimeApp]\nName=App Center\nExec=/bin/appcenter\nCategory=System\nTerminal=false\nComment=Discover, Inspect & Launch User Apps\n"),
+    );
+    applications.lock().add_child(
+        "Media Player.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Media Player\nExec=/bin/player\nCategory=Multimedia\nTerminal=false\nComment=Play WAV, MP3, QOA, AVI Video & PNG/JPEG/QOI Images\n"),
+    );
+    applications.lock().add_child(
+        "Music Player.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Music Player\nExec=/bin/music\nCategory=Multimedia\nTerminal=false\nComment=Music Library, Metadata, Spectrum Visualizer & Audio Player\n"),
+    );
+    applications.lock().add_child(
+        "Code Editor.app",
+        RamInode::new_file(b"[SublimeApp]\nName=Code Editor\nExec=/bin/code\nCategory=Developer\nTerminal=false\nComment=Multi-Tab Syntax-Highlighted Code Editor\n"),
+    );
 
     // /Users/sublime/
     let user_sublime = RamInode::new_dir();
     user_sublime.lock().add_child("Desktop", RamInode::new_dir());
-    user_sublime.lock().add_child("Documents", RamInode::new_dir());
+    let docs_dir = RamInode::new_dir();
+    docs_dir.lock().add_child(
+        "Welcome.txt",
+        RamInode::new_file(b"Welcome to SublimeOS 1.0!\nModern Desktop Workstation running on KiteKernel x86_64.\n"),
+    );
+    docs_dir.lock().add_child(
+        "hello.rs",
+        RamInode::new_file(b"// SublimeOS Ring-3 Rust Sample\nfn greet(target: &str) -> u32 {\n    let count = 42;\n    println!(\"Hello {}! count={}\", target, count);\n    count\n}\n"),
+    );
+    docs_dir.lock().add_child(
+        "config.json",
+        RamInode::new_file(b"{\n  \"os\": \"SublimeOS\",\n  \"version\": 1,\n  \"audio\": \"Intel HDA\",\n  \"codecs\": [\"PNG\", \"JPEG\", \"QOI\", \"WAV\", \"QOA\", \"MP3\", \"AVI\"]\n}\n"),
+    );
+    docs_dir.lock().add_child(
+        "hello.sh",
+        RamInode::new_file(b"# SublimeOS Sample Script\necho Running SublimeOS Multimedia & Code Stack\nuname\n"),
+    );
+    user_sublime.lock().add_child("Documents", docs_dir);
+    let pics_dir = RamInode::new_dir();
+    pics_dir.lock().add_child(
+        "SublimePrism.bmp",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_bmp(160, 90, 0)),
+    );
+    pics_dir.lock().add_child(
+        "AuroraWave.bmp",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_bmp(160, 90, 1)),
+    );
+    pics_dir.lock().add_child(
+        "SunsetGrid.bmp",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_bmp(160, 90, 2)),
+    );
+    pics_dir.lock().add_child(
+        "SublimeLogo.png",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_png(128, 72, 0)),
+    );
+    pics_dir.lock().add_child(
+        "PrismPhoto.jpg",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_jpeg(128, 72, 2)),
+    );
+    pics_dir.lock().add_child(
+        "CosmicTile.qoi",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_qoi(128, 72, 1)),
+    );
+    user_sublime.lock().add_child("Pictures", pics_dir);
+    let music_dir = RamInode::new_dir();
+    music_dir.lock().add_child(
+        "SublimeChime.wav",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_wav()),
+    );
+    music_dir.lock().add_child(
+        "SynthChord.qoa",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_qoa()),
+    );
+    music_dir.lock().add_child(
+        "NebulaDrift.wav",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_adpcm_track(
+            "Nebula Drift",
+            "Sublime Synth",
+            "Cosmos OST",
+            &[220, 261, 329, 293],
+        )),
+    );
+    music_dir.lock().add_child(
+        "SolarWind.wav",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_adpcm_track(
+            "Solar Wind",
+            "Kite Lab",
+            "Cosmos OST",
+            &[196, 246, 293, 392],
+        )),
+    );
+    music_dir.lock().add_child(
+        "StarlightArp.qoa",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_qoa_arp()),
+    );
+    user_sublime.lock().add_child("Music", music_dir);
+    let videos_dir = RamInode::new_dir();
+    videos_dir.lock().add_child(
+        "SublimeDemo.avi",
+        RamInode::new_file(&crate::gui::wallpaper::generate_sample_avi()),
+    );
+    user_sublime.lock().add_child("Videos", videos_dir);
     user_sublime.lock().add_child("Downloads", RamInode::new_dir());
+    let trash_dir = RamInode::new_dir();
     let sublimerc = b"# SublimeOS shell configuration\nexport PATH=\"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\nalias ll=\"list\"\n";
     user_sublime.lock().add_child(".sublimerc", RamInode::new_file(sublimerc));
     user_sublime.lock().add_child(".zshrc", RamInode::new_file(sublimerc));
@@ -94,6 +219,7 @@ pub fn init() {
     root.lock().add_child("Applications", applications);
     root.lock().add_child("Users", users);
     root.lock().add_child("Volumes", volumes);
+    root.lock().add_child("Trash", trash_dir);
     root.lock().add_child("private", private);
     root.lock().add_child("bin", bin);
     root.lock().add_child("lib", lib);

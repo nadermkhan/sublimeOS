@@ -268,7 +268,11 @@ pub fn unix_socket_recv(id: usize, buf: &mut [u8]) -> Result<usize, &'static str
         }
     }
 
-    if sock.state == UnixSocketState::Closed {
+    if sock.state == UnixSocketState::Closed
+        || (sock.sock_type == SOCK_STREAM
+            && sock.state == UnixSocketState::Connected
+            && sock.peer_id.is_none())
+    {
         return Ok(0); // EOF
     }
 
@@ -297,6 +301,12 @@ pub fn unix_socket_close(id: usize) -> Result<(), &'static str> {
 
 pub struct UnixSocketInode {
     pub sock_id: usize,
+}
+
+impl Drop for UnixSocketInode {
+    fn drop(&mut self) {
+        let _ = unix_socket_close(self.sock_id);
+    }
 }
 
 impl InodeOperations for UnixSocketInode {

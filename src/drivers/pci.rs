@@ -60,6 +60,45 @@ impl PciDevice {
             (bar_low & 0xFFFF_FFF0) as u64
         }
     }
+
+    /// Walk standard PCI Capabilities (offset 0x34) looking for `cap_id` (bounded to 48 hops).
+    pub fn find_capability(&self, cap_id: u8) -> Option<u8> {
+        unsafe {
+            let status = PciBus::read_config_word(self.bus, self.device, self.function, 0x06);
+            if (status & 0x0010) == 0 {
+                return None;
+            }
+            let mut ptr = PciBus::read_config_byte(self.bus, self.device, self.function, 0x34) & 0xFC;
+            for _ in 0..48 {
+                if ptr < 0x40 || ptr == 0xFC {
+                    break;
+                }
+                let id = PciBus::read_config_byte(self.bus, self.device, self.function, ptr);
+                if id == cap_id {
+                    return Some(ptr);
+                }
+                let next = PciBus::read_config_byte(self.bus, self.device, self.function, ptr + 1) & 0xFC;
+                if next == ptr {
+                    break;
+                }
+                ptr = next;
+            }
+        }
+        None
+    }
+
+    /// Ensure the PCI function is in D0 power state if a PCI Power Management capability (0x01) exists.
+    pub fn ensure_d0_power_state(&self) {
+        if let Some(pm_cap) = self.find_capability(0x01) {
+            unsafe {
+                let pmcsr = PciBus::read_config_word(self.bus, self.device, self.function, pm_cap + 4);
+                if (pmcsr & 0x0003) != 0 {
+                    PciBus::write_config_word(self.bus, self.device, self.function, pm_cap + 4, pmcsr & !0x0003);
+                    crate::arch::x86_64::pit::delay_ms(10);
+                }
+            }
+        }
+    }
 }
 
 pub struct PciBus {
@@ -80,6 +119,18 @@ impl PciBus {
 
         outl(PCI_CONFIG_ADDRESS, address);
         inl(PCI_CONFIG_DATA)
+    }
+
+    pub unsafe fn read_config_word(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
+        let val = Self::read_config_dword(bus, device, function, offset);
+        let shift = ((offset & 2) * 8) as u32;
+        ((val >> shift) & 0xFFFF) as u16
+    }
+
+    pub unsafe fn read_config_byte(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
+        let val = Self::read_config_dword(bus, device, function, offset);
+        let shift = ((offset & 3) * 8) as u32;
+        ((val >> shift) & 0xFF) as u8
     }
 
     pub unsafe fn write_config_dword(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
@@ -109,6 +160,22 @@ impl PciBus {
         outl(PCI_CONFIG_DATA, new_val);
     }
 
+    pub unsafe fn write_config_byte(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
+        let address = ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | ((offset as u32) & 0xFC)
+            | 0x80000000;
+
+        outl(PCI_CONFIG_ADDRESS, address);
+        let orig = inl(PCI_CONFIG_DATA);
+        let shift = ((offset & 3) * 8) as u32;
+        let mask = !(0xFFu32 << shift);
+        let new_val = (orig & mask) | ((value as u32) << shift);
+        outl(PCI_CONFIG_ADDRESS, address);
+        outl(PCI_CONFIG_DATA, new_val);
+    }
+
     pub unsafe fn enable_bus_mastering(bus: u8, device: u8, function: u8) {
         let cmd = Self::read_config_dword(bus, device, function, 0x04);
         // Bit 1: Memory Space Enable (0x02), Bit 2: Bus Master Enable (0x04)
@@ -124,6 +191,9 @@ impl PciBus {
                     let dword0 = unsafe { Self::read_config_dword(bus, dev, func, 0x00) };
                     let vendor_id = (dword0 & 0xFFFF) as u16;
                     if vendor_id == 0xFFFF || vendor_id == 0x0000 {
+                        if func == 0 {
+                            break;
+                        }
                         continue;
                     }
 
@@ -135,7 +205,8 @@ impl PciBus {
                     let class_code = ((dword2 >> 24) & 0xFF) as u8;
 
                     let dword3 = unsafe { Self::read_config_dword(bus, dev, func, 0x0C) };
-                    let header_type = ((dword3 >> 16) & 0x7F) as u8;
+                    let raw_header_type = ((dword3 >> 16) & 0xFF) as u8;
+                    let header_type = raw_header_type & 0x7F;
 
                     let bar0 = unsafe { Self::read_config_dword(bus, dev, func, 0x10) } & 0xFFFFFFF0;
 
@@ -151,6 +222,11 @@ impl PciBus {
                         header_type,
                         bar0,
                     });
+
+                    // Single-function PCIe endpoints may alias reads across func 1..7 if bit 7 is clear
+                    if func == 0 && (raw_header_type & 0x80) == 0 {
+                        break;
+                    }
                 }
             }
         }

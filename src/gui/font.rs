@@ -5,8 +5,8 @@ use crate::gui::color::Color;
 pub const FONT_WIDTH: i32 = 8;
 pub const FONT_HEIGHT: i32 = 16;
 
-/// Global font style configuration (0 = Classic 8x16, 1 = Crisp Bold UI, 2 = Condensed Compact).
-static UI_FONT_STYLE: AtomicU8 = AtomicU8::new(0);
+/// Global font style configuration (0 = Classic 8x16, 1 = Bold UI, 2 = Noto Sans ClearType TTF).
+static UI_FONT_STYLE: AtomicU8 = AtomicU8::new(2);
 static TERMINAL_BOLD: AtomicBool = AtomicBool::new(false);
 
 pub fn get_ui_font_style() -> u8 {
@@ -21,8 +21,126 @@ pub fn ui_font_style_name(style: u8) -> &'static str {
     match style % 3 {
         0 => "Sublime Mono 8x16 (Regular)",
         1 => "Sublime UI Sans-Bold (High Contrast)",
-        _ => "Sublime ClearType Mono",
+        _ => "Noto Sans ClearType TTF (LCD RGB)",
     }
+}
+
+pub fn measure_ui_string(text: &str) -> i32 {
+    if use_ttf_ui_font() {
+        libgui::font::with_default_font(|engine| {
+            engine.measure_text(text, libgui::font::TextStyle::ui(libgui::Color::BLACK)).0
+        })
+    } else {
+        measure_string(text)
+    }
+}
+
+pub fn measure_ui_string_bold(text: &str) -> i32 {
+    if use_ttf_ui_font() {
+        libgui::font::with_default_font(|engine| {
+            let st = libgui::font::TextStyle {
+                bold: true,
+                ..libgui::font::TextStyle::ui(libgui::Color::BLACK)
+            };
+            engine.measure_text(text, st).0
+        })
+    } else {
+        measure_string(text)
+    }
+}
+
+pub fn draw_ui_string_shadow(canvas: &mut Canvas, x: i32, y: i32, text: &str, fg: Color, shadow: Color) {
+    if use_ttf_ui_font() {
+        canvas.with_surface(|surf| {
+            libgui::font::with_default_font(|engine| {
+                let mut st = libgui::font::TextStyle::ui(fg.into_libgui());
+                st.shadow = Some(shadow.into_libgui());
+                engine.draw_text(surf, x, y, text, st);
+            });
+        });
+    } else {
+        draw_string_shadow(canvas, x, y, text, fg, shadow);
+    }
+}
+
+pub fn draw_ui_string_ellipsis(canvas: &mut Canvas, x: i32, y: i32, text: &str, fg: Color, max_w: i32) {
+    if use_ttf_ui_font() {
+        canvas.with_surface(|surf| {
+            libgui::font::with_default_font(|engine| {
+                engine.draw_text_ellipsis(surf, x, y, max_w, text, libgui::font::TextStyle::ui(fg.into_libgui()));
+            });
+        });
+    } else {
+        draw_string_ellipsis(canvas, x, y, text, fg, max_w);
+    }
+}
+
+pub fn draw_ui_string_bold_ellipsis(canvas: &mut Canvas, x: i32, y: i32, text: &str, fg: Color, max_w: i32) {
+    if use_ttf_ui_font() {
+        canvas.with_surface(|surf| {
+            libgui::font::with_default_font(|engine| {
+                let st = libgui::font::TextStyle {
+                    bold: true,
+                    ..libgui::font::TextStyle::ui(fg.into_libgui())
+                };
+                engine.draw_text_ellipsis(surf, x, y, max_w, text, st);
+            });
+        });
+    } else {
+        draw_string_bold_ellipsis(canvas, x, y, text, fg, max_w);
+    }
+}
+
+pub fn draw_ui_string_sized(
+    canvas: &mut Canvas,
+    x: i32,
+    y: i32,
+    size_px: i32,
+    bold: bool,
+    text: &str,
+    fg: Color,
+) {
+    if use_ttf_ui_font() {
+        canvas.with_surface(|surf| {
+            libgui::font::with_default_font(|engine| {
+                let st = libgui::font::TextStyle {
+                    bold,
+                    ..libgui::font::TextStyle::ui_sized(size_px, fg.into_libgui())
+                };
+                engine.draw_text(surf, x, y, text, st);
+            });
+        });
+    } else if bold {
+        draw_string_bold(canvas, x, y, text, fg);
+    } else {
+        draw_string(canvas, x, y, text, fg);
+    }
+}
+
+pub fn draw_ui_string_centered_v(
+    canvas: &mut Canvas,
+    x: i32,
+    rect_y: i32,
+    rect_h: i32,
+    text: &str,
+    fg: Color,
+) {
+    if use_ttf_ui_font() {
+        canvas.with_surface(|surf| {
+            libgui::font::with_default_font(|engine| {
+                let st = libgui::font::TextStyle::ui(fg.into_libgui());
+                let (_, lh) = engine.line_metrics(st);
+                let ty = rect_y + (rect_h - lh) / 2;
+                engine.draw_text(surf, x, ty, text, st);
+            });
+        });
+    } else {
+        draw_string(canvas, x, rect_y + (rect_h - FONT_HEIGHT) / 2, text, fg);
+    }
+}
+
+pub fn use_ttf_ui_font() -> bool {
+    UI_FONT_STYLE.load(Ordering::Relaxed) == 2
 }
 
 pub fn get_terminal_bold() -> bool {
@@ -94,7 +212,7 @@ pub fn draw_char_bold(canvas: &mut Canvas, x: i32, y: i32, ch: char, fg: Color) 
     }
 }
 
-/// Render a string onto the canvas.
+/// Render a string onto the canvas (fixed 8x16 monospace cell grid for consoles/editors).
 pub fn draw_string(canvas: &mut Canvas, mut x: i32, y: i32, text: &str, fg: Color) {
     for ch in text.chars() {
         if ch == '\n' {
@@ -105,7 +223,7 @@ pub fn draw_string(canvas: &mut Canvas, mut x: i32, y: i32, text: &str, fg: Colo
     }
 }
 
-/// Render a bold string onto the canvas.
+/// Render a bold string onto the canvas (8x16 monospace).
 pub fn draw_string_bold(canvas: &mut Canvas, mut x: i32, y: i32, text: &str, fg: Color) {
     for ch in text.chars() {
         if ch == '\n' {
@@ -113,6 +231,40 @@ pub fn draw_string_bold(canvas: &mut Canvas, mut x: i32, y: i32, text: &str, fg:
         }
         draw_char_bold(canvas, x, y, ch, fg);
         x += FONT_WIDTH;
+    }
+}
+
+/// Render proportional UI string (TinyTTF AA when UI font style == 2, else 8x16 UI bitmap).
+pub fn draw_ui_string(canvas: &mut Canvas, x: i32, y: i32, text: &str, fg: Color) {
+    if use_ttf_ui_font() {
+        canvas.with_surface(|surf| {
+            libgui::font::with_default_font(|engine| {
+                engine.draw_text(surf, x, y, text, libgui::font::TextStyle::ui(fg.into_libgui()));
+            });
+        });
+    } else {
+        draw_string(canvas, x, y, text, fg);
+    }
+}
+
+pub fn draw_ui_string_bold(canvas: &mut Canvas, x: i32, y: i32, text: &str, fg: Color) {
+    if use_ttf_ui_font() {
+        canvas.with_surface(|surf| {
+            libgui::font::with_default_font(|engine| {
+                engine.draw_text(
+                    surf,
+                    x,
+                    y,
+                    text,
+                    libgui::font::TextStyle {
+                        bold: true,
+                        ..libgui::font::TextStyle::ui(fg.into_libgui())
+                    },
+                );
+            });
+        });
+    } else {
+        draw_string_bold(canvas, x, y, text, fg);
     }
 }
 

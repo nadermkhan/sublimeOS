@@ -1,13 +1,13 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-// 65-entry quarter-wave sine table for 0 to pi/2 (values: 32767 * sin(k * pi / 128))
+// 65-entry monotonic quarter-wave sine table for 0 to pi/2 (values: round(32767 * sin(k * pi / 128)))
 const QUARTER_SINE: [i16; 65] = [
-    0, 804, 1608, 2410, 3209, 4005, 4796, 5582, 6362, 7134, 7898, 8653, 9398, 10132, 10854,
-    11564, 12260, 12942, 13610, 14262, 14899, 15519, 16122, 16707, 17274, 17822, 18351, 18860,
-    19349, 19817, 20264, 20689, 21092, 21473, 21831, 22166, 22478, 22766, 23030, 23270, 23485,
-    23675, 23840, 23979, 24093, 24180, 24242, 24278, 24287, 24270, 24227, 24158, 24062, 23940,
-    23791, 23617, 23416, 23189, 22936, 22657, 22352, 22022, 21666, 21285, 32767,
+    0, 804, 1608, 2410, 3212, 4011, 4808, 5602, 6393, 7179, 7962, 8739, 9512, 10278, 11039,
+    11793, 12539, 13279, 14010, 14732, 15446, 16151, 16846, 17530, 18204, 18868, 19519, 20159,
+    20787, 21403, 22005, 22594, 23170, 23731, 24279, 24811, 25329, 25832, 26319, 26790, 27245,
+    27683, 28105, 28510, 28898, 29268, 29621, 29956, 30273, 30571, 30852, 31113, 31356, 31580,
+    31785, 31971, 32137, 32285, 32412, 32521, 32609, 32678, 32728, 32757, 32767,
 ];
 
 /// Fast integer sine function for phase 0..255 representing 0..2*pi.
@@ -101,16 +101,32 @@ pub fn parse_wav(data: &[u8]) -> Result<WavAudio, &'static str> {
     })
 }
 
+#[inline]
+fn sample_sine_fp32(phase: u32) -> i16 {
+    let idx = (phase >> 24) as u8;
+    let frac = ((phase >> 16) & 0xFF) as i32;
+    let s0 = integer_sin(idx) as i32;
+    let s1 = integer_sin(idx.wrapping_add(1)) as i32;
+    (s0 + (((s1 - s0) * frac) >> 8)) as i16
+}
+
 /// Synthesize a pure sine wave audio buffer (16-bit signed PCM).
 pub fn generate_sine_wave(freq_hz: u32, duration_ms: u32, sample_rate: u32) -> Vec<i16> {
+    if sample_rate == 0 {
+        return Vec::new();
+    }
     let total_samples = ((sample_rate as u64 * duration_ms as u64) / 1000) as usize;
     let mut buffer = Vec::with_capacity(total_samples * 2); // Stereo
+    if freq_hz == 0 {
+        buffer.resize(total_samples * 2, 0);
+        return buffer;
+    }
 
-    let phase_step = ((freq_hz as u64 * 256) / sample_rate as u64) as u32;
+    let phase_step = (((freq_hz as u64) << 32) / sample_rate as u64) as u32;
     let mut phase = 0u32;
 
     for i in 0..total_samples {
-        let sample = integer_sin((phase & 0xFF) as u8);
+        let sample = sample_sine_fp32(phase);
 
         // Apply gentle linear attack and decay envelope to prevent popping
         let envelope = if i < 200 {
@@ -138,6 +154,9 @@ pub fn generate_sublime_chime(sample_rate: u32) -> Vec<i16> {
 
 /// Synthesize the iconic SublimeOS startup chime.
 pub fn generate_cosmic_chime(sample_rate: u32) -> Vec<i16> {
+    if sample_rate == 0 {
+        return Vec::new();
+    }
     let duration_ms = 2200; // 2.2 seconds resonant decay
     let total_samples = ((sample_rate as u64 * duration_ms as u64) / 1000) as usize;
     let mut buffer = Vec::with_capacity(total_samples * 2);
@@ -145,14 +164,21 @@ pub fn generate_cosmic_chime(sample_rate: u32) -> Vec<i16> {
     // Harmonic F-Major Chord frequencies (Hz)
     let freqs: [u32; 4] = [174, 261, 349, 440]; // F3, C4, F4, A4
     let weights: [i32; 4] = [9000, 8000, 7500, 6000];
+    let mut phases: [u32; 4] = [0; 4];
+    let phase_steps: [u32; 4] = [
+        (((freqs[0] as u64) << 32) / sample_rate as u64) as u32,
+        (((freqs[1] as u64) << 32) / sample_rate as u64) as u32,
+        (((freqs[2] as u64) << 32) / sample_rate as u64) as u32,
+        (((freqs[3] as u64) << 32) / sample_rate as u64) as u32,
+    ];
 
     for i in 0..total_samples {
         let mut chord_sample: i32 = 0;
 
         for j in 0..4 {
-            let phase = (((i as u64 * freqs[j] as u64 * 256) / sample_rate as u64) & 0xFF) as u8;
-            let val = integer_sin(phase) as i32;
+            let val = sample_sine_fp32(phases[j]) as i32;
             chord_sample += (val * weights[j]) >> 15;
+            phases[j] = phases[j].wrapping_add(phase_steps[j]);
         }
 
         // Exponential-like decay envelope

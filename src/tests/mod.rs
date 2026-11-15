@@ -67,6 +67,14 @@ pub fn run_all_tests() {
     test_usb_hub_downstream_enumeration();
     test_persistent_crashdump_subsystem();
     test_smbios_and_authentic_hardware_telemetry();
+    test_libgui_ttf_and_surface();
+    test_libgui_ipc_protocol();
+    test_win32_comctl32_widgets();
+    test_libgui_lifecycle_and_damage();
+    test_os_desktop_ux_and_input();
+    test_user_app_support();
+    test_multimedia_codecs_and_code_editor();
+    test_boot_splash_and_scrollbars();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -693,6 +701,88 @@ fn test_wifi_subsystem() {
     mgr.disconnect();
     assert!(!mgr.is_connected, "WifiManager still marked connected after disconnect");
 
+    // 5. Verify NIST FIPS-197 AES-128 + RFC 3394 Key Unwrap + IEEE 802.11i PRF-384 & AES-CCMP
+    let nist_key: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+    ];
+    let nist_pt: [u8; 16] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+    ];
+    let nist_ct_expected: [u8; 16] = [
+        0x69, 0xC4, 0xE0, 0xD8, 0x6A, 0x7B, 0x04, 0x30,
+        0xD8, 0xCD, 0xB7, 0x80, 0x70, 0xB4, 0xC5, 0x5A,
+    ];
+    let nist_ct = crate::net::crypto::aes128_encrypt_block(&nist_key, &nist_pt);
+    assert_eq!(nist_ct, nist_ct_expected, "FIPS-197 AES-128 encrypt mismatch");
+    assert_eq!(crate::net::crypto::aes128_decrypt_block(&nist_key, &nist_ct), nist_pt);
+
+    let rfc3394_wrapped: [u8; 24] = [
+        0x1F, 0xA6, 0x8B, 0x0A, 0x81, 0x12, 0xB4, 0x47,
+        0xAE, 0xF3, 0x4B, 0xD8, 0xFB, 0x5A, 0x7B, 0x82,
+        0x9D, 0x3E, 0x86, 0x23, 0x71, 0xD2, 0xCF, 0xE5,
+    ];
+    let unwrapped = crate::net::crypto::aes128_key_unwrap(&nist_key, &rfc3394_wrapped)
+        .expect("RFC 3394 Key Unwrap failed");
+    assert_eq!(unwrapped.as_slice(), &nist_pt);
+
+    let anonce = [0xA1u8; 32];
+    let snonce = crate::net::crypto::generate_snonce(&sta_mac, &[0x00, 0x14, 0x22, 0x01, 0x23, 0x45]);
+    assert!(snonce.iter().any(|&b| b != 0));
+    let ptk = crate::net::crypto::derive_wpa2_ptk(
+        &mgr.pmk,
+        &sta_mac,
+        &[0x00, 0x14, 0x22, 0x01, 0x23, 0x45],
+        &anonce,
+        &snonce,
+    );
+    let mut tk = [0u8; 16];
+    tk.copy_from_slice(&ptk[32..48]);
+
+    let eth_sample = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // DA
+        0x28, 0xCF, 0xDA, 0xD7, 0x64, 0xDC, // SA
+        0x08, 0x06,                         // ARP
+        0x00, 0x01, 0x08, 0x00, 0x06, 0x04,
+    ];
+    let (hdr24, llc) = crate::drivers::net::broadcom::b43::wrap_8023_to_80211_plain(
+        &eth_sample,
+        [0x00, 0x14, 0x22, 0x01, 0x23, 0x45],
+        [0x28, 0xCF, 0xDA, 0xD7, 0x64, 0xDC],
+        7,
+        true,
+    ).expect("802.3->802.11 wrap failed");
+    let enc = crate::net::crypto::ccmp_encrypt_mpdu(&tk, &hdr24, 0, 42, &llc)
+        .expect("AES-CCMP encrypt failed");
+    let mut mpdu = Vec::with_capacity(24 + enc.len());
+    mpdu.extend_from_slice(&hdr24);
+    mpdu.extend_from_slice(&enc);
+    let (pt_llc, rx_pn, rx_kid) = crate::net::crypto::ccmp_decrypt_mpdu(&tk, &mpdu)
+        .expect("AES-CCMP decrypt failed");
+    assert_eq!(rx_pn, 42);
+    assert_eq!(rx_kid, 0);
+    assert_eq!(pt_llc, llc);
+    let mut tampered = mpdu.clone();
+    tampered[33] ^= 0x01;
+    assert!(crate::net::crypto::ccmp_decrypt_mpdu(&tk, &tampered).is_err());
+
+    let (_da, _sa, etype, restored_eth) =
+        crate::drivers::net::broadcom::b43::unwrap_llc_to_8023(&hdr24, &pt_llc)
+            .expect("802.11->802.3 unwrap failed");
+    assert_eq!(etype, 0x0806);
+    assert_eq!(restored_eth, eth_sample);
+
+    let kde = [
+        0xDD, 22, 0x00, 0x0F, 0xAC, 0x01, 0x02, 0x00,
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+    ];
+    let (gtk_id, gtk_val) = crate::net::wifi::parse_eapol_gtk_kde(&kde)
+        .expect("GTK KDE parse failed");
+    assert_eq!(gtk_id, 2);
+    assert_eq!(gtk_val[0], 0x11);
+
     println!("\x1b[32m[PASS]\x1b[0m");
 }
 
@@ -804,17 +894,32 @@ fn test_http_engine() {
 fn test_audio_subsystem() {
     print!("  [TEST] Audio Subsystem & PCM Synthesis ... ");
 
-    // 1. Test fast integer sine
+    // 1. Test fast integer sine (strict monotonicity 0..=64 + symmetry)
     assert_eq!(crate::drivers::audio::pcm::integer_sin(0), 0);
-    assert!(crate::drivers::audio::pcm::integer_sin(32) > 0);
+    assert!(crate::drivers::audio::pcm::integer_sin(32) > 22000);
     assert_eq!(crate::drivers::audio::pcm::integer_sin(64), 32767);
     assert_eq!(crate::drivers::audio::pcm::integer_sin(128), 0);
     assert_eq!(crate::drivers::audio::pcm::integer_sin(192), -32767);
+    for p in 0u8..64u8 {
+        let a = crate::drivers::audio::pcm::integer_sin(p);
+        let b = crate::drivers::audio::pcm::integer_sin(p + 1);
+        assert!(b >= a && (b - a) <= 810, "QUARTER_SINE step must be monotonic and smooth");
+    }
 
-    // 2. Test Tone Generator
+    // 2. Test Tone Generator (exact pitch zero crossings & sub-173Hz frequency support)
     let tone = crate::drivers::audio::pcm::generate_sine_wave(440, 20, 44100);
     let expected_samples = (44100 * 20 / 1000) * 2; // Stereo
     assert_eq!(tone.len(), expected_samples);
+    let tone_440 = crate::drivers::audio::pcm::generate_sine_wave(440, 500, 44100);
+    let mut up_cross = 0u32;
+    for f in 1..(tone_440.len() / 2) {
+        if tone_440[(f - 1) * 2] <= 0 && tone_440[f * 2] > 0 {
+            up_cross += 1;
+        }
+    }
+    assert!((218..=222).contains(&up_cross), "440Hz 500ms must cross zero ~220 cycles, got {}", up_cross);
+    let low_100 = crate::drivers::audio::pcm::generate_sine_wave(100, 100, 44100);
+    assert!(low_100.iter().any(|&s| s.abs() > 20000), "100Hz tone must not truncate to DC silence");
 
     // 3. Test Cosmic Startup Chime generator
     let chime = crate::drivers::audio::pcm::generate_cosmic_chime(44100);
@@ -869,13 +974,20 @@ fn test_audio_subsystem() {
     // If hardware Intel HDA controller is present (e.g. QEMU -device intel-hda), test real SD_BDLPL/U & async RUN
     let hda_opt = crate::drivers::audio::AUDIO_MANAGER.lock().hda_controller.clone();
     if let Some(hda) = hda_opt {
+        let cs4206_verbs = crate::drivers::audio::hda::build_cs4206_apple_init_verbs();
+        assert!(cs4206_verbs.contains(&(0x01, 0x7160A)), "CS4206 Apple GPIO mask 0x0A required");
+        assert!(cs4206_verbs.contains(&(0x01, 0x7150A)), "CS4206 Apple GPIO data 0x0A required");
+        assert!(cs4206_verbs.contains(&(0x04, 0x20011)), "CS4206 DAC 0x04 must use 48kHz 16-bit 2ch (0x0011)");
+
         let (bdl_lo, bdl_hi) = hda.read_bdl_registers();
         let programmed_bdl = ((bdl_hi as u64) << 32) | (bdl_lo as u64);
         assert_eq!(
             programmed_bdl, hda.dma_ring.bdl_phys,
             "Intel HDA SD_BDLPL/SD_BDLPU must match allocated physical BDL frame"
         );
-        hda.play_pcm_samples(&tone);
+        let hw_rate = hda.active_sample_rate().max(8000);
+        let hw_tone = crate::drivers::audio::pcm::generate_sine_wave(440, 20, hw_rate);
+        hda.play_pcm_samples(&hw_tone);
         let mut running = false;
         for _ in 0..50_000 {
             if hda.is_stream_running() {
@@ -889,7 +1001,7 @@ fn test_audio_subsystem() {
         } else {
             crate::kinfo!("Physical Intel HDA: SD_CTL.RUN latched or queued asynchronously on bare-metal PCH");
         }
-        hda.stop_stream();
+        crate::drivers::audio::stream_stop();
     }
 
     println!("\x1b[32m[PASS]\x1b[0m");
@@ -2124,6 +2236,32 @@ fn test_usb_hid_subsystem() {
     assert_eq!(read_char(), Some(b'B'), "Apple 10-byte report did not decode cleanly");
     let apple_report_rel = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
     kb_dev.process_keyboard_report(&apple_report_rel);
+
+    // 1b. Verify USB HID & PS/2 Typematic Auto-Repeat while a key is held down
+    {
+        use crate::drivers::keyboard::KeyboardDriver;
+        use crate::drivers::usb::hid::keyboard::{UsbKeyboardDriver, UsbKeyboardReport};
+
+        let mut usb_drv = UsbKeyboardDriver::new();
+        let hold_x = UsbKeyboardReport { modifiers: 0, reserved: 0, keycodes: [0x1B, 0, 0, 0, 0, 0] }; // 'x'
+        usb_drv.process_report_at(&hold_x, 1000);
+        assert_eq!(read_char(), Some(b'x'));
+        assert!(!usb_drv.tick_repeat(1449), "Should not repeat before 450ms delay");
+        assert!(usb_drv.tick_repeat(1450), "Should repeat after 450ms delay");
+        assert_eq!(read_char(), Some(b'x'));
+        assert!(usb_drv.tick_repeat(1483), "Should repeat again at +33ms");
+        assert_eq!(read_char(), Some(b'x'));
+        usb_drv.process_report_at(&UsbKeyboardReport::default(), 1500);
+        assert!(!usb_drv.tick_repeat(1600), "Release must stop typematic repeat");
+
+        let mut ps2 = KeyboardDriver::new();
+        ps2.handle_scancode_at(0x1E, 2000); // 'a' make
+        assert!(ps2.tick_repeat(2449) == false);
+        assert!(ps2.tick_repeat(2450) == true);
+        assert!(ps2.tick_repeat(2483) == true);
+        ps2.handle_scancode_at(0x9E, 2500); // 'a' break
+        assert!(!ps2.tick_repeat(2600));
+    }
 
     // 2. Test USB HID Mouse Report Processing (Boot Protocol)
     let mut mouse_dev = UsbHidDevice::new("test_usb_mouse", UsbHidType::Mouse);
@@ -3520,6 +3658,18 @@ fn test_broadcom_drivers() {
     };
 
     {
+        use crate::drivers::net::broadcom::b43::{
+            B43DmaDesc64, B43RxHdrFw4, B43TxHdrR410, B43TxHdrR598,
+            B43_DMA64_PCIE_TRANSLATION, B43_RING_LEN,
+        };
+        assert_eq!(core::mem::size_of::<B43TxHdrR598>(), 118);
+        assert_eq!(core::mem::size_of::<B43TxHdrR410>(), 110);
+        assert_eq!(core::mem::size_of::<B43RxHdrFw4>(), 30);
+        assert_eq!(
+            crate::arch::x86_64::acpi::extract_dsn_mac(0xFFD7_28CF, 0x64DC_DAFF),
+            [0x28, 0xCF, 0xDA, 0xD7, 0x64, 0xDC]
+        );
+
         let b43 = B43Device::from_mmio(pci_bcm4331, b43_mmio_virt, false)
             .expect("BCM4331 B43Device initialization failed");
         assert_eq!(b43.name(), "wlan2");
@@ -3527,21 +3677,73 @@ fn test_broadcom_drivers() {
         assert_eq!(b43.chip_id, 0x4331);
 
         let tx_ring_lo = unsafe { core::ptr::read_volatile((b43_mmio_virt + B43_DMA64_TX0_BASE + 0x08) as *const u32) };
+        let tx_ring_hi = unsafe { core::ptr::read_volatile((b43_mmio_virt + B43_DMA64_TX0_BASE + 0x0C) as *const u32) };
         let rx_ring_lo = unsafe { core::ptr::read_volatile((b43_mmio_virt + B43_DMA64_RX0_BASE + 0x08) as *const u32) };
+        let rx_ring_hi = unsafe { core::ptr::read_volatile((b43_mmio_virt + B43_DMA64_RX0_BASE + 0x0C) as *const u32) };
         {
             let dma = b43.dma.lock();
+            assert_ne!(dma.tx_ring_phys(), dma.rx_ring_phys(), "TX/RX descriptor rings must use split 4 KiB frames");
+            assert_eq!(dma.tx_ring_phys() % 4096, 0);
+            assert_eq!(dma.rx_ring_phys() % 4096, 0);
             assert_eq!(tx_ring_lo, (dma.tx_ring_phys() & 0xFFFF_FFFF) as u32);
             assert_eq!(rx_ring_lo, (dma.rx_ring_phys() & 0xFFFF_FFFF) as u32);
+            if has_embedded_firmware() {
+                assert_ne!(tx_ring_hi & B43_DMA64_PCIE_TRANSLATION, 0);
+                assert_ne!(rx_ring_hi & B43_DMA64_PCIE_TRANSLATION, 0);
+            }
         }
 
+        let probe_frame = crate::net::wifi::build_80211_probe_request(b43.mac_address(), None);
+        let eth_pkt = [
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0x28, 0xCF, 0xDA, 0xD7, 0x64, 0xDC,
+            0x08, 0x06, 0x00, 0x01, 0x08, 0x00,
+        ];
         if has_embedded_firmware() {
             assert!(b43.firmware_loaded);
             assert!(b43.ucode_bytes > 0);
-            assert!(b43.send_packet(&tx_frame_placeholder()).is_ok());
+            assert!(b43.set_channel(6).is_ok());
+            // Verify send_packet rejects unassociated or undersized Ethernet frames, while send_80211_frame succeeds
+            assert!(b43.send_packet(&eth_pkt).is_err());
+            assert!(b43.send_80211_frame(&probe_frame).is_ok());
+
+            // Test >16-frame TX wrap reclamation + 802.3 Ethernet bridging once associated
+            b43.set_wifi_session(Some([0x00, 0x14, 0x22, 0x01, 0x23, 0x45]), true, None, None);
+            assert!(b43.is_link_up());
+            for _ in 0..(B43_RING_LEN + 6) {
+                assert!(b43.send_packet(&eth_pkt).is_ok());
+            }
+
+            // Inject synthetic Beacon via RX DMA ring slot 0 and verify RXINDEX advances to `(slot * 16) = 0`
+            let mut beacon = [0u8; 64];
+            beacon[0] = 0x80; // Beacon
+            beacon[16..22].copy_from_slice(&[0x00, 0x14, 0x22, 0x01, 0x23, 0x45]);
+            beacon[36] = 0; beacon[37] = 6; beacon[38..44].copy_from_slice(b"TestAP");
+            beacon[44] = 3; beacon[45] = 1; beacon[46] = 11;
+            {
+                let dma = b43.dma.lock();
+                let rx_slot0 = (crate::mm::phys_to_virt(dma.buf_base_frame)
+                    + (B43_RING_LEN * crate::drivers::net::broadcom::b43::B43_DMA_SLOT_SIZE) as u64) as *mut u8;
+                let mut rxh = B43RxHdrFw4::default();
+                rxh.frame_len = ((47 + 4) as u16).to_le();
+                unsafe {
+                    core::ptr::copy_nonoverlapping(&rxh as *const B43RxHdrFw4 as *const u8, rx_slot0, 30);
+                    core::ptr::copy_nonoverlapping(beacon.as_ptr(), rx_slot0.add(30), 47);
+                    // Advance RXSTATUS CURR past slot 0 (1 * 16 = 16)
+                    core::ptr::write_volatile((b43_mmio_virt + B43_DMA64_RX0_BASE + 0x10) as *mut u32, 16);
+                }
+            }
+            let mut out_80211 = [0u8; 256];
+            let got = b43.receive_80211_frame(&mut out_80211).expect("RX 802.11 failed");
+            assert_eq!(got, 47);
+            let rx_index_after = unsafe { core::ptr::read_volatile((b43_mmio_virt + B43_DMA64_RX0_BASE + 0x04) as *const u32) };
+            assert_eq!(rx_index_after, 0, "RXINDEX must be set to `(slot * 16)` (not `rx_cons * 16`)");
+            let _ = core::mem::size_of::<B43DmaDesc64>();
+            b43.set_wifi_session(None, false, None, None);
         } else {
             assert!(!b43.firmware_loaded);
             assert!(!b43.is_link_up());
-            assert!(b43.send_packet(&tx_frame_placeholder()).is_err());
+            assert!(b43.send_80211_frame(&probe_frame).is_err());
         }
     }
 
@@ -3553,11 +3755,6 @@ fn test_broadcom_drivers() {
     }
 
     println!("\x1b[32m[PASS]\x1b[0m");
-}
-
-#[inline(always)]
-const fn tx_frame_placeholder() -> [u8; 4] {
-    [0x80, 0x00, 0x00, 0x00]
 }
 
 fn test_apple_platform_and_ehci_hid() {
@@ -4073,6 +4270,1323 @@ fn test_smbios_and_authentic_hardware_telemetry() {
 
     // 5. Memory summary must report real non-zero managed RAM
     assert!(!hw.memory_summary.is_empty(), "Memory summary must not be empty");
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_libgui_ttf_and_surface() {
+    print!("  [TEST] libgui Noto Sans TTF, ClearType RGB & Surface ... ");
+    use libgui::font::{
+        rasterize_outline, FontEngine, FontFamily, TextStyle, TtfFont, NOTO_SANS_BOLD_TTF,
+        NOTO_SANS_REGULAR_TTF,
+    };
+    use libgui::gfx::{Color, Rect, Surface};
+    use libgui::layout::{Length, VStack};
+
+    let font = TtfFont::from_bytes(NOTO_SANS_REGULAR_TTF).expect("Valid NotoSans-Regular SFNT");
+    let bold_font = TtfFont::from_bytes(NOTO_SANS_BOLD_TTF).expect("Valid NotoSans-Bold SFNT");
+    assert!(font.num_glyphs() >= 200);
+    assert!(bold_font.num_glyphs() >= 200);
+    assert_eq!(font.metrics().units_per_em, 1000);
+
+    // Ensure curved & UI typography glyphs resolve cleanly and differ between 'S' and '6'
+    let gid_o = font.glyph_index('O');
+    assert!(gid_o > 0, "'O' should map to non-zero glyph ID");
+    let gid_mul = font.glyph_index('×');
+    let gid_dash = font.glyph_index('—');
+    assert!(gid_mul > 0 && gid_dash > 0, "UI typography glyphs should exist in Noto Sans subset");
+
+    let gid_s = font.glyph_index('S');
+    let gid_6 = font.glyph_index('6');
+    let out_s = font.glyph_outline(gid_s).expect("Outline for 'S'");
+    let out_6 = font.glyph_outline(gid_6).expect("Outline for '6'");
+    let adv_s = font.glyph_metrics(gid_s).advance_width;
+    let adv_6 = font.glyph_metrics(gid_6).advance_width;
+    let rg_s = rasterize_outline(&out_s, &font.metrics(), adv_s, 18);
+    let rg_6 = rasterize_outline(&out_6, &font.metrics(), adv_6, 18);
+    assert_eq!(rg_s.rgb_bitmap.len(), (rg_s.width * rg_s.height * 3) as usize);
+    assert_ne!(rg_s.bitmap, rg_6.bitmap, "'S' and '6' must have distinct open-bowl vs closed contours");
+
+    let mut engine = FontEngine::with_static_fonts(NOTO_SANS_REGULAR_TTF, Some(NOTO_SANS_BOLD_TTF));
+    let mut pixels = alloc::vec![Color::WHITE.to_u32(); 160 * 64];
+    let mut surf = Surface::from_slice(160, 64, &mut pixels);
+
+    let ui_style = TextStyle {
+        family: FontFamily::UiSans,
+        size_px: 14,
+        color: Color::rgb(12, 34, 80),
+        bold: false,
+        shadow: None,
+    };
+    let bold_style = TextStyle {
+        family: FontFamily::UiSans,
+        size_px: 14,
+        color: Color::rgb(12, 34, 80),
+        bold: true,
+        shadow: None,
+    };
+    let (tw, th) = engine.measure_text("SublimeOS 2026!", ui_style);
+    let (bw, _) = engine.measure_text("SublimeOS 2026!", bold_style);
+    assert!(tw > 40 && bw >= tw && th >= 14, "Noto Sans measurement should be proportional");
+
+    engine.draw_text(&mut surf, 4, 6, "SublimeOS", ui_style);
+    engine.draw_text(&mut surf, 4, 28, "SublimeOS", bold_style);
+    // Verify ClearType LCD subpixel anti-aliased blending touched pixels inside glyph bounding boxes
+    let non_white = surf.pixels.iter().filter(|&&px| px != Color::WHITE.to_u32()).count();
+    assert!(non_white > 80, "Expected ClearType anti-aliased Noto Sans pixels, got {}", non_white);
+
+    // Also verify layout engine VStack flex distribution
+    let mut vs = VStack::new(Rect::new(0, 0, 200, 100), 4);
+    let rows = vs.allocate(&[Length::Px(20), Length::Flex(1), Length::Flex(3)]);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].h, 20);
+    assert!(rows[2].h > rows[1].h);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_libgui_ipc_protocol() {
+    print!("  [TEST] libgui Compositor IPC Framing & SHM Blit ... ");
+    use libgui::event::{GuiEvent, KeyCode, Modifiers, MouseButton};
+    use libgui::ipc::{
+        decode_client_msg, decode_server_msg, encode_client_msg, encode_server_msg,
+        take_next_frame, WmClientMsg, WmServerMsg,
+    };
+    use crate::fs::vfs::InodeOperations;
+    use crate::mm::shm::ShmObject;
+
+    let c1 = WmClientMsg::CreateWindow {
+        title: String::from("Widget Studio"),
+        width: 520,
+        height: 360,
+        min_width: 380,
+        min_height: 260,
+        resizable: true,
+    };
+    let c2 = WmClientMsg::AttachShm {
+        window_id: 7,
+        width: 520,
+        height: 360,
+        stride_bytes: 520 * 4,
+        shm_name: String::from("wm_7_1"),
+    };
+    let mut stream = encode_client_msg(&c1);
+    stream.extend_from_slice(&encode_client_msg(&c2));
+    assert_eq!(decode_client_msg(&take_next_frame(&mut stream).unwrap()), Some(c1));
+    assert_eq!(decode_client_msg(&take_next_frame(&mut stream).unwrap()), Some(c2));
+    assert!(take_next_frame(&mut stream).is_none());
+
+    let s1 = WmServerMsg::Input {
+        window_id: 7,
+        event: GuiEvent::KeyDown {
+            key: KeyCode::Char('A'),
+            ch: Some('A'),
+            mods: Modifiers { shift: true, ctrl: false, alt: false },
+        },
+    };
+    let s2 = WmServerMsg::Input {
+        window_id: 7,
+        event: GuiEvent::MouseDown {
+            x: 42,
+            y: 19,
+            button: MouseButton::Left,
+        },
+    };
+    let mut s_stream = encode_server_msg(&s1);
+    s_stream.extend_from_slice(&encode_server_msg(&s2));
+    assert_eq!(decode_server_msg(&take_next_frame(&mut s_stream).unwrap()), Some(s1));
+    assert_eq!(decode_server_msg(&take_next_frame(&mut s_stream).unwrap()), Some(s2));
+
+    let c_clip = WmClientMsg::SetClipboard { text: String::from("SublimeCopy") };
+    let mut cc_bytes = encode_client_msg(&c_clip);
+    assert_eq!(decode_client_msg(&take_next_frame(&mut cc_bytes).unwrap()), Some(c_clip));
+
+    let s_clip = WmServerMsg::ClipboardChanged { text: String::from("SublimePaste") };
+    let mut sc_bytes = encode_server_msg(&s_clip);
+    assert_eq!(decode_server_msg(&take_next_frame(&mut sc_bytes).unwrap()), Some(s_clip));
+
+    // Verify SHM page-backed pixel write + clipped compositor blit
+    let mut shm = ShmObject::new("test_ipc_shm");
+    assert!(shm.resize(4096).is_ok());
+    let src_pixels: [u32; 4] = [0xFF112233, 0xFF445566, 0xFF778899, 0xFFAABBCC];
+    let byte_slice = unsafe {
+        core::slice::from_raw_parts(src_pixels.as_ptr() as *const u8, src_pixels.len() * 4)
+    };
+    assert_eq!(shm.write(0, byte_slice), Ok(16));
+    let mut dst = [0u32; 16];
+    shm.blit_argb_to_canvas(2, 2, &mut dst, 4, 4, 1, 1, (0, 0, 4, 4));
+    assert_eq!(dst[1 * 4 + 1], 0xFF112233);
+    assert_eq!(dst[1 * 4 + 2], 0xFF445566);
+    assert_eq!(dst[2 * 4 + 1], 0xFF778899);
+    assert_eq!(dst[2 * 4 + 2], 0xFFAABBCC);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_win32_comctl32_widgets() {
+    print!("[TEST] Win32 / ComCtl32 v6 / UxTheme Controls Suite........... ");
+    use alloc::vec;
+    use libgui::event::{EventResult, GuiEvent, KeyCode, Modifiers, MouseButton};
+    use libgui::gfx::{Rect, Surface, Theme, ThemeKind, ThemePart, ThemeState, UxTheme};
+    use libgui::widget::{
+        CheckBox, CheckBoxState, CheckState, ColumnSpec, ComboBox, ComboBoxState, ContextMenu,
+        ContextMenuState, Date, DialogResult, IpAddressInput, IpAddressState, MenuItemSpec,
+        MessageBox, MessageBoxButtons, MessageBoxIcon, MessageBoxState, MonthCalendar,
+        MonthCalendarState, MultiLineEdit, MultiLineEditState, RadioGroup, RadioGroupState,
+        ReportListState, ReportListView, SortOrder, SpinBox, SpinBoxState, TreeNode, TreeView,
+        TreeViewState,
+    };
+
+    // 1. UxTheme rendering across SublimeClassic & SublimeSlate palettes
+    let mut px = vec![0u32; 320 * 240];
+    let mut surf = Surface::from_slice(320, 240, &mut px);
+    for kind in [ThemeKind::SublimeClassic, ThemeKind::SublimeSlate] {
+        let theme = Theme::for_kind(kind);
+        let parts = [
+            ThemePart::PushButton,
+            ThemePart::DefaultButton,
+            ThemePart::CommandLink,
+            ThemePart::CheckBox,
+            ThemePart::RadioButton,
+            ThemePart::GroupBox,
+            ThemePart::Edit,
+            ThemePart::ComboBox,
+            ThemePart::ComboDropButton,
+            ThemePart::ScrollTrack,
+            ThemePart::ScrollThumb,
+            ThemePart::HeaderSection,
+            ThemePart::StatusPane,
+            ThemePart::ToolBarButton,
+            ThemePart::ToolTip,
+            ThemePart::TreeGlyph,
+            ThemePart::AccordionHeader,
+        ];
+        for part in parts {
+            UxTheme::draw_background(&mut surf, part, ThemeState::Hot, Rect::new(8, 8, 90, 24), &theme);
+        }
+        UxTheme::draw_focus_rect(&mut surf, Rect::new(10, 10, 80, 20), &theme);
+    }
+
+    // 2. CheckBox (2-state and 3-state cycling) & RadioGroup
+    let cb_rect = Rect::new(10, 10, 140, 20);
+    let mut cb = CheckBoxState::tristate(CheckState::Unchecked);
+    for expected in [CheckState::Checked, CheckState::Indeterminate, CheckState::Unchecked] {
+        let _ = CheckBox::handle_event(
+            &mut cb,
+            cb_rect,
+            GuiEvent::MouseDown { x: 20, y: 18, button: MouseButton::Left },
+        );
+        let (_, toggled) = CheckBox::handle_event(
+            &mut cb,
+            cb_rect,
+            GuiEvent::MouseUp { x: 20, y: 18, button: MouseButton::Left },
+        );
+        assert!(toggled);
+        assert_eq!(cb.check, expected);
+    }
+
+    let rg_rect = Rect::new(10, 40, 140, 66);
+    let mut rg = RadioGroupState::new(0);
+    let _ = RadioGroup::handle_event(
+        &mut rg,
+        rg_rect,
+        &["Opt A", "Opt B", "Opt C"],
+        GuiEvent::MouseDown { x: 20, y: 40 + RadioGroup::ROW_H * 2 + 6, button: MouseButton::Left },
+    );
+    let (_, picked) = RadioGroup::handle_event(
+        &mut rg,
+        rg_rect,
+        &["Opt A", "Opt B", "Opt C"],
+        GuiEvent::MouseUp { x: 20, y: 40 + RadioGroup::ROW_H * 2 + 6, button: MouseButton::Left },
+    );
+    assert_eq!(picked, Some(2));
+    assert_eq!(rg.selected, 2);
+
+    // 3. ComboBox open, keyboard navigation, and popup click
+    let combo_rect = Rect::new(10, 10, 160, 24);
+    let items = ["Classic", "Slate", "Ocean"];
+    let mut combo = ComboBoxState::new(0);
+    let (res, _) = ComboBox::handle_event(
+        &mut combo,
+        combo_rect,
+        &items,
+        GuiEvent::MouseDown { x: 30, y: 20, button: MouseButton::Left },
+    );
+    assert!(matches!(res, EventResult::NeedsRedraw));
+    assert!(combo.open);
+    let (_, sel_k) = ComboBox::handle_event(
+        &mut combo,
+        combo_rect,
+        &items,
+        GuiEvent::KeyDown { key: KeyCode::Down, ch: None, mods: Modifiers::default() },
+    );
+    assert_eq!(sel_k, Some(1));
+    let popup = ComboBox::popup_rect(combo_rect, items.len());
+    let (_, sel_p) = ComboBox::handle_event(
+        &mut combo,
+        combo_rect,
+        &items,
+        GuiEvent::MouseDown { x: popup.x + 12, y: popup.y + 4 + 22 * 2, button: MouseButton::Left },
+    );
+    assert_eq!(sel_p, Some(2));
+    assert!(!combo.open);
+
+    // 4. SpinBox increment + clamp & IpAddressInput dotted entry
+    let spin_rect = Rect::new(10, 10, 100, 24);
+    let mut spin = SpinBoxState::new(98, 0, 100, 5);
+    let _ = SpinBox::handle_event(
+        &mut spin,
+        spin_rect,
+        GuiEvent::MouseDown { x: spin_rect.right() - 6, y: spin_rect.y + 4, button: MouseButton::Left },
+    );
+    let (_, changed) = SpinBox::handle_event(
+        &mut spin,
+        spin_rect,
+        GuiEvent::MouseUp { x: spin_rect.right() - 6, y: spin_rect.y + 4, button: MouseButton::Left },
+    );
+    assert!(changed);
+    assert_eq!(spin.value, 100);
+
+    let ip_rect = Rect::new(10, 50, 160, 24);
+    let mut ip = IpAddressState::new([192, 168, 1, 1]);
+    let _ = IpAddressInput::handle_event(
+        &mut ip,
+        ip_rect,
+        GuiEvent::MouseDown { x: ip_rect.x + 8, y: ip_rect.y + 10, button: MouseButton::Left },
+    );
+    for k in [KeyCode::Char('1'), KeyCode::Char('0'), KeyCode::Char('.'), KeyCode::Char('2'), KeyCode::Char('0')] {
+        let _ = IpAddressInput::handle_event(
+            &mut ip,
+            ip_rect,
+            GuiEvent::KeyDown { key: k, ch: None, mods: Modifiers::default() },
+        );
+    }
+    assert_eq!(ip.octets, [10, 20, 1, 1]);
+
+    // 5. Date helpers & MonthCalendar month navigation + day click
+    assert!(Date::is_leap_year(2024));
+    assert!(!Date::is_leap_year(2100));
+    assert!(Date::is_leap_year(2000));
+    assert_eq!(Date::days_in_month(2024, 2), 29);
+    assert_eq!(Date::weekday(2026, 11, 14), 6); // Saturday
+    let cal_rect = Rect::new(10, 10, 210, 170);
+    let mut cal = MonthCalendarState::default();
+    let _ = MonthCalendar::handle_event(
+        &mut cal,
+        cal_rect,
+        GuiEvent::MouseDown { x: cal_rect.right() - 10, y: cal_rect.y + 12, button: MouseButton::Left },
+    );
+    assert_eq!((cal.view_year, cal.view_month), (2026, 12));
+
+    // 6. TreeView expand/collapse glyph & visibility count
+    let tv_rect = Rect::new(10, 10, 200, 140);
+    let mut nodes = vec![
+        TreeNode::new(1, "Root", 0, None, true, true),
+        TreeNode::new(2, "Child A", 1, Some(0), false, false),
+        TreeNode::new(3, "Child B", 1, Some(0), false, false),
+    ];
+    assert_eq!(TreeView::visible_indices(&nodes).len(), 3);
+    let mut tv = TreeViewState::new();
+    let _ = TreeView::handle_event(
+        &mut tv,
+        tv_rect,
+        &mut nodes,
+        GuiEvent::MouseDown { x: tv_rect.x + 10, y: tv_rect.y + 10, button: MouseButton::Left },
+    );
+    assert!(!nodes[0].expanded);
+    assert_eq!(TreeView::visible_indices(&nodes).len(), 1);
+
+    // 7. ReportListView header sort toggle & column resize
+    let tbl_rect = Rect::new(0, 0, 260, 140);
+    let mut cols = vec![ColumnSpec::new("Name", 120), ColumnSpec::new("State", 100)];
+    let mut rlv = ReportListState::new();
+    let (_, _, sort_c) = ReportListView::handle_event(
+        &mut rlv,
+        tbl_rect,
+        &mut cols,
+        4,
+        GuiEvent::MouseDown { x: 40, y: 12, button: MouseButton::Left },
+    );
+    assert_eq!(sort_c, Some(0));
+    assert_eq!(rlv.sort_order, SortOrder::Ascending);
+    let _ = ReportListView::handle_event(
+        &mut rlv,
+        tbl_rect,
+        &mut cols,
+        4,
+        GuiEvent::MouseDown { x: 40, y: 12, button: MouseButton::Left },
+    );
+    assert_eq!(rlv.sort_order, SortOrder::Descending);
+    // Column 0 right edge at x = 1 + 120 = 121
+    let _ = ReportListView::handle_event(
+        &mut rlv,
+        tbl_rect,
+        &mut cols,
+        4,
+        GuiEvent::MouseDown { x: 121, y: 12, button: MouseButton::Left },
+    );
+    let _ = ReportListView::handle_event(&mut rlv, tbl_rect, &mut cols, 4, GuiEvent::MouseMove { x: 151, y: 12 });
+    let _ = ReportListView::handle_event(
+        &mut rlv,
+        tbl_rect,
+        &mut cols,
+        4,
+        GuiEvent::MouseUp { x: 151, y: 12, button: MouseButton::Left },
+    );
+    assert_eq!(cols[0].width, 150);
+
+    // 8. MultiLineEdit Enter split & Backspace join
+    let ml_rect = Rect::new(0, 0, 220, 100);
+    let mut ml = MultiLineEditState::new("ab");
+    ml.focused = true;
+    ml.cursor_col = 1;
+    let (_, ch1) = MultiLineEdit::handle_event(
+        &mut ml,
+        ml_rect,
+        GuiEvent::KeyDown { key: KeyCode::Enter, ch: None, mods: Modifiers::default() },
+    );
+    assert!(ch1);
+    assert_eq!(ml.lines.len(), 2);
+    let (_, ch2) = MultiLineEdit::handle_event(
+        &mut ml,
+        ml_rect,
+        GuiEvent::KeyDown { key: KeyCode::Backspace, ch: None, mods: Modifiers::default() },
+    );
+    assert!(ch2);
+    assert_eq!(ml.text(), "ab");
+
+    // 9. ContextMenu click & MessageBox Escape/Enter
+    let win_bounds = Rect::new(0, 0, 320, 240);
+    let menu_items = [MenuItemSpec::action(77, "Inspect", "F2")];
+    let mut cm = ContextMenuState::default();
+    cm.show(20, 20);
+    let (_, cmd) = ContextMenu::handle_event(
+        &mut cm,
+        win_bounds,
+        &menu_items,
+        GuiEvent::MouseDown { x: 40, y: 30, button: MouseButton::Left },
+    );
+    assert_eq!(cmd, Some(77));
+    assert!(!cm.open);
+
+    let mut mb = MessageBoxState::closed();
+    mb.open("Confirm", "Apply changes?", "Detail", MessageBoxIcon::Question, MessageBoxButtons::YesNoCancel);
+    let (_, dlg) = MessageBox::handle_event(
+        &mut mb,
+        win_bounds,
+        GuiEvent::KeyDown { key: KeyCode::Enter, ch: None, mods: Modifiers::default() },
+    );
+    assert_eq!(dlg, DialogResult::Yes);
+    assert!(!mb.visible);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_libgui_lifecycle_and_damage() {
+    print!("  [TEST] libgui DamageTracker, Lifecycle, Focus & Clipboard ... ");
+    use alloc::boxed::Box;
+    use libgui::component::{ComponentTree, ManagedButton, ManagedTextInput};
+    use libgui::event::{GuiEvent, KeyCode, Modifiers, MouseButton};
+    use libgui::gfx::Rect;
+    use libgui::system::{DamageTracker, FocusManager, HotkeyRegistry, SystemClipboard, TimerScheduler};
+    use libgui::widget::ButtonStyle;
+
+    // 1. DamageTracker coalesces nearby/overlapping rects and clips cleanly
+    let mut dmg = DamageTracker::new();
+    dmg.invalidate(Rect::new(10, 10, 40, 20));
+    dmg.invalidate(Rect::new(45, 15, 30, 20));
+    let rects = dmg.take_clipped(Rect::new(0, 0, 200, 200));
+    assert_eq!(rects.len(), 1);
+    assert_eq!(rects[0], Rect::new(10, 10, 65, 25));
+
+    // 2. FocusManager Tab / Shift+Tab cycling
+    let mut fm = FocusManager::new();
+    fm.register(10);
+    fm.register(20);
+    assert_eq!(fm.focused(), Some(10));
+    fm.focus_next();
+    assert_eq!(fm.focused(), Some(20));
+    fm.focus_prev();
+    assert_eq!(fm.focused(), Some(10));
+
+    // 3. TimerScheduler & HotkeyRegistry
+    let mut ts = TimerScheduler::new();
+    let tid = ts.set_interval(100, 1000);
+    assert!(ts.tick(1050).is_empty());
+    assert_eq!(ts.tick(1100), alloc::vec![tid]);
+    ts.cancel(tid);
+    assert!(ts.tick(1300).is_empty());
+
+    let mut hk = HotkeyRegistry::new();
+    hk.bind(KeyCode::Char('k'), true, false, false, 99);
+    assert_eq!(
+        hk.match_event(GuiEvent::KeyDown {
+            key: KeyCode::Char('k'),
+            ch: Some('k'),
+            mods: Modifiers { ctrl: true, shift: false, alt: false },
+        }),
+        Some(99)
+    );
+
+    // 4. ComponentTree mount lifecycle, callback firing, and Ctrl+C/Ctrl+V SystemClipboard
+    #[derive(Default)]
+    struct DummyState {
+        clicks: u32,
+        submitted: String,
+    }
+
+    SystemClipboard::clear();
+    let mut state = DummyState::default();
+    let mut tree: ComponentTree<DummyState> = ComponentTree::new();
+    tree.add(Box::new(
+        ManagedButton::new(1, Rect::new(10, 10, 100, 26), "OK", ButtonStyle::Primary)
+            .on_click(|st: &mut DummyState, _| st.clicks += 1),
+    ));
+    tree.add(Box::new(
+        ManagedTextInput::new(2, Rect::new(10, 44, 160, 24), "HelloOS", "")
+            .on_submit(|st: &mut DummyState, val, _| st.submitted = String::from(val)),
+    ));
+    tree.mount(&mut state);
+    let _ = tree.ctx.damage.take_clipped(Rect::new(0, 0, 300, 200));
+
+    let _ = tree.dispatch_event(
+        GuiEvent::MouseDown { x: 20, y: 20, button: MouseButton::Left },
+        &mut state,
+    );
+    let _ = tree.dispatch_event(
+        GuiEvent::MouseUp { x: 20, y: 20, button: MouseButton::Left },
+        &mut state,
+    );
+    assert_eq!(state.clicks, 1);
+
+    // Focus input (id=2), Ctrl+C copies "HelloOS", Ctrl+V appends it cleanly
+    let _ = tree.dispatch_event(
+        GuiEvent::MouseDown { x: 30, y: 52, button: MouseButton::Left },
+        &mut state,
+    );
+    let _ = tree.dispatch_event(
+        GuiEvent::KeyDown {
+            key: KeyCode::Char('c'),
+            ch: Some('c'),
+            mods: Modifiers { ctrl: true, shift: false, alt: false },
+        },
+        &mut state,
+    );
+    assert_eq!(SystemClipboard::get_text(), "HelloOS");
+    let _ = tree.dispatch_event(
+        GuiEvent::KeyDown {
+            key: KeyCode::Char('v'),
+            ch: Some('v'),
+            mods: Modifiers { ctrl: true, shift: false, alt: false },
+        },
+        &mut state,
+    );
+    let _ = tree.dispatch_event(
+        GuiEvent::KeyDown { key: KeyCode::Enter, ch: None, mods: Modifiers::default() },
+        &mut state,
+    );
+    assert_eq!(state.submitted, "HelloOSHelloOS");
+    tree.unmount(&mut state);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_os_desktop_ux_and_input() {
+    print!("  [TEST] Desktop UX, Terminal History & GUI Input Events ... ");
+    use crate::drivers::keyboard::{pop_gui_event, push_gui_event, GuiInputEvent, SystemShortcut};
+    use crate::gui::apps::TerminalApp;
+    use crate::gui::desktop::{Desktop, DesktopMenuAction};
+    use libgui::event::{KeyCode, Modifiers};
+
+    // 1. Terminal mid-line editing, Tab completion, and command history
+    let mut term = TerminalApp::new();
+    for ch in "sys".chars() {
+        term.handle_char(ch);
+    }
+    term.handle_key(KeyCode::Tab, None, Modifiers::default());
+    assert_eq!(term.input, "sysinfo ");
+    term.handle_char('\n');
+    assert_eq!(term.input, "");
+
+    for ch in "ver".chars() {
+        term.handle_char(ch);
+    }
+    term.handle_key(KeyCode::Home, None, Modifiers::default());
+    term.handle_key(KeyCode::Delete, None, Modifiers::default());
+    term.handle_char('h');
+    assert_eq!(term.input, "her");
+
+    term.handle_key(KeyCode::Up, None, Modifiers::default());
+    assert_eq!(term.input, "sysinfo");
+    term.handle_key(KeyCode::Down, None, Modifiers::default());
+    assert_eq!(term.input, "her");
+
+    // 2. Desktop single-click select vs right-click context menu
+    let mut desktop = Desktop::new();
+    let first_click = desktop.check_click(74, 36);
+    assert!(first_click.is_none(), "Single click must select icon instead of launching immediately");
+    assert_eq!(desktop.selected_icon, Some(0));
+
+    desktop.open_context_menu(100, 100, 1024, 768);
+    assert!(desktop.context_menu.is_some());
+    // Row 4 in the 6-item context menu is Switch Theme (y = 100 + 4 + 4*24 + 8 = 208)
+    let act = desktop.handle_context_click(140, 208);
+    assert_eq!(act, Some(DesktopMenuAction::ToggleTheme));
+
+    // 3. Global GUI shortcut & KeyUp queue
+    while pop_gui_event().is_some() {}
+    push_gui_event(GuiInputEvent::Shortcut(SystemShortcut::AltTab));
+    push_gui_event(GuiInputEvent::Shortcut(SystemShortcut::AltF4));
+    push_gui_event(GuiInputEvent::KeyUp {
+        key: KeyCode::Char('a'),
+        mods: Modifiers::default(),
+    });
+    assert_eq!(pop_gui_event(), Some(GuiInputEvent::Shortcut(SystemShortcut::AltTab)));
+    assert_eq!(pop_gui_event(), Some(GuiInputEvent::Shortcut(SystemShortcut::AltF4)));
+    assert_eq!(
+        pop_gui_event(),
+        Some(GuiInputEvent::KeyUp {
+            key: KeyCode::Char('a'),
+            mods: Modifiers::default(),
+        })
+    );
+
+    // 4. Metro Taskbar Start Button, Responsive Start Menu UX & Search Charm flyout
+    use crate::gui::desktop::DesktopAppId;
+    use crate::gui::spotlight::{Spotlight, SpotlightTarget};
+    use crate::gui::taskbar::{PendingPowerAction, StartEntryAction, Taskbar, TaskbarAction, TASKBAR_HEIGHT};
+    use libgui::event::{GuiEvent, MouseButton};
+
+    let mut tb = Taskbar::new();
+    let l640 = tb.start_menu_layout(640, 480);
+    assert!(l640.my >= 4 && l640.my + l640.mh <= 480 - TASKBAR_HEIGHT);
+    assert_eq!(l640.visible_rows, 8);
+    let l1024 = tb.start_menu_layout(1024, 768);
+    assert!(l1024.visible_rows >= 12);
+
+    let open_start = tb.handle_click(20, 760, &[], 1024, 768);
+    assert!(matches!(open_start, TaskbarAction::ToggleStartMenu) && tb.start_menu_open);
+
+    // Click Left row 0 (Terminal) dynamically via layout
+    let launch_term = tb.handle_click(l1024.list_x + 40, l1024.list_y + 12, &[], 1024, 768);
+    assert!(matches!(launch_term, TaskbarAction::LaunchApp(DesktopAppId::Terminal)) && !tb.start_menu_open);
+
+    // Re-open Start Menu and click Right Pane Places ("Documents" row 1, "Music" row 2) + Tool ("Next Wallpaper" row 1)
+    let _ = tb.handle_click(20, 760, &[], 1024, 768);
+    assert!(tb.start_menu_open);
+    let docs_r = l1024.place_rect(1);
+    let open_docs = tb.handle_click(docs_r.x + 12, docs_r.y + 8, &[], 1024, 768);
+    assert!(matches!(open_docs, TaskbarAction::OpenFilesAt("/Users/sublime/Documents", "Documents")));
+    let _ = tb.handle_click(20, 760, &[], 1024, 768);
+    let music_r = l1024.place_rect(2);
+    let open_music = tb.handle_click(music_r.x + 12, music_r.y + 8, &[], 1024, 768);
+    assert!(matches!(open_music, TaskbarAction::OpenFilesAt("/Users/sublime/Music", "Music")));
+    let _ = tb.handle_click(20, 760, &[], 1024, 768);
+    let wall_r = l1024.tool_rect(1);
+    let next_wall = tb.handle_click(wall_r.x + 12, wall_r.y + 8, &[], 1024, 768);
+    assert!(matches!(next_wall, TaskbarAction::NextWallpaper));
+
+    // Inline Search & Two-Step Escape UX
+    let _ = tb.handle_click(20, 760, &[], 1024, 768);
+    for ch in "music".chars() {
+        let _ = tb.handle_start_key(KeyCode::Char(ch), Some(ch), 1024, 768);
+    }
+    let music_matches = tb.filtered_start_entries();
+    assert!(!music_matches.is_empty());
+    assert_eq!(music_matches[0].label, "Music Player");
+    assert!(matches!(&music_matches[0].action, StartEntryAction::LaunchPath(p) if p == "/Applications/Music Player.app"));
+    assert!(music_matches.iter().any(|e| matches!(e.action, StartEntryAction::OpenFilesAt("/Users/sublime/Music", "Music"))));
+    let enter_music = tb.handle_start_key(KeyCode::Enter, None, 1024, 768);
+    assert!(matches!(enter_music, TaskbarAction::LaunchPath(ref p) if p == "/Applications/Music Player.app"));
+    assert!(!tb.start_menu_open);
+
+    let _ = tb.handle_click(20, 760, &[], 1024, 768);
+    for ch in "note".chars() {
+        let _ = tb.handle_start_key(KeyCode::Char(ch), Some(ch), 1024, 768);
+    }
+    let esc1 = tb.handle_start_key(KeyCode::Escape, None, 1024, 768);
+    assert!(matches!(esc1, TaskbarAction::None) && tb.start_search_query.is_empty() && tb.start_menu_open);
+    let esc2 = tb.handle_start_key(KeyCode::Escape, None, 1024, 768);
+    assert!(matches!(esc2, TaskbarAction::ToggleStartMenu) && !tb.start_menu_open);
+
+    // Scrollbar & Wheel at 640x480 + drag release cleanup
+    let _ = tb.handle_click(20, 480 - 8, &[], 640, 480);
+    assert!(tb.handle_start_wheel(l640.list_x + 20, l640.list_y + 20, -1, 640, 480));
+    assert!(tb.start_scroll.value > 0 && tb.start_scroll.value <= tb.start_scroll.max);
+    let _ = tb.handle_start_key(KeyCode::End, None, 640, 480);
+    assert_eq!(tb.start_selected_index, tb.filtered_start_entries().len() - 1);
+    let _ = tb.handle_start_key(KeyCode::Home, None, 640, 480);
+    assert_eq!(tb.start_selected_index, 0);
+    assert_eq!(tb.start_scroll.value, 0);
+    let sb = l640.sb_rect();
+    let (c_down, _) = tb.handle_start_scroll_mouse(GuiEvent::MouseDown { x: sb.x + 4, y: sb.y + 24, button: MouseButton::Left }, 640, 480);
+    assert!(c_down);
+    let _ = tb.handle_start_scroll_mouse(GuiEvent::MouseUp { x: sb.x + 100, y: sb.y + 100, button: MouseButton::Left }, 640, 480);
+    assert!(!tb.start_scroll.dragging);
+
+    // Two-step Power Safety (Shut Down -> switch to Restart -> Esc clears -> confirm Restart)
+    let (_shell_r, reboot_r, halt_r) = l640.footer_power_rects();
+    let h1 = tb.handle_click(halt_r.x + 10, halt_r.y + 10, &[], 640, 480);
+    assert!(matches!(h1, TaskbarAction::None) && tb.start_pending_power == Some(PendingPowerAction::Halt) && tb.start_menu_open);
+    let r1 = tb.handle_click(reboot_r.x + 10, reboot_r.y + 10, &[], 640, 480);
+    assert!(matches!(r1, TaskbarAction::None) && tb.start_pending_power == Some(PendingPowerAction::Reboot) && tb.start_menu_open);
+    let p_esc = tb.handle_start_key(KeyCode::Escape, None, 640, 480);
+    assert!(matches!(p_esc, TaskbarAction::None) && tb.start_pending_power.is_none() && tb.start_menu_open);
+    let _ = tb.handle_click(reboot_r.x + 10, reboot_r.y + 10, &[], 640, 480);
+    let r2 = tb.handle_click(reboot_r.x + 10, reboot_r.y + 10, &[], 640, 480);
+    assert!(matches!(r2, TaskbarAction::RebootSystem) && !tb.start_menu_open);
+
+    let peek = tb.handle_click(1020, 760, &[], 1024, 768);
+    assert!(matches!(peek, TaskbarAction::MinimizeAll));
+
+    let mut charm = Spotlight::new();
+    charm.toggle();
+    assert!(charm.is_open);
+    let (consumed, target) = charm.handle_click(800, 132, 1024, 768);
+    assert!(consumed && matches!(target, Some(SpotlightTarget::LaunchApp(DesktopAppId::Terminal))));
+    assert!(!charm.is_open);
+
+    // 5. Real PMM telemetry, scheduler task telemetry, and wired desktop app menus / context menus
+    {
+        let pmm = crate::mm::pmm::PMM.lock();
+        let (total_usable, used_usable, _free_usable) = pmm.stats();
+        assert_eq!(pmm.get_used_frames(), used_usable);
+        assert!(used_usable < total_usable);
+    }
+
+    let detailed = crate::task::scheduler::get_task_list_detailed();
+    assert!(!detailed.is_empty());
+
+    {
+        use crate::gui::apps::calc::CalcApp;
+        use crate::gui::apps::files::FileManagerApp;
+        use crate::gui::apps::settings::SettingsApp;
+        use crate::gui::apps::sysmon::{SysmonAction, SysmonApp};
+        use crate::gui::DesktopManager;
+
+        let mut calc = CalcApp::new();
+        calc.handle_char('4');
+        calc.handle_char('2');
+        assert_eq!(calc.display, "42");
+        calc.handle_key(KeyCode::Backspace, None, Modifiers::default());
+        assert_eq!(calc.display, "4");
+        calc.handle_right_click(60, 80, 0, 0, 280, 320);
+        assert!(calc.context_menu.is_some());
+        let (cx, cy) = calc.context_menu.unwrap();
+        calc.handle_click(cx + 10, cy + 8, 0, 0, 280, 320); // Copy Value
+        assert_eq!(libgui::system::SystemClipboard::get_text(), "4");
+
+        let mut sysmon = SysmonApp::new();
+        // Open File menu at x=20, y=10, then click Exit Task Manager (3rd menu row including sep)
+        sysmon.handle_click(20, 10, 0, 0, 500, 360);
+        sysmon.handle_click(30, 22 + 22 + 7 + 8, 0, 0, 500, 360);
+        assert!(matches!(sysmon.take_action(), SysmonAction::CloseSelf));
+
+        let mut settings = SettingsApp::new();
+        // Click OK button at bottom right of (0,0,500,360): x=500-84..500-12, y=360-32..360-10
+        settings.handle_click(430, 340, 0, 0, 500, 360);
+        assert!(settings.pending_close);
+        assert!(!crate::drivers::audio::active_device_name().is_empty());
+
+        let mut files = FileManagerApp::new();
+        files.navigate_to("/Users/sublime/Pictures");
+        assert!(files.entries.iter().any(|e| e.name == "SublimePrism.bmp"));
+        files.search_input.text = alloc::string::String::from("Aurora");
+        files.apply_filter_and_sort();
+        assert_eq!(files.entries.len(), 1);
+        assert_eq!(files.entries[0].name, "AuroraWave.bmp");
+        files.set_selected_as_wallpaper();
+        assert!(crate::gui::wallpaper::wallpaper_path_or_name().contains("AuroraWave.bmp"));
+
+        let bmp = crate::gui::wallpaper::generate_sample_bmp(16, 8, 1);
+        let dec = crate::gui::wallpaper::decode_image_bytes(&bmp).expect("sample BMP decode");
+        assert_eq!((dec.width, dec.height, dec.format_name), (16, 8, "BMP"));
+        let ppm = crate::gui::wallpaper::decode_image_bytes(b"P3\n2 1\n255\n255 0 0 0 255 0\n").expect("PPM decode");
+        assert_eq!((ppm.width, ppm.height, ppm.format_name), (2, 1, "PPM"));
+        let _ = crate::gui::wallpaper::cycle_wallpaper();
+        let fit0 = crate::gui::wallpaper::wallpaper_fit();
+        assert_ne!(crate::gui::wallpaper::cycle_wallpaper_fit(), fit0);
+
+        files.search_input.text.clear();
+        files.navigate_to("/Users/sublime/Documents");
+        let before = files.entries.len();
+        files.new_folder();
+        assert_eq!(files.entries.len(), before + 1);
+        if let Some(pos) = files.entries.iter().position(|e| e.name.starts_with("NewFolder")) {
+            files.selected_index = pos;
+        }
+        files.begin_rename();
+        files.rename_input.text = alloc::string::String::from("RenamedDir");
+        files.commit_rename();
+        assert!(files.entries.iter().any(|e| e.name == "RenamedDir"));
+        if let Some(pos) = files.entries.iter().position(|e| e.name == "RenamedDir") {
+            files.selected_index = pos;
+        }
+        files.copy_selected_file();
+        files.navigate_to("/Users/sublime/Downloads");
+        files.paste_clipboard_file();
+        assert!(files.entries.iter().any(|e| e.name == "RenamedDir"));
+        if let Some(pos) = files.entries.iter().position(|e| e.name == "RenamedDir") {
+            files.selected_index = pos;
+        }
+        files.delete_selected();
+        assert!(!files.entries.iter().any(|e| e.name == "RenamedDir"));
+        files.navigate_to("/Trash");
+        assert!(files.entries.iter().any(|e| e.name == "RenamedDir"));
+        if let Some(pos) = files.entries.iter().position(|e| e.name == "RenamedDir") {
+            files.selected_index = pos;
+        }
+        files.restore_from_trash();
+        files.navigate_to("/Users/sublime/Documents");
+        files.empty_trash();
+        files.copy_selected_path();
+        assert!(!libgui::system::SystemClipboard::get_text().is_empty());
+
+        let mut dm = DesktopManager::new(1024, 768);
+        dm.open_editor_file("/Applications/Utilities/Calculator.app");
+        assert!(dm.windows.iter().any(|w| w.app.app_id() == DesktopAppId::Calculator));
+
+        tb.open_context_menu(500, 750, &[], 1024, 768);
+        assert!(tb.context_menu.is_some());
+        let tb_act = tb.handle_context_click(520, 768 - 36 - 104 - 2 + 10);
+        assert!(matches!(tb_act, Some(TaskbarAction::LaunchApp(DesktopAppId::Sysmon))));
+
+        // 6. Dynamic Material You + Win8.1 wallpaper palette extraction, contrast, IPC & VFS sync
+        let seed_pixels = [0xFFFF_7A1Au32; 64];
+        let extracted = crate::gui::wallpaper::extract_seed_from_pixels(&seed_pixels);
+        let dyn_theme = libgui::gfx::Theme::from_wallpaper_seed(
+            libgui::gfx::ThemeKind::SublimeClassic,
+            extracted,
+        );
+        let title_fg = libgui::gfx::contrast_text_on(dyn_theme.title_top);
+        assert!(
+            title_fg == libgui::gfx::Color::WHITE
+                || title_fg == libgui::gfx::Color::rgb(20, 22, 26)
+        );
+
+        let mut pal_bytes = libgui::ipc::encode_server_msg(&libgui::ipc::WmServerMsg::PaletteChanged {
+            theme_kind: 1,
+            seed_rgb: 0x00FF_7A1A,
+        });
+        let pal_frame = libgui::ipc::take_next_frame(&mut pal_bytes).expect("palette frame");
+        assert!(pal_bytes.is_empty());
+        assert_eq!(
+            libgui::ipc::decode_server_msg(&pal_frame),
+            Some(libgui::ipc::WmServerMsg::PaletteChanged {
+                theme_kind: 1,
+                seed_rgb: 0x00FF_7A1A,
+            })
+        );
+
+        let _ = files.sync_vfs();
+        crate::fs::vfs::bump_vfs_generation();
+        assert!(files.sync_vfs());
+        assert!(!files.sync_vfs());
+
+        let _ = crate::gui::wallpaper::cycle_wallpaper();
+        assert!(settings.sync_external_state());
+        assert!(!settings.sync_external_state());
+
+        // 7. File Explorer arrangement, context menus, scroll preservation, protection & Trash lifecycle
+        {
+            use crate::fs::vfs::{FileType, VFS};
+            use crate::gui::apps::files::FileManagerApp;
+            use libgui::event::{KeyCode, Modifiers};
+
+            // Prepare /Users/sublime/Music test file & /tmp/fm_ux_scroll with 18 files
+            {
+                let vfs = VFS.lock();
+                if let Ok(music_dir) = vfs.resolve_path("/Users/sublime/Music") {
+                    let _ = music_dir.lock().create("ux_test_song.wav", FileType::Regular);
+                }
+                if let Ok(tmp_dir) = vfs.resolve_path("/tmp") {
+                    let sub = {
+                        let mut td = tmp_dir.lock();
+                        match td.lookup("fm_ux_scroll") {
+                            Ok(n) => n,
+                            Err(_) => td
+                                .create("fm_ux_scroll", FileType::Directory)
+                                .expect("fm_ux_scroll dir"),
+                        }
+                    };
+                    for i in 0..18 {
+                        let fname = alloc::format!("item_{:02}.txt", i);
+                        let _ = sub.lock().create(&fname, FileType::Regular);
+                    }
+                }
+            }
+
+            let mut fm = FileManagerApp::new();
+            fm.navigate_to("/tmp/fm_ux_scroll");
+            assert_eq!(fm.entries.len(), 18);
+
+            // Right-click outside list (sidebar/toolbar) and on scrollbar track must not open menu or stick dragging_thumb
+            fm.handle_right_click(30, 100, 0, 0, 588, 359);
+            assert!(!fm.context_menu.open && !fm.list_state.dragging_thumb);
+            fm.handle_right_click(30, 30, 0, 0, 588, 359);
+            assert!(!fm.context_menu.open && !fm.list_state.dragging_thumb);
+            fm.handle_right_click(580, 120, 0, 0, 588, 359);
+            assert!(!fm.context_menu.open && !fm.list_state.dragging_thumb);
+
+            // Right-click row 0 opens context menu; outside click absorbs and preserves path
+            fm.handle_right_click(200, 80, 0, 0, 588, 359);
+            assert!(fm.context_menu.open);
+            assert_eq!(fm.selected_index, 0);
+            fm.handle_click(15, 30, 0, 0, 588, 359);
+            assert!(!fm.context_menu.open);
+            assert_eq!(fm.current_path, "/tmp/fm_ux_scroll");
+
+            // Keyboard scroll-into-view: Down -> End -> Up -> Home
+            fm.handle_key_event(KeyCode::Down, None, Modifiers::default());
+            assert_eq!(fm.selected_index, 1);
+            fm.handle_key_event(KeyCode::End, None, Modifiers::default());
+            assert_eq!(fm.selected_index, 17);
+            assert!(fm.list_state.scroll_y > 0);
+            let scrolled_pos = fm.list_state.scroll_y;
+            crate::fs::vfs::bump_vfs_generation();
+            assert!(fm.sync_vfs());
+            assert_eq!(fm.list_state.scroll_y, scrolled_pos);
+            fm.handle_key_event(KeyCode::Up, None, Modifiers::default());
+            assert_eq!(fm.selected_index, 16);
+            fm.handle_key_event(KeyCode::Home, None, Modifiers::default());
+            assert_eq!(fm.selected_index, 0);
+            assert_eq!(fm.list_state.scroll_y, 0);
+
+            // on_deactivate dismisses popups, unfocused inputs, and cancels rename
+            fm.context_menu.show(200, 120);
+            fm.menu_state.open_menu = Some(0);
+            fm.addr_focused = true;
+            fm.addr_input.focused = true;
+            fm.begin_rename();
+            fm.on_deactivate();
+            assert!(!fm.context_menu.open);
+            assert!(fm.menu_state.open_menu.is_none());
+            assert!(!fm.addr_focused);
+            assert!(fm.rename_index.is_none());
+
+            // Protected system folders cannot be cut or deleted
+            fm.navigate_to("/");
+            let trash_idx = fm.entries.iter().position(|e| e.name == "Trash").expect("Trash at /");
+            fm.selected_index = trash_idx;
+            fm.cut_selected_file();
+            assert!(fm.clipboard.is_none());
+            fm.delete_selected();
+            assert!(fm.entries.iter().any(|e| e.name == "Trash"));
+
+            // Same-dir cut + paste guard, background right-click preserves selection, and cross-instance Trash restore to /Users/sublime/Music
+            fm.navigate_to("/Users/sublime/Music");
+            let song_idx = fm.entries.iter().position(|e| e.name == "ux_test_song.wav").expect("ux_test_song");
+            fm.selected_index = song_idx;
+            fm.list_state.selected = Some(song_idx);
+            fm.handle_right_click(220, 230, 0, 0, 588, 359);
+            assert!(fm.context_menu.open);
+            assert_eq!(fm.selected_index, song_idx);
+            assert!(fm.context_items.iter().any(|it| it.id == 26));
+            fm.context_menu.close();
+
+            fm.cut_selected_file();
+            assert!(fm.clipboard.is_some());
+            fm.paste_clipboard_file();
+            assert!(fm.clipboard.is_none());
+            assert_eq!(fm.entries.iter().filter(|e| e.name == "ux_test_song.wav").count(), 1);
+
+            fm.delete_selected();
+            assert!(!fm.entries.iter().any(|e| e.name == "ux_test_song.wav"));
+
+            let mut fm2 = FileManagerApp::new();
+            fm2.navigate_to("/Trash");
+            let t_idx = fm2.entries.iter().position(|e| e.name == "ux_test_song.wav").expect("trashed song");
+            fm2.selected_index = t_idx;
+            fm2.restore_from_trash();
+            fm2.navigate_to("/Users/sublime/Music");
+            assert!(fm2.entries.iter().any(|e| e.name == "ux_test_song.wav"));
+
+            // Cleanup temporary VFS test files
+            {
+                let vfs = VFS.lock();
+                if let Ok(music_dir) = vfs.resolve_path("/Users/sublime/Music") {
+                    let _ = music_dir.lock().unlink("ux_test_song.wav");
+                }
+                if let Ok(tmp_dir) = vfs.resolve_path("/tmp") {
+                    if let Ok(sub) = tmp_dir.lock().lookup("fm_ux_scroll") {
+                        for i in 0..18 {
+                            let fname = alloc::format!("item_{:02}.txt", i);
+                            let _ = sub.lock().unlink(&fname);
+                        }
+                    }
+                    let _ = tmp_dir.lock().unlink("fm_ux_scroll");
+                }
+            }
+            fm2.empty_trash();
+        }
+    }
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_user_app_support() {
+    print!("  [TEST] User App Manifests, ELF Discovery, Execve & IPC ... ");
+
+    // 1. Parse .app manifests and discover installed apps & /bin ELFs
+    let studio = crate::user::apps::read_app_manifest("/Applications/Widget Studio.app")
+        .expect("Widget Studio.app manifest");
+    assert_eq!(studio.exec, "/bin/studio");
+    assert!(!studio.terminal);
+
+    let paint = crate::user::apps::read_app_manifest("/Applications/Sublime Paint.app")
+        .expect("Sublime Paint.app manifest");
+    assert_eq!(paint.exec, "/bin/paint");
+    assert!(!paint.terminal);
+
+    let appcenter = crate::user::apps::read_app_manifest("/Applications/App Center.app")
+        .expect("App Center.app manifest");
+    assert_eq!(appcenter.exec, "/bin/appcenter");
+
+    let discovered = crate::user::apps::discover_apps();
+    assert!(discovered.iter().any(|a| a.exec == "/bin/paint"));
+    assert!(discovered.iter().any(|a| a.exec == "/bin/appcenter"));
+    assert!(discovered.iter().any(|a| a.exec == "/bin/hello"));
+
+    // 2. ELF64 detection + GUI client signature check
+    assert!(crate::user::apps::is_elf64_file("/bin/paint"));
+    assert!(crate::user::apps::is_elf64_file("/bin/appcenter"));
+    assert!(crate::user::apps::is_elf64_file("/bin/hello"));
+    assert!(crate::user::apps::elf_is_gui_client("/bin/paint"));
+    assert!(crate::user::apps::elf_is_gui_client("/bin/appcenter"));
+    assert!(!crate::user::apps::elf_is_gui_client("/bin/hello"));
+    assert_eq!(
+        crate::user::apps::resolve_executable_path("paint", "/"),
+        Some(String::from("/bin/paint"))
+    );
+
+    // 3. WmClientMsg::Hello roundtrip
+    let mut hello_bytes = libgui::ipc::encode_client_msg(&libgui::ipc::WmClientMsg::Hello {
+        pid: 42,
+        app_name: String::from("Sublime Paint"),
+    });
+    let frame = libgui::ipc::take_next_frame(&mut hello_bytes).expect("Hello IPC frame");
+    assert!(hello_bytes.is_empty());
+    assert_eq!(
+        libgui::ipc::decode_client_msg(&frame),
+        Some(libgui::ipc::WmClientMsg::Hello {
+            pid: 42,
+            app_name: String::from("Sublime Paint"),
+        })
+    );
+
+    // 4. Pipe-captured CLI ELF execution (/bin/hello)
+    let hello_bin = crate::user::apps::read_vfs_binary("/bin/hello").expect("/bin/hello bytes");
+    let (code, output) =
+        crate::task::user::spawn_user_binary_capture(&hello_bin, &["hello", "--test"], "/", 2000)
+            .expect("spawn_user_binary_capture(/bin/hello)");
+    assert_eq!(code, 0, "Expected /bin/hello exit code 0, output={}", output);
+    assert!(!output.is_empty(), "Expected captured stdout from /bin/hello");
+
+    // 5. Detached zombie reaping
+    let det_pid = crate::task::process::alloc_process("test-detached");
+    crate::task::process::mark_detached(det_pid);
+    crate::task::process::exit_process(det_pid, 0);
+    crate::task::process::reap_detached_zombies();
+    assert!(crate::task::process::get_process(det_pid).is_none());
+
+    // 6. sys_execve_with_frame validation guards (-EFAULT / -ENOENT / -ENOEXEC)
+    assert_eq!(
+        crate::task::process::sys_execve_with_frame(
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null_mut()
+        ),
+        -14
+    );
+    let missing = b"/bin/nonexistent_user_app\0";
+    assert_eq!(
+        crate::task::process::sys_execve_with_frame(
+            missing.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null_mut()
+        ),
+        -2
+    );
+    let not_elf = b"/Applications/Sublime Paint.app\0";
+    assert_eq!(
+        crate::task::process::sys_execve_with_frame(
+            not_elf.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null_mut()
+        ),
+        -8
+    );
+
+    // 7. Desktop Spotlight + File Explorer discovery of user apps
+    let mut spot = crate::gui::spotlight::Spotlight::new();
+    spot.query = String::from("paint");
+    let res = spot.get_results();
+    assert!(res.iter().any(|r| {
+        matches!(&r.target, crate::gui::spotlight::SpotlightTarget::LaunchPath(p) if p.contains("Paint") || p.contains("paint"))
+    }));
+
+    let mut fm = crate::gui::apps::FileManagerApp::new();
+    fm.navigate_to("/bin");
+    assert!(fm.entries.iter().any(|e| e.name == "paint" && e.is_elf));
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_multimedia_codecs_and_code_editor() {
+    print!("  [TEST] Multimedia Codecs, AVI Video, /dev/audio & Code Editor ... ");
+
+    // 1. PNG / QOI / Baseline JPEG encode + inspect + decode roundtrips
+    let mut img_pixels = alloc::vec![0xFF00_0000u32; 16 * 16];
+    for y in 0..16usize {
+        for x in 0..16usize {
+            let r = (x * 16) as u8;
+            let g = (y * 16) as u8;
+            let b = ((x + y) * 8) as u8;
+            img_pixels[y * 16 + x] = 0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+        }
+    }
+
+    let png_bytes = libgui::codecs::encode_png_argb(16, 16, &img_pixels).expect("PNG encode");
+    assert_eq!(libgui::codecs::inspect_image(&png_bytes), Some((16, 16, "PNG Image")));
+    let png_dec = libgui::codecs::decode_image(&png_bytes).expect("PNG decode");
+    assert_eq!(png_dec.pixels, img_pixels);
+
+    // Fixed-Huffman compressed DEFLATE verification (zlib-wrapped "Hello")
+    let fixed_z = [0x78u8, 0x9C, 0xF3, 0x48, 0xCD, 0xC9, 0xC9, 0x07, 0x00, 0x05, 0x8C, 0x01, 0xF5];
+    let inflated = libgui::codecs::deflate::zlib_decompress(&fixed_z).expect("Fixed Huffman zlib inflate");
+    assert_eq!(inflated.as_slice(), b"Hello");
+
+    let qoi_bytes = libgui::codecs::encode_qoi_argb(16, 16, &img_pixels).expect("QOI encode");
+    assert_eq!(libgui::codecs::inspect_image(&qoi_bytes), Some((16, 16, "QOI Image")));
+    let qoi_dec = libgui::codecs::decode_image(&qoi_bytes).expect("QOI decode");
+    assert_eq!(qoi_dec.pixels, img_pixels);
+
+    let jpg_bytes = libgui::codecs::encode_baseline_jpeg(16, 16, &img_pixels).expect("JPEG encode");
+    assert_eq!(libgui::codecs::inspect_image(&jpg_bytes), Some((16, 16, "JPEG Image")));
+    let jpg_dec = libgui::codecs::decode_image(&jpg_bytes).expect("JPEG decode");
+    assert_eq!((jpg_dec.width, jpg_dec.height), (16, 16));
+    let px_orig = img_pixels[8 * 16 + 8];
+    let px_dec = jpg_dec.pixels[8 * 16 + 8];
+    assert!((((px_orig >> 16) & 0xFF) as i32 - ((px_dec >> 16) & 0xFF) as i32).abs() <= 28);
+
+    // Verify wallpaper subsystem supports PNG/JPEG/QOI from VFS
+    assert!(crate::gui::wallpaper::is_supported_image("/Users/sublime/Pictures/SublimeLogo.png"));
+    assert!(crate::gui::wallpaper::is_supported_image("/Users/sublime/Pictures/PrismPhoto.jpg"));
+    assert!(crate::gui::wallpaper::is_supported_image("/Users/sublime/Pictures/CosmicTile.qoi"));
+    let vfs_png = crate::gui::wallpaper::load_vfs_image("/Users/sublime/Pictures/SublimeLogo.png").expect("VFS PNG load");
+    assert_eq!((vfs_png.width, vfs_png.height), (128, 72));
+
+    // 2. Audio codecs: VFS WAV, VFS QOA, synthetic IMA-ADPCM WAV, MP3 frame decode, /dev/audio
+    let wav_data = crate::user::apps::read_vfs_binary("/Users/sublime/Music/SublimeChime.wav").expect("WAV file");
+    let wav_aud = libgui::codecs::decode_audio(&wav_data).expect("WAV decode");
+    assert!(!wav_aud.samples_44k_stereo.is_empty());
+
+    let qoa_data = crate::user::apps::read_vfs_binary("/Users/sublime/Music/SynthChord.qoa").expect("QOA file");
+    assert_eq!(libgui::codecs::inspect_audio(&qoa_data), Some((44100, 1, "QOA Audio")));
+    let qoa_aud = libgui::codecs::decode_audio(&qoa_data).expect("QOA decode");
+    assert!(qoa_aud.samples_44k_stereo.len() > 2000);
+
+    // Seeded Music Player library tracks + RIFF INFO metadata
+    let nebula_bytes = crate::user::apps::read_vfs_binary("/Users/sublime/Music/NebulaDrift.wav").expect("NebulaDrift.wav");
+    let nebula_meta = libgui::codecs::inspect_audio_metadata("/Users/sublime/Music/NebulaDrift.wav", &nebula_bytes);
+    assert_eq!(nebula_meta.title, "Nebula Drift");
+    assert_eq!(nebula_meta.artist, "Sublime Synth");
+    assert!(nebula_meta.duration_ms >= 6000);
+    let nebula_dec = libgui::codecs::decode_audio(&nebula_bytes).expect("NebulaDrift decode");
+    assert!(nebula_dec.samples_44k_stereo.len() > 44100 * 2);
+
+    let arp_bytes = crate::user::apps::read_vfs_binary("/Users/sublime/Music/StarlightArp.qoa").expect("StarlightArp.qoa");
+    let arp_meta = libgui::codecs::inspect_audio_metadata("/Users/sublime/Music/StarlightArp.qoa", &arp_bytes);
+    assert_eq!(arp_meta.title, "StarlightArp");
+    assert!(arp_meta.duration_ms >= 5000);
+    let arp_dec = libgui::codecs::decode_audio(&arp_bytes).expect("StarlightArp decode");
+    assert!(arp_dec.samples_44k_stereo.len() > 44100 * 2);
+
+    // Synthesize IMA-ADPCM mono WAV (tag 0x0011, 12-byte block_align)
+    let mut ima_wav = Vec::new();
+    ima_wav.extend_from_slice(b"RIFF");
+    ima_wav.extend_from_slice(&(36u32 + 12u32).to_le_bytes());
+    ima_wav.extend_from_slice(b"WAVEfmt ");
+    ima_wav.extend_from_slice(&16u32.to_le_bytes());
+    ima_wav.extend_from_slice(&0x0011u16.to_le_bytes());
+    ima_wav.extend_from_slice(&1u16.to_le_bytes());
+    ima_wav.extend_from_slice(&22050u32.to_le_bytes());
+    ima_wav.extend_from_slice(&11025u32.to_le_bytes());
+    ima_wav.extend_from_slice(&12u16.to_le_bytes());
+    ima_wav.extend_from_slice(&4u16.to_le_bytes());
+    ima_wav.extend_from_slice(b"data");
+    ima_wav.extend_from_slice(&12u32.to_le_bytes());
+    ima_wav.extend_from_slice(&0i16.to_le_bytes());
+    ima_wav.push(10);
+    ima_wav.push(0);
+    ima_wav.extend_from_slice(&[0x33u8; 8]);
+    let ima_aud = libgui::codecs::decode_audio(&ima_wav).expect("IMA-ADPCM decode");
+    assert!(ima_aud.samples_44k_stereo.len() >= 32);
+
+    // Valid MPEG-1 Layer III 128kbps 44.1kHz stereo frame (417 bytes) header inspection + ID3v1 tag + decoder
+    let mut mp3_frame = alloc::vec![0u8; 417 * 2 + 128];
+    for frame_i in 0..2 {
+        let base = frame_i * 417;
+        mp3_frame[base] = 0xFF;
+        mp3_frame[base + 1] = 0xFB;
+        mp3_frame[base + 2] = 0x90;
+        mp3_frame[base + 3] = 0x00;
+    }
+    let tag_base = 417 * 2;
+    mp3_frame[tag_base..tag_base + 3].copy_from_slice(b"TAG");
+    mp3_frame[tag_base + 3..tag_base + 12].copy_from_slice(b"Orbital  ");
+    mp3_frame[tag_base + 33..tag_base + 42].copy_from_slice(b"SublimeOS");
+    let mp3_meta = libgui::codecs::inspect_audio_metadata("/Users/sublime/Music/Orbital.mp3", &mp3_frame);
+    assert_eq!(mp3_meta.title, "Orbital");
+    assert_eq!(mp3_meta.artist, "SublimeOS");
+    assert_eq!(libgui::codecs::mp3::inspect_mp3_header(&mp3_frame), Some((44100, 2, 128)));
+    let mp3_dec = libgui::codecs::decode_audio(&mp3_frame).expect("MP3 frame decode");
+    assert_eq!(mp3_dec.samples_44k_stereo.len(), 1152 * 2 * 2);
+
+    // Test /dev/audio & /dev/audioctl non-blocking streaming interface + mute state
+    {
+        let vfs = crate::fs::vfs::VFS.lock();
+        let dev_aud = vfs.open("/dev/audio", crate::user::libc::O_RDWR).expect("/dev/audio open");
+        let dev_ctl = vfs.open("/dev/audioctl", crate::user::libc::O_RDWR).expect("/dev/audioctl open");
+        drop(vfs);
+        let sample_bytes = [0u8; 64];
+        let nw = dev_aud.write(&sample_bytes).expect("/dev/audio write");
+        assert_eq!(nw, 64);
+        dev_ctl.write(b"vol 75; mute").expect("audioctl vol & mute");
+        assert_eq!(crate::drivers::audio::get_volume(), 75);
+        assert!(crate::drivers::audio::is_muted());
+        let mut ctl_buf = [0u8; 128];
+        let cn = dev_ctl.read(&mut ctl_buf).expect("audioctl read");
+        let ctl_str = core::str::from_utf8(&ctl_buf[..cn]).unwrap_or("");
+        assert!(ctl_str.contains("muted=1"), "Expected muted=1 in {}", ctl_str);
+        dev_ctl.write(b"unmute; stop").expect("audioctl unmute & stop");
+        assert!(!crate::drivers::audio::is_muted());
+        crate::drivers::audio::set_volume(80);
+    }
+
+    // 3. AVI / MJPEG Video Container demuxing from VFS
+    let avi_bytes = crate::user::apps::read_vfs_binary("/Users/sublime/Videos/SublimeDemo.avi").expect("AVI file");
+    assert_eq!(libgui::codecs::inspect_avi(&avi_bytes), Some((96, 64, 10, "AVI MJPEG Video")));
+    let avi_movie = libgui::codecs::decode_avi(&avi_bytes).expect("AVI decode");
+    assert_eq!(avi_movie.video_frames_raw.len(), 12);
+    assert!(!avi_movie.audio_samples_44k_stereo.is_empty());
+    let f0 = avi_movie.decode_frame(0).expect("AVI frame 0 JPEG decode");
+    assert_eq!((f0.width, f0.height), (96, 64));
+
+    // 4. Media Player, Music Player & Code Editor ELF64 GUI apps + Syntax Highlighter
+    assert!(crate::user::apps::elf_is_gui_client("/bin/player"));
+    assert!(crate::user::apps::elf_is_gui_client("/bin/music"));
+    assert!(crate::user::apps::elf_is_gui_client("/bin/code"));
+    let m_player = crate::user::apps::read_app_manifest("/Applications/Media Player.app").expect("Media Player.app");
+    let m_music = crate::user::apps::read_app_manifest("/Applications/Music Player.app").expect("Music Player.app");
+    let m_code = crate::user::apps::read_app_manifest("/Applications/Code Editor.app").expect("Code Editor.app");
+    assert_eq!(m_player.exec, "/bin/player");
+    assert_eq!(m_music.exec, "/bin/music");
+    assert_eq!(m_code.exec, "/bin/code");
+
+    use libgui::code_highlight::{detect_language, tokenize_line, CodeLanguage, TokenKind};
+    assert_eq!(detect_language("/Users/sublime/Documents/hello.rs"), CodeLanguage::Rust);
+    assert_eq!(detect_language("/Users/sublime/Documents/config.json"), CodeLanguage::Json);
+    let mut in_blk = false;
+    let spans = tokenize_line("fn test() { let s = \"ok\"; /* c */ }", CodeLanguage::Rust, &mut in_blk);
+    assert!(!in_blk);
+    assert!(spans.iter().any(|s| s.kind == TokenKind::Keyword));
+    assert!(spans.iter().any(|s| s.kind == TokenKind::StringLit));
+    assert!(spans.iter().any(|s| s.kind == TokenKind::Comment));
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_boot_splash_and_scrollbars() {
+    print!("  [TEST] Boot Splash & Interactive Scrollbars ... ");
+
+    // 1. Boot Splash stage state, GOP text suppression, panic recovery, & card rasterization
+    let prev_splash = crate::drivers::gop_console::is_boot_splash_active();
+    crate::gui::boot_splash::set_stage(88, "Running Kernel Diagnostics...");
+    let (_, pct, lbl) = crate::gui::boot_splash::snapshot();
+    assert_eq!(pct, 88);
+    assert_eq!(lbl, "Running Kernel Diagnostics...");
+
+    let mut card_px = alloc::vec![0u32; 460 * 276];
+    let mut card_surf = libgui::gfx::Surface::from_slice(460, 276, &mut card_px);
+    crate::gui::boot_splash::render_card_to_surface(&mut card_surf, 65, "Probing Devices...", 1024, 768);
+    let unique_mid = card_px.iter().take(460 * 160).any(|&c| (c & 0xFF) > 100);
+    let unique_bar = card_px[460 * 190 + 180] != card_px[460 * 190 + 400];
+    assert!(unique_mid, "Boot splash emblem must rasterize lit prism pixels");
+    assert!(unique_bar, "Boot splash progress bar fill must contrast against track");
+
+    crate::drivers::gop_console::set_boot_splash_active(true);
+    assert!(crate::drivers::gop_console::is_boot_splash_active());
+    if !crate::drivers::gop_console::is_active() {
+        crate::drivers::gop_console::enter_panic_mode();
+        assert!(!crate::drivers::gop_console::is_boot_splash_active(), "Panic mode must reveal console");
+    }
+    crate::drivers::gop_console::set_boot_splash_active(prev_splash);
+
+    // 2. libgui ScrollBar track click, stepper arrow, & wheel
+    use libgui::event::{GuiEvent, MouseButton};
+    use libgui::gfx::Rect;
+    use libgui::widget::{ScrollBar, ScrollBarState, ScrollOrientation};
+    let mut sb = ScrollBarState::new(0, 100, 20);
+    let sb_rect = Rect::new(400, 0, 14, 300);
+    // Track page-down click near bottom
+    let (_, ch_track) = ScrollBar::handle_event(
+        &mut sb,
+        sb_rect,
+        ScrollOrientation::Vertical,
+        GuiEvent::MouseDown { x: 406, y: 240, button: MouseButton::Left },
+    );
+    assert!(ch_track && sb.value == 20, "Track click below thumb should advance by page");
+    // Step down button click
+    let (_, ch_dn) = ScrollBar::handle_event(
+        &mut sb,
+        sb_rect,
+        ScrollOrientation::Vertical,
+        GuiEvent::MouseDown { x: 406, y: 294, button: MouseButton::Left },
+    );
+    assert!(ch_dn && sb.value == 21);
+    // Wheel up (positive delta_y decreases value)
+    let (_, ch_wh) = ScrollBar::handle_event(
+        &mut sb,
+        sb_rect,
+        ScrollOrientation::Vertical,
+        GuiEvent::MouseWheel { x: 406, y: 120, delta_y: 1 },
+    );
+    assert!(ch_wh && sb.value < 21);
+
+    // 3. TerminalApp interactive scrollbar click & wheel synchronization
+    let mut term = crate::gui::apps::TerminalApp::new();
+    for i in 0..60 {
+        term.lines.push((alloc::format!("Line {}", i), crate::gui::color::Color::WHITE));
+    }
+    assert_eq!(term.scroll_offset, 0);
+    term.handle_click(592, 40, 0, 0, 600, 320); // click top track above bottom-pinned thumb -> scrolls UP
+    assert!(term.scroll_offset > 0, "Clicking top of Terminal scrollbar must scroll into history");
+    let after_up = term.scroll_offset;
+    term.handle_wheel(-1);
+    assert!(term.scroll_offset < after_up, "Wheel down must move closer to latest output");
+
+    // 4. TextEditApp (Notepad) interactive scrollbar click & wheel
+    let mut ed = crate::gui::apps::TextEditApp::new();
+    for i in 0..60 {
+        ed.lines.push(alloc::format!("Note line {}", i));
+    }
+    ed.handle_click(592, 260, 0, 0, 600, 360); // track click below top thumb -> page down
+    assert!(ed.scroll_row > 0, "Clicking Notepad scrollbar track must scroll down");
+    let ed_mid = ed.scroll_row;
+    assert!(ed.handle_wheel(1) && ed.scroll_row < ed_mid, "Notepad wheel up must scroll toward top");
+
+    // 5. SysmonApp scroll_row wheel support
+    let mut sysmon = crate::gui::apps::SysmonApp::new();
+    sysmon.active_tab = crate::gui::apps::sysmon::SysmonTab::Applications;
+    for i in 0..16 {
+        sysmon.window_list.push((i + 1, alloc::format!("Window {}", i), false));
+    }
+    assert!(sysmon.handle_wheel(-1) && sysmon.scroll_row > 0);
+    assert!(sysmon.handle_wheel(1) && sysmon.scroll_row == 0);
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

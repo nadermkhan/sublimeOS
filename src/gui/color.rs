@@ -3,74 +3,96 @@
 pub struct Color(pub u32);
 
 impl Color {
+    #[inline(always)]
+    pub const fn into_libgui(self) -> libgui::gfx::Color {
+        libgui::gfx::Color(self.0)
+    }
+
+    #[inline(always)]
+    pub const fn from_libgui(c: libgui::gfx::Color) -> Self {
+        Self(c.0)
+    }
+
     pub const TRANSPARENT: Color = Color(0x00000000);
     pub const BLACK: Color = Color(0xFF000000);
     pub const WHITE: Color = Color(0xFFFFFFFF);
 
-    // Rolling meadow wallpaper palette
-    pub const XP_SKY_TOP: Color = Color(0xFF2B6CC4);
-    pub const XP_SKY_MID: Color = Color(0xFF5FA5EC);
-    pub const XP_SKY_HORIZON: Color = Color(0xFF9ED0FA);
-    pub const XP_HILL_FAR: Color = Color(0xFF6BB246);
-    pub const XP_HILL_LIGHT: Color = Color(0xFF72C033);
-    pub const XP_HILL_MID: Color = Color(0xFF4CA02B);
-    pub const XP_HILL_DARK: Color = Color(0xFF347A1C);
+    // Geometric Metro desktop wallpaper palette
+    pub const XP_SKY_TOP: Color = Color(0xFF0A326E);
+    pub const XP_SKY_MID: Color = Color(0xFF1054AC);
+    pub const XP_SKY_HORIZON: Color = Color(0xFF1474D4);
+    pub const XP_HILL_FAR: Color = Color(0xFF1B9AEF);
+    pub const XP_HILL_LIGHT: Color = Color(0xFF39C6FF);
+    pub const XP_HILL_MID: Color = Color(0xFF0D4BA3);
+    pub const XP_HILL_DARK: Color = Color(0xFF061F4E);
 
-    // Classic Blue desktop window chrome
-    pub const XP_TITLE_HIGHLIGHT: Color = Color(0xFF3E94FF);
-    pub const XP_TITLE_TOP: Color = Color(0xFF0058EE);
-    pub const XP_TITLE_MID: Color = Color(0xFF004AD6);
-    pub const XP_TITLE_BOTTOM: Color = Color(0xFF003EB5);
-    pub const XP_TITLE_INACTIVE_TOP: Color = Color(0xFF9DB8EC);
-    pub const XP_TITLE_INACTIVE_MID: Color = Color(0xFF7B98DF);
-    pub const XP_TITLE_INACTIVE_BOT: Color = Color(0xFF6B86CC);
-    pub const XP_FRAME_OUTER: Color = Color(0xFF001E73);
-    pub const XP_FRAME_ACTIVE: Color = Color(0xFF0048CC);
-    pub const XP_FRAME_INACTIVE: Color = Color(0xFF7A96DF);
+    // Windows 8.1 Modern Flat desktop window chrome
+    pub const XP_TITLE_HIGHLIGHT: Color = Color(0xFF0078D7);
+    pub const XP_TITLE_TOP: Color = Color(0xFF0078D7);
+    pub const XP_TITLE_MID: Color = Color(0xFF0078D7);
+    pub const XP_TITLE_BOTTOM: Color = Color(0xFF0078D7);
+    pub const XP_TITLE_INACTIVE_TOP: Color = Color(0xFFEBEBEB);
+    pub const XP_TITLE_INACTIVE_MID: Color = Color(0xFFEBEBEB);
+    pub const XP_TITLE_INACTIVE_BOT: Color = Color(0xFFEBEBEB);
+    pub const XP_FRAME_OUTER: Color = Color(0xFF0067B8);
+    pub const XP_FRAME_ACTIVE: Color = Color(0xFF0078D7);
+    pub const XP_FRAME_INACTIVE: Color = Color(0xFFC2C6CC);
 
-    // Window caption buttons
-    pub const XP_CAP_BLUE_TOP: Color = Color(0xFF63AAFF);
-    pub const XP_CAP_BLUE_BOT: Color = Color(0xFF1F63E0);
-    pub const XP_CAP_BLUE_HOVER_TOP: Color = Color(0xFF8CC2FF);
-    pub const XP_CAP_BLUE_HOVER_BOT: Color = Color(0xFF3A7EF5);
-    pub const XP_CAP_RED_TOP: Color = Color(0xFFEF7A5E);
-    pub const XP_CAP_RED_BOT: Color = Color(0xFFC43014);
-    pub const XP_CAP_RED_HOVER_TOP: Color = Color(0xFFFF987E);
-    pub const XP_CAP_RED_HOVER_BOT: Color = Color(0xFFDE4223);
+    // Window caption buttons (Win8.1 flat blocks)
+    pub const XP_CAP_BLUE_TOP: Color = Color(0xFF0078D7);
+    pub const XP_CAP_BLUE_BOT: Color = Color(0xFF0078D7);
+    pub const XP_CAP_BLUE_HOVER_TOP: Color = Color(0xFF3698E8);
+    pub const XP_CAP_BLUE_HOVER_BOT: Color = Color(0xFF3698E8);
+    pub const XP_CAP_RED_TOP: Color = Color(0xFFC75050);
+    pub const XP_CAP_RED_BOT: Color = Color(0xFFC75050);
+    pub const XP_CAP_RED_HOVER_TOP: Color = Color(0xFFE04343);
+    pub const XP_CAP_RED_HOVER_BOT: Color = Color(0xFFE04343);
 
-    // Classic dialog & control surfaces
-    pub const XP_FACE: Color = Color(0xFFECE9D8);
-    pub const XP_FACE_LIGHT: Color = Color(0xFFF6F4EC);
-    pub const XP_FACE_DARK: Color = Color(0xFFD6D2C2);
+    // Modern flat dialog & control surfaces
+    pub const XP_FACE: Color = Color(0xFFF0F0F0);
+    pub const XP_FACE_LIGHT: Color = Color(0xFFFFFFFF);
+    pub const XP_FACE_DARK: Color = Color(0xFFE1E1E1);
     pub const XP_WHITE: Color = Color(0xFFFFFFFF);
-    pub const XP_SHADOW: Color = Color(0xFFACA899);
-    pub const XP_DARK_SHADOW: Color = Color(0xFF716F64);
-    pub const XP_CTRL_BORDER: Color = Color(0xFF003C74);
-    pub const XP_INPUT_BORDER: Color = Color(0xFF7F9DB9);
-    pub const XP_SELECTION: Color = Color(0xFF316AC5);
-    pub const XP_TEXT_BLACK: Color = Color(0xFF000000);
-    pub const XP_TEXT_GRAY: Color = Color(0xFF5A5A5A);
-    pub const XP_TEXT_LINK: Color = Color(0xFF215DC6);
-    pub const XP_ORANGE_GLOW: Color = Color(0xFFE68B2C);
+    pub const XP_SHADOW: Color = Color(0xFFD0D0D0);
+    pub const XP_DARK_SHADOW: Color = Color(0xFF8C8C8C);
+    pub const XP_CTRL_BORDER: Color = Color(0xFFADADAD);
+    pub const XP_INPUT_BORDER: Color = Color(0xFFABADB3);
+    pub const XP_SELECTION: Color = Color(0xFF0078D7);
+    pub const XP_TEXT_BLACK: Color = Color(0xFF141414);
+    pub const XP_TEXT_GRAY: Color = Color(0xFF5C5C5C);
+    pub const XP_TEXT_LINK: Color = Color(0xFF0066CC);
+    pub const XP_ORANGE_GLOW: Color = Color(0xFF0078D7);
 
-    // Taskbar, Start button, and Start Menu
-    pub const XP_TASKBAR_HILITE: Color = Color(0xFF4C97F0);
-    pub const XP_TASKBAR_TOP: Color = Color(0xFF245EDC);
-    pub const XP_TASKBAR_MID: Color = Color(0xFF1E52C6);
-    pub const XP_TASKBAR_BOT: Color = Color(0xFF18409D);
-    pub const XP_TAB_ACTIVE: Color = Color(0xFF17419E);
-    pub const XP_TAB_TOP: Color = Color(0xFF3C81F3);
-    pub const XP_TAB_BOT: Color = Color(0xFF2764D8);
-    pub const XP_START_TOP: Color = Color(0xFF72C964);
-    pub const XP_START_MID: Color = Color(0xFF3D9C30);
-    pub const XP_START_BOT: Color = Color(0xFF28751E);
-    pub const XP_START_HOVER_TOP: Color = Color(0xFF83DA74);
-    pub const XP_START_HOVER_MID: Color = Color(0xFF49B23A);
-    pub const XP_TRAY_TOP: Color = Color(0xFF1491EB);
-    pub const XP_TRAY_BOT: Color = Color(0xFF0C6EC2);
-    pub const XP_TRAY_BORDER: Color = Color(0xFF35B4FF);
-    pub const XP_START_PLACES_BG: Color = Color(0xFFD3E5FA);
-    pub const XP_START_PLACES_DIV: Color = Color(0xFF95BDEE);
+    // Metro Taskbar, Start Screen & Start Tile Colors
+    pub const XP_TASKBAR_HILITE: Color = Color(0xFF325072);
+    pub const XP_TASKBAR_TOP: Color = Color(0xFF101D2E);
+    pub const XP_TASKBAR_MID: Color = Color(0xFF101D2E);
+    pub const XP_TASKBAR_BOT: Color = Color(0xFF0C1624);
+    pub const XP_TAB_ACTIVE: Color = Color(0xFF28476E);
+    pub const XP_TAB_TOP: Color = Color(0xFF1B304A);
+    pub const XP_TAB_BOT: Color = Color(0xFF1B304A);
+    pub const XP_START_TOP: Color = Color(0xFF0078D7);
+    pub const XP_START_MID: Color = Color(0xFF0078D7);
+    pub const XP_START_BOT: Color = Color(0xFF0067B8);
+    pub const XP_START_HOVER_TOP: Color = Color(0xFF1BA1E2);
+    pub const XP_START_HOVER_MID: Color = Color(0xFF1BA1E2);
+    pub const XP_TRAY_TOP: Color = Color(0xFF142336);
+    pub const XP_TRAY_BOT: Color = Color(0xFF0E1928);
+    pub const XP_TRAY_BORDER: Color = Color(0xFF2D4B70);
+    pub const XP_START_PLACES_BG: Color = Color(0xFF0B2242);
+    pub const XP_START_PLACES_DIV: Color = Color(0xFF1D4376);
+
+    // Metro Live Tile Palette
+    pub const METRO_BG_TOP: Color = Color(0xFF0C1B36);
+    pub const METRO_BG_BOT: Color = Color(0xFF123664);
+    pub const METRO_TILE_BLUE: Color = Color(0xFF0078D7);
+    pub const METRO_TILE_TEAL: Color = Color(0xFF008299);
+    pub const METRO_TILE_GREEN: Color = Color(0xFF008A00);
+    pub const METRO_TILE_ORANGE: Color = Color(0xFFD24726);
+    pub const METRO_TILE_PURPLE: Color = Color(0xFF5133AB);
+    pub const METRO_TILE_CRIMSON: Color = Color(0xFFAC193D);
+    pub const METRO_TILE_DARK: Color = Color(0xFF222428);
+    pub const METRO_TILE_COBALT: Color = Color(0xFF2672EC);
 
     // Semantic theme aliases
     pub const BG_DEEP_SPACE: Color = Self::XP_SKY_TOP;

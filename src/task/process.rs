@@ -43,6 +43,7 @@ pub struct ProcessControlBlock {
     pub children: Vec<ProcessId>,
     pub fd_table: Vec<Option<Arc<File>>>,
     pub exit_code: i32,
+    pub detached: bool,
     pub signal_state: crate::ipc::signal::SignalState,
     pub sigactions: [crate::ipc::signal::SigAction; 32],
 }
@@ -75,6 +76,7 @@ impl ProcessControlBlock {
             children: Vec::new(),
             fd_table,
             exit_code: 0,
+            detached: false,
             signal_state: crate::ipc::signal::SignalState::new(),
             sigactions: [crate::ipc::signal::SigAction::default(); 32],
         }
@@ -184,12 +186,44 @@ pub fn get_process(pid: ProcessId) -> Option<Arc<IrqSafeSpinlock<ProcessControlB
     None
 }
 
+/// Mark a spawned process as detached so its zombie PCB and AddressSpace are auto-reaped on exit.
+pub fn mark_detached(pid: ProcessId) {
+    if let Some(proc) = get_process(pid) {
+        proc.lock().detached = true;
+    }
+}
+
+/// Reap terminated detached or orphaned processes (called periodically from compositor/idle paths).
+pub fn reap_detached_zombies() {
+    let cur_pid = get_current_pid();
+    let mut table = PROCESS_TABLE.lock();
+    table.retain(|p| {
+        let proc = p.lock();
+        if proc.pid == cur_pid {
+            return true;
+        }
+        !matches!(proc.state, ProcessState::Zombie(_)) || !proc.detached
+    });
+}
+
+/// Snapshot active user-space processes (`(pid, name, state)`) for Task Manager & `ps`.
+pub fn list_user_processes() -> Vec<(ProcessId, String, ProcessState)> {
+    let table = PROCESS_TABLE.lock();
+    let mut out = Vec::with_capacity(table.len());
+    for p in table.iter() {
+        let proc = p.lock();
+        out.push((proc.pid, proc.name.clone(), proc.state));
+    }
+    out
+}
+
 /// Mark a process as a Zombie with the given exit code and wake any waiting parent.
 pub fn exit_process(pid: ProcessId, code: i32) {
     let ppid = if let Some(proc) = get_process(pid) {
         let mut p = proc.lock();
         p.state = ProcessState::Zombie(code);
         p.exit_code = code;
+        p.fd_table.clear();
         p.ppid
     } else {
         0
@@ -198,8 +232,12 @@ pub fn exit_process(pid: ProcessId, code: i32) {
     if ppid != 0 {
         if let Some(parent) = get_process(ppid) {
             parent.lock().signal_state.send(crate::ipc::signal::Signal::SIGCHLD);
+            crate::task::scheduler::wake_pid(ppid);
+        } else {
+            mark_detached(pid);
         }
-        crate::task::scheduler::wake_pid(ppid);
+    } else {
+        mark_detached(pid);
     }
 }
 
@@ -396,61 +434,170 @@ pub fn wait_for_child_exit(child_pid: ProcessId) -> i32 {
     }
 }
 
-/// POSIX sys_execve (Syscall 59): Replaces the process image with a new executable.
-pub fn sys_execve(path_ptr: *const u8, _argv: *const *const u8, _envp: *const *const u8) -> i32 {
-    if path_ptr.is_null() {
+/// Read a null-terminated UTF-8 string safely from current user/kernel virtual memory.
+fn copy_cstr_from_user(ptr: *const u8, max_len: usize) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut buf = Vec::new();
+    for i in 0..max_len {
+        let b = unsafe { *ptr.add(i) };
+        if b == 0 {
+            break;
+        }
+        buf.push(b);
+    }
+    String::from_utf8(buf).ok()
+}
+
+fn copy_cstr_array_from_user(arr: *const *const u8, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    if arr.is_null() {
+        return out;
+    }
+    for i in 0..limit {
+        let item_ptr = unsafe { *arr.add(i) };
+        if item_ptr.is_null() {
+            break;
+        }
+        if let Some(s) = copy_cstr_from_user(item_ptr, 512) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// POSIX sys_execve (Syscall 59): Replaces the process image with a new ELF64 executable.
+pub fn sys_execve(path_ptr: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32 {
+    sys_execve_with_frame(path_ptr, argv, envp, core::ptr::null_mut())
+}
+
+/// Complete `sys_execve` supporting full ELF64 segments, `argv`/`envp`, dynamic linking, and `SyscallFrame` jump.
+pub fn sys_execve_with_frame(
+    path_ptr: *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
+    frame_ptr: *mut crate::task::thread::SyscallFrame,
+) -> i32 {
+    let Some(raw_path) = copy_cstr_from_user(path_ptr, 255) else {
         return -14; // -EFAULT
+    };
+
+    let current_pid = get_current_pid();
+    let cwd = get_process(current_pid)
+        .map(|p| p.lock().cwd.clone())
+        .unwrap_or_else(|| String::from("/"));
+
+    let resolved = crate::user::apps::resolve_executable_path(&raw_path, &cwd)
+        .unwrap_or_else(|| raw_path.clone());
+
+    let mut owned_args = copy_cstr_array_from_user(argv, 32);
+    if owned_args.is_empty() {
+        owned_args.push(resolved.clone());
+    }
+    let mut owned_envs = copy_cstr_array_from_user(envp, 32);
+    if owned_envs.is_empty() {
+        owned_envs = alloc::vec![
+            String::from("PATH=/usr/local/bin:/bin"),
+            String::from("HOME=/Users/sublime"),
+            String::from("USER=sublime"),
+            String::from("OS=SublimeOS"),
+            String::from("DISPLAY=/run/wm.sock"),
+            alloc::format!("PWD={}", cwd),
+        ];
     }
 
-    // Safely copy null-terminated path from user pointer
-    let mut path_bytes = [0u8; 256];
-    let mut len = 0;
-    unsafe {
-        while len < 255 {
-            let byte = *path_ptr.add(len);
-            if byte == 0 {
-                break;
+    let file = {
+        let vfs = crate::fs::vfs::VFS.lock();
+        match vfs.open(&resolved, 0) {
+            Ok(f) => f,
+            Err(_) => return -2, // -ENOENT
+        }
+    };
+
+    let size_hint = {
+        let st = file.inode.lock().stat();
+        (st.size as usize).clamp(4096, 8 * 1024 * 1024)
+    };
+    let mut buf = Vec::with_capacity(size_hint);
+    let mut chunk = alloc::vec![0u8; 65536];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(m) => {
+                buf.extend_from_slice(&chunk[..m]);
+                if buf.len() >= 8 * 1024 * 1024 {
+                    break;
+                }
             }
-            path_bytes[len] = byte;
-            len += 1;
+            Err(_) => return -5, // -EIO
         }
     }
 
-    let path_str = match core::str::from_utf8(&path_bytes[..len]) {
-        Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+    let elf = match crate::task::elf::ElfBinary::parse(&buf) {
+        Ok(e) => e,
+        Err(_) => return -8, // -ENOEXEC
     };
 
-    let vfs = crate::fs::vfs::VFS.lock();
-    let file = match vfs.open(path_str, 0) {
-        Ok(f) => f,
-        Err(_) => return -2, // -ENOENT
-    };
-    drop(vfs);
-
-    let mut buf = alloc::vec![0u8; 65536];
-    let n = match file.read(&mut buf) {
-        Ok(bytes) => bytes,
-        Err(_) => return -5, // -EIO
+    let mut new_space = match AddressSpace::new() {
+        Some(s) => s,
+        None => return -12, // -ENOMEM
     };
 
-    match crate::task::elf::ElfBinary::parse(&buf[..n]) {
-        Ok(elf) => {
-            let mut new_space = match AddressSpace::new() {
-                Some(s) => s,
-                None => return -12, // -ENOMEM
-            };
+    let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+    let env_refs: Vec<&str> = owned_envs.iter().map(String::as_str).collect();
+    let (user_rip, user_rsp) = match elf.load_into_address_space_with_args_env(&mut new_space, &arg_refs, &env_refs) {
+        Ok(pair) => pair,
+        Err(_) => return -8, // -ENOEXEC
+    };
 
-            if elf.load_into_address_space(&mut new_space).is_err() {
-                return -8; // -ENOEXEC
-            }
-
-            // Replace active address space
-            *crate::task::user::CURRENT_USER_ADDRESS_SPACE.lock() = Some(new_space);
-            0
+    if crate::user::linker::DynamicLinker::is_dynamic(&elf) {
+        let mut linker = crate::user::linker::DynamicLinker::new();
+        if linker.link_binary(&elf, &mut new_space).is_err() {
+            return -8;
         }
-        Err(_) => -8, // -ENOEXEC
     }
+
+    let new_cr3 = new_space.pml4_phys;
+    let short_name = resolved.rsplit('/').next().unwrap_or(&resolved);
+
+    // Switch hardware CR3 BEFORE releasing old AddressSpace frames
+    let old_space = if let Some(proc) = get_process(current_pid) {
+        let mut p = proc.lock();
+        p.name = String::from(short_name);
+        if p.address_space.is_some() {
+            unsafe {
+                crate::arch::x86_64::registers::write_cr3(new_cr3);
+            }
+        }
+        p.address_space.replace(new_space)
+    } else {
+        *crate::task::user::CURRENT_USER_ADDRESS_SPACE.lock() = Some(new_space);
+        None
+    };
+
+    if !frame_ptr.is_null() {
+        crate::task::scheduler::set_current_thread_exec(new_cr3, short_name);
+        unsafe {
+            crate::arch::x86_64::registers::write_cr3(new_cr3);
+            let f = &mut *frame_ptr;
+            f.rcx = user_rip;
+            f.user_rsp = user_rsp;
+            f.r11 = 0x202;
+            f.rax = 0;
+            f.rdi = 0;
+            f.rsi = 0;
+            f.rdx = 0;
+            f.rbp = 0;
+            f.rbx = 0;
+            f.r12 = 0;
+            f.r13 = 0;
+            f.r14 = 0;
+            f.r15 = 0;
+        }
+    }
+    drop(old_space);
+    0
 }
 
 /// POSIX sys_kill (Syscall 62): Sends a signal to a process or process group.
@@ -1493,7 +1640,20 @@ pub fn sys_mmap(
         p.address_space = AddressSpace::new();
     }
 
-    let target_addr = if addr != 0 { addr } else { 0x6000_0000 };
+    let target_addr = if addr != 0 {
+        addr
+    } else if let Some(ref aspace) = p.address_space {
+        let top = aspace
+            .vmas
+            .iter()
+            .filter(|v| v.start >= 0x6000_0000 && v.end < 0x7000_0000_0000)
+            .map(|v| v.end)
+            .max()
+            .unwrap_or(0x6000_0000);
+        (top + 0xFFF) & !0xFFF
+    } else {
+        0x6000_0000
+    };
 
     let mut map_flags = crate::mm::vmm::PAGE_PRESENT | crate::mm::vmm::PAGE_USER;
     if (prot & crate::mm::shm::PROT_WRITE) != 0 || prot == 0 {

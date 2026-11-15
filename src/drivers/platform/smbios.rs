@@ -301,9 +301,15 @@ unsafe fn parse_smbios_tables(table: *const u8, table_len: usize, data: &mut Smb
                             data.memory_type = String::from(mem_type_str);
                         }
 
+                        if formatted_len >= 0x22 && data.memory_speed_mhz == 0 {
+                            let cfg_speed = core::ptr::read_unaligned(entry.add(0x20) as *const u16);
+                            if cfg_speed > 0 && cfg_speed != 0xFFFF {
+                                data.memory_speed_mhz = cfg_speed;
+                            }
+                        }
                         if formatted_len >= 0x16 {
                             let speed = core::ptr::read_unaligned(entry.add(0x14) as *const u16);
-                            if speed > 0 && data.memory_speed_mhz == 0 {
+                            if speed > 0 && speed != 0xFFFF && data.memory_speed_mhz == 0 {
                                 data.memory_speed_mhz = speed;
                             }
                         }
@@ -437,14 +443,13 @@ pub fn get_hardware_telemetry() -> SystemHardwareTelemetry {
             (format!("{} {}", mfg, prod), smbios.product_name.clone())
         }
     } else if has_smc {
-        // Fallback for Apple hardware when SMBIOS table is not exposed
         (
-            String::from("MacBook Pro (15-inch, Late 2011)"),
-            String::from("MacBookPro8,2"),
+            String::from("Apple Hardware (SMBIOS not exposed)"),
+            String::from("Apple-x86_64"),
         )
     } else {
         (
-            String::from("Standard x86_64 Personal Computer"),
+            String::from("x86_64 System (SMBIOS not exposed)"),
             String::from("PC-x86_64"),
         )
     };
@@ -452,12 +457,10 @@ pub fn get_hardware_telemetry() -> SystemHardwareTelemetry {
     // 2. Board ID / Motherboard Model
     let board_id = if !smbios.board_product.is_empty() {
         smbios.board_product.clone()
-    } else if is_apple {
-        String::from("Mac-94245A3940C91C80")
     } else if !smbios.board_manufacturer.is_empty() {
         smbios.board_manufacturer.clone()
     } else {
-        String::from("System Motherboard")
+        String::from("Not Exposed by Firmware")
     };
 
     // 3. Chip: CPUID brand string
@@ -477,30 +480,41 @@ pub fn get_hardware_telemetry() -> SystemHardwareTelemetry {
         format!("{} ({} Threads)", cores, threads)
     };
 
-    // 5. Memory: Clean authentic installed RAM format (macOS style)
+    // 5. Memory: Authentic installed RAM from SMBIOS Type 17 / E820 PMM (never invent DDR type)
     let pmm_lock = crate::mm::pmm::PMM.lock();
     let managed_bytes = pmm_lock.usable_ram_bytes();
     let managed_mb = (managed_bytes / (1024 * 1024)) as usize;
     drop(pmm_lock);
 
     let memory_summary = if smbios.installed_memory_mb > 0 {
-        let gb = (smbios.installed_memory_mb + 512) / 1024;
-        let t = if !smbios.memory_type.is_empty() { smbios.memory_type.as_str() } else { "DDR3" };
-        if smbios.memory_speed_mhz > 0 {
-            format!("{} GB {} MHz {}", gb, smbios.memory_speed_mhz, t)
+        let size_str = if smbios.installed_memory_mb >= 1024 && smbios.installed_memory_mb % 1024 == 0 {
+            format!("{} GB", smbios.installed_memory_mb / 1024)
         } else {
-            format!("{} GB {}", gb, t)
+            format!("{} MB", smbios.installed_memory_mb)
+        };
+        let t = if !smbios.memory_type.is_empty() { smbios.memory_type.as_str() } else { "RAM" };
+        if smbios.memory_speed_mhz > 0 {
+            format!("{} {} @ {} MHz ({} MB usable)", size_str, t, smbios.memory_speed_mhz, managed_mb)
+        } else {
+            format!("{} {} ({} MB usable)", size_str, t, managed_mb)
         }
+    } else if managed_mb >= 1024 {
+        let gb_whole = managed_mb / 1024;
+        let gb_tenths = ((managed_mb % 1024) * 10) / 1024;
+        format!("{}.{} GB ({} MB usable)", gb_whole, gb_tenths, managed_mb)
     } else {
-        let gb = ((managed_mb + 512) / 1024).max(1);
-        format!("{} GB DDR3", gb)
+        format!("{} MB Physical RAM", managed_mb)
     };
 
     // 6. System Firmware
-    let system_firmware = if !smbios.bios_version.is_empty() {
+    let system_firmware = if !smbios.bios_vendor.is_empty() && !smbios.bios_version.is_empty() {
+        format!("{} ({})", smbios.bios_version, smbios.bios_vendor)
+    } else if !smbios.bios_version.is_empty() {
         smbios.bios_version.clone()
+    } else if !smbios.bios_vendor.is_empty() {
+        smbios.bios_vendor.clone()
     } else {
-        String::from("UEFI 2.x")
+        String::from("Firmware not reported (no SMBIOS)")
     };
 
     // 7. OS Loader
