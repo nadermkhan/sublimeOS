@@ -177,6 +177,9 @@ pub fn run_app<O: WmOs>(client: &mut dyn WindowClient, os: &mut O) -> Result<(),
     });
     os.send_all(sock_fd, &attach)?;
     let mut shm = Some(buf);
+    // Double-buffer in client RAM so the compositor never samples a half-erased SHM frame mid-draw.
+    let mut back_pixels: Vec<u32> = alloc::vec![0u32; (cur_w as usize) * (cur_h as usize)];
+    let mut force_full_shm_sync = true;
 
     let init_bounds = Rect::new(0, 0, cur_w, cur_h);
     client.on_mount(init_bounds);
@@ -213,12 +216,14 @@ pub fn run_app<O: WmOs>(client: &mut dyn WindowClient, os: &mut O) -> Result<(),
                             client.on_theme_changed(theme_kind);
                         }
                         dirty = true;
+                        force_full_shm_sync = true;
                     }
                     WmServerMsg::ThemeChanged { theme_kind: t } => {
                         theme_kind = ThemeKind::from_u8(t);
                         crate::gfx::set_theme_kind(theme_kind);
                         client.on_theme_changed(theme_kind);
                         dirty = true;
+                        force_full_shm_sync = true;
                     }
                     WmServerMsg::PaletteChanged {
                         theme_kind: t,
@@ -229,6 +234,7 @@ pub fn run_app<O: WmOs>(client: &mut dyn WindowClient, os: &mut O) -> Result<(),
                         crate::gfx::set_wallpaper_seed_raw(seed_rgb);
                         client.on_theme_changed(theme_kind);
                         dirty = true;
+                        force_full_shm_sync = true;
                     }
                     WmServerMsg::ClipboardChanged { text } => {
                         if text != last_clip {
@@ -249,6 +255,7 @@ pub fn run_app<O: WmOs>(client: &mut dyn WindowClient, os: &mut O) -> Result<(),
                             crate::gfx::set_theme_kind(theme_kind);
                             client.on_theme_changed(theme_kind);
                             dirty = true;
+                            force_full_shm_sync = true;
                         }
                         let nw = width.max(64);
                         let nh = height.max(64);
@@ -261,6 +268,7 @@ pub fn run_app<O: WmOs>(client: &mut dyn WindowClient, os: &mut O) -> Result<(),
                             let name = format!("wm_{}_{}", pid, shm_seq);
                             shm_seq += 1;
                             let next_buf = ShmBuffer::allocate(os, &name, cur_w, cur_h)?;
+                            back_pixels.resize((cur_w as usize) * (cur_h as usize), 0);
                             let msg = encode_client_msg(&WmClientMsg::AttachShm {
                                 window_id: wid,
                                 width: cur_w,
@@ -282,6 +290,7 @@ pub fn run_app<O: WmOs>(client: &mut dyn WindowClient, os: &mut O) -> Result<(),
                                 running = false;
                             }
                             dirty = true;
+                            force_full_shm_sync = true;
                         }
                     }
                     WmServerMsg::Input {
@@ -326,18 +335,40 @@ pub fn run_app<O: WmOs>(client: &mut dyn WindowClient, os: &mut O) -> Result<(),
 
         if dirty {
             if let Some(ref mut buf) = shm {
-                let dmg = client
-                    .take_damage(bounds)
-                    .map(|r| r.intersect(bounds))
-                    .unwrap_or(bounds);
+                let taken = client.take_damage(bounds);
+                let dmg = if force_full_shm_sync {
+                    force_full_shm_sync = false;
+                    bounds
+                } else {
+                    taken.map(|r| r.intersect(bounds)).unwrap_or(bounds)
+                };
                 if !dmg.is_empty() {
                     let theme = crate::gfx::current_theme();
                     let w = buf.width;
                     let h = buf.height;
-                    let mut surface = Surface::from_slice(w, h, buf.pixels_mut());
-                    surface.push_clip(dmg);
-                    client.draw(&mut surface, bounds, &theme);
-                    surface.pop_clip();
+                    if back_pixels.len() != (w as usize) * (h as usize) {
+                        back_pixels.resize((w as usize) * (h as usize), 0);
+                    }
+                    {
+                        let mut surface = Surface::from_slice(w, h, &mut back_pixels);
+                        surface.push_clip(dmg);
+                        client.draw(&mut surface, bounds, &theme);
+                        surface.pop_clip();
+                    }
+                    let shm_px = buf.pixels_mut();
+                    let stride = w as usize;
+                    let x0 = dmg.x.max(0) as usize;
+                    let x1 = dmg.right().min(w).max(0) as usize;
+                    let y0 = dmg.y.max(0) as usize;
+                    let y1 = dmg.bottom().min(h).max(0) as usize;
+                    if x1 > x0 && y1 > y0 {
+                        for row in y0..y1 {
+                            let off = row * stride;
+                            shm_px[off + x0..off + x1]
+                                .copy_from_slice(&back_pixels[off + x0..off + x1]);
+                        }
+                    }
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
                     let commit = encode_client_msg(&WmClientMsg::CommitDamage {
                         window_id: wid,
                         x: dmg.x,

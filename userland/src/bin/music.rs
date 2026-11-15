@@ -56,6 +56,113 @@ struct AudioCtlState {
     muted: bool,
 }
 
+#[derive(Clone, Copy)]
+struct MusicLayout {
+    hdr_rect: Rect,
+    sidebar_rect: Rect,
+    sb_rect: Rect,
+    ref_rect: Rect,
+    deck_x: i32,
+    stage_rect: Rect,
+    stage_top_rect: Rect,
+    art_rect: Rect,
+    vis_x: i32,
+    vis_w: i32,
+    vis_base_y: i32,
+    vis_max_h: i32,
+    vis_rect: Rect,
+    stage_bottom_rect: Rect,
+    ctrl_y: i32,
+    seek_rect: Rect,
+    seek_time_rect: Rect,
+    btn_y: i32,
+    ctrl_left_rect: Rect,
+    mute_r: Rect,
+    vol_rect: Rect,
+    vol_area_rect: Rect,
+    status_rect: Rect,
+}
+
+impl MusicLayout {
+    fn compute(bounds: Rect) -> Self {
+        let side_w = 240i32;
+        let hdr_h = 36i32;
+        let ctrl_h = 84i32;
+        let status_h = 22i32;
+        let deck_x = bounds.x + side_w;
+        let deck_w = (bounds.w - side_w).max(200);
+        let stage_h = (bounds.h - hdr_h - ctrl_h - status_h).max(120);
+        let stage_rect = Rect::new(deck_x, bounds.y + hdr_h, deck_w, stage_h);
+        let ctrl_y = bounds.y + bounds.h - ctrl_h - status_h;
+        let btn_y = ctrl_y + 38;
+
+        let art_rect = Rect::new(stage_rect.x + 22, stage_rect.y + 22, 84, 84);
+        let vis_x = stage_rect.x + 22;
+        let vis_w = (stage_rect.w - 44).max(120);
+        let vis_base_y = stage_rect.y + stage_rect.h - 24;
+        let vis_max_h = (stage_rect.h - 140).clamp(36, 160);
+        let vis_y = (vis_base_y - vis_max_h).max(art_rect.bottom() + 4);
+        let vis_rect = Rect::new(vis_x, vis_y, vis_w, (vis_base_y - vis_y + 2).max(4));
+        let stage_top_rect = Rect::new(
+            stage_rect.x,
+            stage_rect.y,
+            stage_rect.w,
+            (vis_rect.y - stage_rect.y).max(0),
+        );
+        let stage_bottom_rect = Rect::new(
+            stage_rect.x,
+            vis_rect.bottom(),
+            stage_rect.w,
+            (stage_rect.bottom() - vis_rect.bottom()).max(0),
+        );
+
+        let seek_rect = Rect::new(deck_x + 16, ctrl_y + 10, (deck_w - 32).max(80), 10);
+        let seek_time_rect = Rect::new(deck_x, ctrl_y, deck_w, 36);
+        let mute_r = Rect::new(bounds.x + bounds.w - 184, btn_y, 44, 28);
+        let vol_rect = Rect::new(bounds.x + bounds.w - 134, btn_y + 8, 80, 12);
+        let vol_area_x = mute_r.x - 4;
+        let vol_area_rect = Rect::new(
+            vol_area_x,
+            ctrl_y + 36,
+            (bounds.right() - vol_area_x).max(0),
+            ctrl_h - 36,
+        );
+        let ctrl_left_rect = Rect::new(
+            deck_x,
+            ctrl_y + 36,
+            (vol_area_x - deck_x).max(0),
+            ctrl_h - 36,
+        );
+        let sidebar_h = (bounds.h - hdr_h - status_h).max(16);
+
+        Self {
+            hdr_rect: Rect::new(bounds.x, bounds.y, bounds.w, hdr_h),
+            sidebar_rect: Rect::new(bounds.x, bounds.y + hdr_h, side_w, sidebar_h),
+            sb_rect: Rect::new(bounds.x + side_w - 14, bounds.y + hdr_h, 14, sidebar_h),
+            ref_rect: Rect::new(bounds.x + bounds.w - 86, bounds.y + 6, 74, 24),
+            deck_x,
+            stage_rect,
+            stage_top_rect,
+            art_rect,
+            vis_x,
+            vis_w,
+            vis_base_y,
+            vis_max_h,
+            vis_rect,
+            stage_bottom_rect,
+            ctrl_y,
+            seek_rect,
+            seek_time_rect,
+            btn_y,
+            ctrl_left_rect,
+            mute_r,
+            vol_rect,
+            vol_area_rect,
+            status_rect: Rect::new(bounds.x, bounds.y + bounds.h - status_h, bounds.w, status_h),
+        }
+    }
+}
+
 struct MusicPlayerApp {
     ctx: ComponentContext,
     tracks: Vec<TrackEntry>,
@@ -71,12 +178,16 @@ struct MusicPlayerApp {
     last_tick_ms: u64,
     last_feed_ms: u64,
     last_ctl_poll_ms: u64,
+    last_vis_ms: u64,
     volume: u8,
     muted: bool,
     shuffle: bool,
     shuffle_rng: u32,
     repeat: RepeatMode,
     bars: [u8; 16],
+    prev_bars: [u8; 16],
+    prev_seek_px: i32,
+    prev_cur_sec: u64,
     dragging_seek: bool,
     dragging_vol: bool,
     status: String,
@@ -100,12 +211,16 @@ impl MusicPlayerApp {
             last_tick_ms: 0,
             last_feed_ms: 0,
             last_ctl_poll_ms: 0,
+            last_vis_ms: 0,
             volume: 80,
             muted: false,
             shuffle: false,
             shuffle_rng: 0x5A17_9C3Du32 ^ (getpid() as u32),
             repeat: RepeatMode::All,
-            bars: [6; 16],
+            bars: [4; 16],
+            prev_bars: [4; 16],
+            prev_seek_px: -1,
+            prev_cur_sec: u64::MAX,
             dragging_seek: false,
             dragging_vol: false,
             status: String::from("Ready — Select a track to play"),
@@ -454,16 +569,7 @@ impl WindowClient for MusicPlayerApp {
     }
 
     fn on_event(&mut self, event: GuiEvent, bounds: Rect) -> EventResult {
-        let side_w = 240i32;
-        let hdr_h = 36i32;
-        let ctrl_h = 84i32;
-        let status_h = 22i32;
-        let deck_x = bounds.x + side_w;
-        let deck_w = (bounds.w - side_w).max(200);
-        let ctrl_y = bounds.y + bounds.h - ctrl_h - status_h;
-        let seek_rect = Rect::new(deck_x + 16, ctrl_y + 10, (deck_w - 32).max(80), 10);
-        let btn_y = ctrl_y + 38;
-        let vol_rect = Rect::new(bounds.x + bounds.w - 134, btn_y + 8, 80, 12);
+        let layout = MusicLayout::compute(bounds);
 
         match event {
             GuiEvent::Tick { now_ms } => {
@@ -473,10 +579,22 @@ impl WindowClient for MusicPlayerApp {
                     now_ms.saturating_sub(self.last_tick_ms).min(200)
                 };
                 self.last_tick_ms = now_ms;
+                let mut damaged = false;
 
-                if !self.dragging_vol && now_ms.saturating_sub(self.last_ctl_poll_ms) >= 250 {
+                if now_ms.saturating_sub(self.last_ctl_poll_ms) >= 250 {
                     self.last_ctl_poll_ms = now_ms;
-                    self.sync_ctl_status();
+                    if let Some(st) = self.read_ctl_status() {
+                        if !self.dragging_vol && (st.vol != self.volume || st.muted != self.muted) {
+                            self.volume = st.vol;
+                            self.muted = st.muted;
+                            self.ctx.damage.invalidate(layout.vol_area_rect);
+                            damaged = true;
+                        }
+                        if self.playing && st.active && !self.dragging_seek {
+                            let hw_frame = self.sent_frame.saturating_sub(st.queued / 2);
+                            self.play_head_frame = hw_frame.min(self.total_frames());
+                        }
+                    }
                 }
 
                 if self.playing {
@@ -511,41 +629,77 @@ impl WindowClient for MusicPlayerApp {
                                     }
                                 }
                             }
+                            self.dirty_all = true;
+                            damaged = true;
                         }
                     }
+
+                    if now_ms.saturating_sub(self.last_vis_ms) >= 45 {
+                        self.last_vis_ms = now_ms;
+                        self.update_visualizer();
+                        if self.bars != self.prev_bars {
+                            self.prev_bars = self.bars;
+                            self.ctx.damage.invalidate(layout.vis_rect);
+                            damaged = true;
+                        }
+                        let tot_nz = total.max(1);
+                        let fill_w = ((self.play_head_frame.min(tot_nz) * layout.seek_rect.w as usize) / tot_nz) as i32;
+                        let cur_s = (self.play_head_frame as u64) / 44100;
+                        if fill_w != self.prev_seek_px || cur_s != self.prev_cur_sec {
+                            self.prev_seek_px = fill_w;
+                            self.prev_cur_sec = cur_s;
+                            self.ctx.damage.invalidate(layout.seek_time_rect);
+                            damaged = true;
+                        }
+                    }
+                } else if self.bars.iter().any(|&b| b > 4)
+                    && now_ms.saturating_sub(self.last_vis_ms) >= 45
+                {
+                    self.last_vis_ms = now_ms;
                     self.update_visualizer();
-                    self.ctx.damage.invalidate(bounds);
-                    return EventResult::NeedsRedraw;
+                    if self.bars != self.prev_bars {
+                        self.prev_bars = self.bars;
+                        self.ctx.damage.invalidate(layout.vis_rect);
+                        damaged = true;
+                    }
                 }
-                EventResult::Ignored
+
+                if damaged {
+                    EventResult::NeedsRedraw
+                } else {
+                    EventResult::Ignored
+                }
             }
             GuiEvent::MouseWheel { x, y, delta_y } => {
-                if x < deck_x && y >= bounds.y + hdr_h {
-                    let vis = ((bounds.h - hdr_h - status_h) / 36).max(1) as usize;
+                if x < layout.deck_x && y >= layout.sidebar_rect.y {
+                    let vis = (layout.sidebar_rect.h / 36).max(1) as usize;
                     let max_s = self.tracks.len().saturating_sub(vis);
                     if delta_y < 0 {
                         self.scroll_idx = (self.scroll_idx + 1).min(max_s);
                     } else if delta_y > 0 {
                         self.scroll_idx = self.scroll_idx.saturating_sub(1);
                     }
-                    self.ctx.damage.invalidate(bounds);
+                    self.ctx.damage.invalidate(layout.sidebar_rect);
                     return EventResult::NeedsRedraw;
                 }
                 EventResult::Ignored
             }
             GuiEvent::MouseMove { x, .. } => {
                 if self.dragging_seek && self.total_frames() > 0 {
-                    let rel = (x - seek_rect.x).clamp(0, seek_rect.w) as usize;
-                    let frame = (rel * self.total_frames()) / seek_rect.w.max(1) as usize;
+                    let rel = (x - layout.seek_rect.x).clamp(0, layout.seek_rect.w) as usize;
+                    let frame = (rel * self.total_frames()) / layout.seek_rect.w.max(1) as usize;
                     self.seek_to_frame(frame);
-                    self.ctx.damage.invalidate(bounds);
+                    let tot_nz = self.total_frames().max(1);
+                    self.prev_seek_px = ((self.play_head_frame.min(tot_nz) * layout.seek_rect.w as usize) / tot_nz) as i32;
+                    self.prev_cur_sec = (self.play_head_frame as u64) / 44100;
+                    self.ctx.damage.invalidate(layout.seek_time_rect);
                     return EventResult::NeedsRedraw;
                 }
                 if self.dragging_vol {
-                    let rel = (x - vol_rect.x).clamp(0, vol_rect.w);
-                    let nv = ((rel * 100) / vol_rect.w.max(1)) as u8;
+                    let rel = (x - layout.vol_rect.x).clamp(0, layout.vol_rect.w);
+                    let nv = ((rel * 100) / layout.vol_rect.w.max(1)) as u8;
                     self.set_hw_volume(nv);
-                    self.ctx.damage.invalidate(bounds);
+                    self.ctx.damage.invalidate(layout.vol_area_rect);
                     return EventResult::NeedsRedraw;
                 }
                 EventResult::Ignored
@@ -559,83 +713,101 @@ impl WindowClient for MusicPlayerApp {
                 EventResult::Ignored
             }
             GuiEvent::MouseDown { x, y, button: MouseButton::Left } => {
-                let ref_rect = Rect::new(bounds.x + bounds.w - 86, bounds.y + 6, 74, 24);
-                if ref_rect.contains(x, y) {
+                if layout.ref_rect.contains(x, y) {
                     self.scan_library();
                     self.status = format!("Library refreshed ({} tracks)", self.tracks.len());
-                    self.ctx.damage.invalidate(bounds);
+                    self.dirty_all = true;
                     return EventResult::NeedsRedraw;
                 }
 
                 // Track list + ScrollBar
-                if x < deck_x && y >= bounds.y + hdr_h && y < bounds.y + bounds.h - status_h {
-                    let sb_r = Rect::new(bounds.x + side_w - 14, bounds.y + hdr_h, 14, (bounds.h - hdr_h - status_h).max(16));
-                    let vis = (sb_r.h / 36).max(1) as usize;
+                if layout.sidebar_rect.contains(x, y) {
+                    let vis = (layout.sb_rect.h / 36).max(1) as usize;
                     let max_s = self.tracks.len().saturating_sub(vis);
                     self.list_vbar.sync_range(self.scroll_idx.min(max_s) as i32, max_s as i32, vis as i32);
-                    if sb_r.contains(x, y) {
+                    if layout.sb_rect.contains(x, y) {
                         let (_, ch) = ScrollBar::handle_event(
                             &mut self.list_vbar,
-                            sb_r,
+                            layout.sb_rect,
                             ScrollOrientation::Vertical,
                             GuiEvent::MouseDown { x, y, button: MouseButton::Left },
                         );
                         if ch {
                             self.scroll_idx = (self.list_vbar.value.max(0) as usize).min(max_s);
                         }
-                        self.ctx.damage.invalidate(bounds);
+                        self.ctx.damage.invalidate(layout.sidebar_rect);
                         return EventResult::NeedsRedraw;
                     }
-                    let row = ((y - (bounds.y + hdr_h + 4)) / 36).max(0) as usize + self.scroll_idx;
+                    let row = ((y - (layout.sidebar_rect.y + 4)) / 36).max(0) as usize + self.scroll_idx;
                     if row < self.tracks.len() {
                         let p = self.tracks[row].path.clone();
                         self.load_track(&p, true);
-                        self.ctx.damage.invalidate(bounds);
+                        self.dirty_all = true;
                         return EventResult::NeedsRedraw;
                     }
                 }
 
                 // Seek scrubber
-                if seek_rect.contains(x, y) && self.total_frames() > 0 {
+                if layout.seek_rect.contains(x, y) && self.total_frames() > 0 {
                     self.dragging_seek = true;
-                    let rel = (x - seek_rect.x).clamp(0, seek_rect.w) as usize;
-                    let frame = (rel * self.total_frames()) / seek_rect.w.max(1) as usize;
+                    let rel = (x - layout.seek_rect.x).clamp(0, layout.seek_rect.w) as usize;
+                    let frame = (rel * self.total_frames()) / layout.seek_rect.w.max(1) as usize;
                     self.seek_to_frame(frame);
-                    self.ctx.damage.invalidate(bounds);
+                    let tot_nz = self.total_frames().max(1);
+                    self.prev_seek_px = ((self.play_head_frame.min(tot_nz) * layout.seek_rect.w as usize) / tot_nz) as i32;
+                    self.prev_cur_sec = (self.play_head_frame as u64) / 44100;
+                    self.ctx.damage.invalidate(layout.seek_time_rect);
                     return EventResult::NeedsRedraw;
                 }
 
                 // Transport controls
-                if y >= btn_y && y < btn_y + 28 {
-                    let bx = deck_x + 16;
+                if y >= layout.btn_y && y < layout.btn_y + 28 {
+                    let bx = layout.deck_x + 16;
                     if x >= bx && x < bx + 46 {
                         self.advance_track(false, true);
+                        self.dirty_all = true;
+                        return EventResult::NeedsRedraw;
                     } else if x >= bx + 50 && x < bx + 118 {
                         if self.playing {
                             self.pause_playback();
                         } else {
                             self.start_or_resume();
                         }
+                        self.ctx.damage.invalidate(layout.ctrl_left_rect);
+                        self.ctx.damage.invalidate(layout.status_rect);
+                        return EventResult::NeedsRedraw;
                     } else if x >= bx + 122 && x < bx + 168 {
                         self.stop_playback();
+                        self.prev_seek_px = 0;
+                        self.prev_cur_sec = 0;
+                        self.ctx.damage.invalidate(layout.seek_time_rect);
+                        self.ctx.damage.invalidate(layout.ctrl_left_rect);
+                        return EventResult::NeedsRedraw;
                     } else if x >= bx + 172 && x < bx + 218 {
                         self.advance_track(true, true);
+                        self.dirty_all = true;
+                        return EventResult::NeedsRedraw;
                     } else if x >= bx + 224 && x < bx + 276 {
                         self.shuffle = !self.shuffle;
+                        self.ctx.damage.invalidate(layout.ctrl_left_rect);
+                        return EventResult::NeedsRedraw;
                     } else if x >= bx + 280 && x < bx + 344 {
                         self.repeat = self.repeat.next();
+                        self.ctx.damage.invalidate(layout.ctrl_left_rect);
+                        return EventResult::NeedsRedraw;
                     }
-                    let mute_r = Rect::new(bounds.x + bounds.w - 184, btn_y, 44, 28);
-                    if mute_r.contains(x, y) {
+                    if layout.mute_r.contains(x, y) {
                         self.toggle_mute();
+                        self.ctx.damage.invalidate(layout.vol_area_rect);
+                        return EventResult::NeedsRedraw;
                     }
-                    if vol_rect.contains(x, y) {
+                    if layout.vol_rect.contains(x, y) {
                         self.dragging_vol = true;
-                        let rel = (x - vol_rect.x).clamp(0, vol_rect.w);
-                        self.set_hw_volume(((rel * 100) / vol_rect.w.max(1)) as u8);
+                        let rel = (x - layout.vol_rect.x).clamp(0, layout.vol_rect.w);
+                        self.set_hw_volume(((rel * 100) / layout.vol_rect.w.max(1)) as u8);
+                        self.ctx.damage.invalidate(layout.vol_area_rect);
+                        return EventResult::NeedsRedraw;
                     }
-                    self.ctx.damage.invalidate(bounds);
-                    return EventResult::NeedsRedraw;
                 }
                 EventResult::Ignored
             }
@@ -647,41 +819,68 @@ impl WindowClient for MusicPlayerApp {
                         } else {
                             self.start_or_resume();
                         }
+                        self.ctx.damage.invalidate(layout.ctrl_left_rect);
+                        self.ctx.damage.invalidate(layout.status_rect);
                     }
                     KeyCode::Left => {
                         let back = 44100 * 5;
                         self.seek_to_frame(self.play_head_frame.saturating_sub(back));
+                        self.ctx.damage.invalidate(layout.seek_time_rect);
                     }
                     KeyCode::Right => {
                         self.seek_to_frame(self.play_head_frame.saturating_add(44100 * 5));
+                        self.ctx.damage.invalidate(layout.seek_time_rect);
                     }
                     KeyCode::Up => {
                         self.selected_idx = self.selected_idx.saturating_sub(1);
                         if self.selected_idx < self.scroll_idx {
                             self.scroll_idx = self.selected_idx;
                         }
+                        self.ctx.damage.invalidate(layout.sidebar_rect);
                     }
                     KeyCode::Down => {
                         if self.selected_idx + 1 < self.tracks.len() {
                             self.selected_idx += 1;
                         }
+                        self.ctx.damage.invalidate(layout.sidebar_rect);
                     }
                     KeyCode::Enter => {
                         if let Some(t) = self.tracks.get(self.selected_idx) {
                             let p = t.path.clone();
                             self.load_track(&p, true);
+                            self.dirty_all = true;
                         }
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') => self.advance_track(true, true),
-                    KeyCode::Char('p') | KeyCode::Char('P') => self.advance_track(false, true),
-                    KeyCode::Char('s') | KeyCode::Char('S') => self.shuffle = !self.shuffle,
-                    KeyCode::Char('r') | KeyCode::Char('R') => self.repeat = self.repeat.next(),
-                    KeyCode::Char('m') | KeyCode::Char('M') => self.toggle_mute(),
-                    KeyCode::Char('+') | KeyCode::Char('=') => self.set_hw_volume(self.volume.saturating_add(5)),
-                    KeyCode::Char('-') => self.set_hw_volume(self.volume.saturating_sub(5)),
+                    KeyCode::Char('n') | KeyCode::Char('N') => {
+                        self.advance_track(true, true);
+                        self.dirty_all = true;
+                    }
+                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                        self.advance_track(false, true);
+                        self.dirty_all = true;
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        self.shuffle = !self.shuffle;
+                        self.ctx.damage.invalidate(layout.ctrl_left_rect);
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        self.repeat = self.repeat.next();
+                        self.ctx.damage.invalidate(layout.ctrl_left_rect);
+                    }
+                    KeyCode::Char('m') | KeyCode::Char('M') => {
+                        self.toggle_mute();
+                        self.ctx.damage.invalidate(layout.vol_area_rect);
+                    }
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        self.set_hw_volume(self.volume.saturating_add(5));
+                        self.ctx.damage.invalidate(layout.vol_area_rect);
+                    }
+                    KeyCode::Char('-') => {
+                        self.set_hw_volume(self.volume.saturating_sub(5));
+                        self.ctx.damage.invalidate(layout.vol_area_rect);
+                    }
                     _ => return EventResult::Ignored,
                 }
-                self.ctx.damage.invalidate(bounds);
                 EventResult::NeedsRedraw
             }
             GuiEvent::Resize { .. } => {
@@ -696,183 +895,230 @@ impl WindowClient for MusicPlayerApp {
     fn take_damage(&mut self, bounds: Rect) -> Option<Rect> {
         if self.dirty_all {
             self.dirty_all = false;
+            let _ = self.ctx.damage.take_bounding(bounds);
             return Some(bounds);
         }
         self.ctx.damage.take_bounding(bounds)
     }
 
     fn draw(&mut self, surf: &mut Surface, bounds: Rect, theme: &Theme) {
-        let side_w = 240i32;
-        let hdr_h = 36i32;
-        let ctrl_h = 84i32;
-        let status_h = 22i32;
-        let deck_x = bounds.x + side_w;
-        let deck_w = (bounds.w - side_w).max(200);
-        let stage_h = (bounds.h - hdr_h - ctrl_h - status_h).max(120);
-        let stage_rect = Rect::new(deck_x, bounds.y + hdr_h, deck_w, stage_h);
-        let ctrl_y = bounds.y + bounds.h - ctrl_h - status_h;
+        let layout = MusicLayout::compute(bounds);
+        let clip = surf.clip_rect();
+        let stage_bg = Color::rgb(14, 18, 26);
 
-        // Top header bar & sidebar & deck backdrop
-        surf.fill_rect(Rect::new(bounds.x, bounds.y, bounds.w, hdr_h), theme.face_dark);
-        surf.fill_rect(
-            Rect::new(bounds.x, bounds.y + hdr_h, side_w, bounds.h - hdr_h - status_h),
-            theme.face,
-        );
-        surf.fill_rect(stage_rect, Color::rgb(14, 18, 26));
-        surf.fill_rect(Rect::new(deck_x, ctrl_y, deck_w, ctrl_h), theme.face);
+        let draw_hdr = clip.intersects(layout.hdr_rect);
+        let draw_sidebar = clip.intersects(layout.sidebar_rect);
+        let draw_stage_top = clip.intersects(layout.stage_top_rect);
+        let draw_vis = clip.intersects(layout.vis_rect);
+        let draw_stage_bottom = clip.intersects(layout.stage_bottom_rect);
+        let draw_seek_time = clip.intersects(layout.seek_time_rect);
+        let draw_ctrl_left = clip.intersects(layout.ctrl_left_rect);
+        let draw_vol_area = clip.intersects(layout.vol_area_rect);
+        let draw_status = clip.intersects(layout.status_rect);
 
-        // Cover Art + 16-band spectrum bars
-        let art_rect = Rect::new(stage_rect.x + 22, stage_rect.y + 22, 84, 84);
-        self.draw_cover_art(surf, art_rect, theme);
-
-        let vis_x = stage_rect.x + 22;
-        let vis_w = (stage_rect.w - 44).max(120);
-        let vis_base_y = stage_rect.y + stage_rect.h - 24;
-        let vis_max_h = (stage_rect.h - 140).clamp(36, 160);
-        let bar_slot = (vis_w / 16).max(6);
-        for bi in 0..16i32 {
-            let pct = self.bars[bi as usize] as i32;
-            let bh = ((pct * vis_max_h) / 100).max(4);
-            let col = if pct > 75 { Color::rgb(96, 220, 255) } else { theme.accent };
-            surf.fill_rect(Rect::new(vis_x + bi * bar_slot + 2, vis_base_y - bh, bar_slot - 4, bh), col);
+        // Background fills scoped strictly to dirty regions
+        if draw_hdr {
+            surf.fill_rect(layout.hdr_rect, theme.face_dark);
+        }
+        if draw_sidebar {
+            surf.fill_rect(layout.sidebar_rect, theme.face);
+        }
+        if draw_stage_top {
+            surf.fill_rect(layout.stage_rect, stage_bg);
+            self.draw_cover_art(surf, layout.art_rect, theme);
+        } else {
+            if draw_vis {
+                surf.fill_rect(layout.vis_rect, stage_bg);
+            }
+            if draw_stage_bottom && !layout.stage_bottom_rect.is_empty() {
+                surf.fill_rect(layout.stage_bottom_rect, stage_bg);
+            }
         }
 
-        // Seek bar
-        let seek_rect = Rect::new(deck_x + 16, ctrl_y + 10, (deck_w - 32).max(80), 10);
-        surf.fill_rect(seek_rect, theme.face_dark);
-        let total = self.total_frames().max(1);
-        let fill_w = ((self.play_head_frame.min(total) * seek_rect.w as usize) / total) as i32;
-        if fill_w > 0 {
-            surf.fill_rect(Rect::new(seek_rect.x, seek_rect.y, fill_w, seek_rect.h), theme.accent);
+        if draw_vis {
+            let bar_slot = (layout.vis_w / 16).max(6);
+            for bi in 0..16i32 {
+                let pct = self.bars[bi as usize] as i32;
+                let bh = ((pct * layout.vis_max_h) / 100).max(4);
+                let col = if pct > 75 { Color::rgb(96, 220, 255) } else { theme.accent };
+                surf.fill_rect(
+                    Rect::new(layout.vis_x + bi * bar_slot + 2, layout.vis_base_y - bh, bar_slot - 4, bh),
+                    col,
+                );
+            }
+            self.prev_bars = self.bars;
         }
 
-        // Text + Buttons
+        if draw_seek_time {
+            surf.fill_rect(layout.seek_time_rect, theme.face);
+            surf.fill_rect(layout.seek_rect, theme.face_dark);
+            let total = self.total_frames().max(1);
+            let fill_w = ((self.play_head_frame.min(total) * layout.seek_rect.w as usize) / total) as i32;
+            if fill_w > 0 {
+                surf.fill_rect(
+                    Rect::new(layout.seek_rect.x, layout.seek_rect.y, fill_w, layout.seek_rect.h),
+                    theme.accent,
+                );
+            }
+            self.prev_seek_px = fill_w;
+            self.prev_cur_sec = (self.play_head_frame as u64) / 44100;
+        }
+
+        if draw_ctrl_left {
+            surf.fill_rect(layout.ctrl_left_rect, theme.face);
+        }
+        if draw_vol_area {
+            surf.fill_rect(layout.vol_area_rect, theme.face);
+        }
+        if draw_status {
+            surf.fill_rect(layout.status_rect, theme.face_dark);
+        }
+
+        let need_text = draw_hdr
+            || draw_sidebar
+            || draw_stage_top
+            || draw_seek_time
+            || draw_ctrl_left
+            || draw_vol_area
+            || draw_status;
+        if !need_text {
+            return;
+        }
+
         with_default_font(|font| {
             let fg_hdr = contrast_text_on(theme.face_dark);
-            font.draw_text(
-                surf,
-                bounds.x + 12,
-                bounds.y + 10,
-                &format!("Sublime Music  •  {} Tracks", self.tracks.len()),
-                TextStyle::ui_sized(13, fg_hdr),
-            );
 
-            let ref_rect = Rect::new(bounds.x + bounds.w - 86, bounds.y + 6, 74, 24);
-            surf.fill_rect(ref_rect, theme.face_light);
-            surf.draw_rect(ref_rect, theme.ctrl_border);
-            font.draw_text(
-                surf,
-                ref_rect.x + 14,
-                ref_rect.y + 5,
-                "Refresh",
-                TextStyle::ui_sized(11, contrast_text_on(theme.face_light)),
-            );
+            if draw_hdr {
+                font.draw_text(
+                    surf,
+                    bounds.x + 12,
+                    bounds.y + 10,
+                    &format!("Sublime Music  •  {} Tracks", self.tracks.len()),
+                    TextStyle::ui_sized(13, fg_hdr),
+                );
 
-            // Tracklist rows + ScrollBar
-            let mut py = bounds.y + hdr_h + 4;
-            for (i, tr) in self.tracks.iter().enumerate().skip(self.scroll_idx) {
-                if py + 36 > bounds.y + bounds.h - status_h {
-                    break;
+                surf.fill_rect(layout.ref_rect, theme.face_light);
+                surf.draw_rect(layout.ref_rect, theme.ctrl_border);
+                font.draw_text(
+                    surf,
+                    layout.ref_rect.x + 14,
+                    layout.ref_rect.y + 5,
+                    "Refresh",
+                    TextStyle::ui_sized(11, contrast_text_on(theme.face_light)),
+                );
+            }
+
+            if draw_sidebar {
+                let mut py = layout.sidebar_rect.y + 4;
+                for (i, tr) in self.tracks.iter().enumerate().skip(self.scroll_idx) {
+                    if py + 36 > layout.status_rect.y {
+                        break;
+                    }
+                    let row_r = Rect::new(bounds.x + 4, py, layout.sidebar_rect.w - 20, 34);
+                    let sel = i == self.selected_idx;
+                    let bg = if sel { theme.accent } else { theme.face };
+                    surf.fill_rect(row_r, bg);
+                    let fg = contrast_text_on(bg);
+                    let sub = if sel { fg } else { Color::rgb(130, 140, 155) };
+                    font.draw_text(surf, row_r.x + 6, row_r.y + 3, &tr.meta.title, TextStyle::ui_sized(11, fg));
+                    let dur = format_mmss((tr.meta.duration_ms as u64) / 1000);
+                    font.draw_text(
+                        surf,
+                        row_r.x + 6,
+                        row_r.y + 18,
+                        &format!("{}  •  {}", tr.meta.artist, dur),
+                        TextStyle::ui_sized(10, sub),
+                    );
+                    py += 36;
                 }
-                let row_r = Rect::new(bounds.x + 4, py, side_w - 20, 34);
-                let sel = i == self.selected_idx;
-                let bg = if sel { theme.accent } else { theme.face };
-                surf.fill_rect(row_r, bg);
-                let fg = contrast_text_on(bg);
-                let sub = if sel { fg } else { Color::rgb(130, 140, 155) };
-                font.draw_text(surf, row_r.x + 6, row_r.y + 3, &tr.meta.title, TextStyle::ui_sized(11, fg));
-                let dur = format_mmss((tr.meta.duration_ms as u64) / 1000);
+                let vis = (layout.sb_rect.h / 36).max(1) as usize;
+                let max_s = self.tracks.len().saturating_sub(vis);
+                self.list_vbar.sync_range(self.scroll_idx.min(max_s) as i32, max_s as i32, vis as i32);
+                ScrollBar::draw(surf, layout.sb_rect, ScrollOrientation::Vertical, self.list_vbar, theme);
+            }
+
+            if draw_stage_top {
+                if let Some(ref m) = self.current_meta {
+                    let tx = layout.art_rect.x + layout.art_rect.w + 16;
+                    font.draw_text(surf, tx, layout.art_rect.y + 4, &m.title, TextStyle::ui_sized(16, Color::rgb(240, 245, 255)));
+                    font.draw_text(surf, tx, layout.art_rect.y + 28, &format!("{} — {}", m.artist, m.album), TextStyle::ui_sized(12, Color::rgb(175, 190, 210)));
+                    font.draw_text(
+                        surf,
+                        tx,
+                        layout.art_rect.y + 50,
+                        &format!("{}  |  {} Hz  |  {} ch", m.format_name, m.sample_rate, m.channels),
+                        TextStyle::ui_sized(11, Color::rgb(130, 180, 225)),
+                    );
+                } else {
+                    font.draw_text(
+                        surf,
+                        layout.art_rect.x + layout.art_rect.w + 16,
+                        layout.art_rect.y + 24,
+                        "No Track Selected",
+                        TextStyle::ui_sized(15, Color::rgb(210, 220, 235)),
+                    );
+                }
+            }
+
+            if draw_seek_time {
+                let cur_s = (self.play_head_frame as u64) / 44100;
+                let tot_s = (self.total_frames() as u64) / 44100;
                 font.draw_text(
                     surf,
-                    row_r.x + 6,
-                    row_r.y + 18,
-                    &format!("{}  •  {}", tr.meta.artist, dur),
-                    TextStyle::ui_sized(10, sub),
+                    layout.seek_rect.x,
+                    layout.ctrl_y + 22,
+                    &format!("{} / {}", format_mmss(cur_s), format_mmss(tot_s)),
+                    TextStyle::ui_sized(10, contrast_text_on(theme.face)),
                 );
-                py += 36;
             }
-            let sb_r = Rect::new(bounds.x + side_w - 14, bounds.y + hdr_h, 14, (bounds.h - hdr_h - status_h).max(16));
-            let vis = (sb_r.h / 36).max(1) as usize;
-            let max_s = self.tracks.len().saturating_sub(vis);
-            self.list_vbar.sync_range(self.scroll_idx.min(max_s) as i32, max_s as i32, vis as i32);
-            ScrollBar::draw(surf, sb_r, ScrollOrientation::Vertical, self.list_vbar, theme);
 
-            // Metadata deck text
-            if let Some(ref m) = self.current_meta {
-                let tx = art_rect.x + art_rect.w + 16;
-                font.draw_text(surf, tx, art_rect.y + 4, &m.title, TextStyle::ui_sized(16, Color::rgb(240, 245, 255)));
-                font.draw_text(surf, tx, art_rect.y + 28, &format!("{} — {}", m.artist, m.album), TextStyle::ui_sized(12, Color::rgb(175, 190, 210)));
+            if draw_ctrl_left {
+                let bx = layout.deck_x + 16;
+                let btns = [
+                    (bx, 46, "Prev", false),
+                    (bx + 50, 68, if self.playing { "Pause" } else { "Play" }, true),
+                    (bx + 122, 46, "Stop", false),
+                    (bx + 172, 46, "Next", false),
+                    (bx + 224, 52, "Shuf", self.shuffle),
+                    (bx + 280, 64, self.repeat.label(), self.repeat != RepeatMode::Off),
+                ];
+                for (x, w, label, active) in btns {
+                    let bg = if active { theme.accent } else { theme.face_light };
+                    surf.fill_rect(Rect::new(x, layout.btn_y, w, 28), bg);
+                    surf.draw_rect(Rect::new(x, layout.btn_y, w, 28), theme.ctrl_border);
+                    font.draw_text(surf, x + 8, layout.btn_y + 7, label, TextStyle::ui_sized(11, contrast_text_on(bg)));
+                }
+            }
+
+            if draw_vol_area {
+                let mbg = if self.muted { Color::rgb(190, 60, 60) } else { theme.face_light };
+                surf.fill_rect(layout.mute_r, mbg);
+                surf.draw_rect(layout.mute_r, theme.ctrl_border);
                 font.draw_text(
                     surf,
-                    tx,
-                    art_rect.y + 50,
-                    &format!("{}  |  {} Hz  |  {} ch", m.format_name, m.sample_rate, m.channels),
-                    TextStyle::ui_sized(11, Color::rgb(130, 180, 225)),
+                    layout.mute_r.x + 6,
+                    layout.mute_r.y + 7,
+                    if self.muted { "Muted" } else { "Mute" },
+                    TextStyle::ui_sized(10, contrast_text_on(mbg)),
                 );
-            } else {
-                font.draw_text(surf, art_rect.x + art_rect.w + 16, art_rect.y + 24, "No Track Selected", TextStyle::ui_sized(15, Color::rgb(210, 220, 235)));
+
+                surf.fill_rect(layout.vol_rect, theme.face_dark);
+                let vfill = ((self.volume as i32 * layout.vol_rect.w) / 100).clamp(0, layout.vol_rect.w);
+                if vfill > 0 {
+                    surf.fill_rect(Rect::new(layout.vol_rect.x, layout.vol_rect.y, vfill, layout.vol_rect.h), theme.accent);
+                }
+                font.draw_text(
+                    surf,
+                    layout.vol_rect.x + layout.vol_rect.w + 6,
+                    layout.btn_y + 7,
+                    &format!("{}%", self.volume),
+                    TextStyle::ui_sized(11, contrast_text_on(theme.face)),
+                );
             }
 
-            // Elapsed / Total timestamp
-            let cur_s = (self.play_head_frame as u64) / 44100;
-            let tot_s = (self.total_frames() as u64) / 44100;
-            font.draw_text(
-                surf,
-                seek_rect.x,
-                ctrl_y + 22,
-                &format!("{} / {}", format_mmss(cur_s), format_mmss(tot_s)),
-                TextStyle::ui_sized(10, contrast_text_on(theme.face)),
-            );
-
-            // Transport buttons
-            let btn_y = ctrl_y + 38;
-            let bx = deck_x + 16;
-            let btns = [
-                (bx, 46, "Prev", false),
-                (bx + 50, 68, if self.playing { "Pause" } else { "Play" }, true),
-                (bx + 122, 46, "Stop", false),
-                (bx + 172, 46, "Next", false),
-                (bx + 224, 52, "Shuf", self.shuffle),
-                (bx + 280, 64, self.repeat.label(), self.repeat != RepeatMode::Off),
-            ];
-            for (x, w, label, active) in btns {
-                let bg = if active { theme.accent } else { theme.face_light };
-                surf.fill_rect(Rect::new(x, btn_y, w, 28), bg);
-                surf.draw_rect(Rect::new(x, btn_y, w, 28), theme.ctrl_border);
-                font.draw_text(surf, x + 8, btn_y + 7, label, TextStyle::ui_sized(11, contrast_text_on(bg)));
+            if draw_status {
+                font.draw_text(surf, bounds.x + 8, layout.status_rect.y + 4, &self.status, TextStyle::ui_sized(11, fg_hdr));
             }
-
-            // Mute + Volume bar
-            let mute_r = Rect::new(bounds.x + bounds.w - 184, btn_y, 44, 28);
-            let mbg = if self.muted { Color::rgb(190, 60, 60) } else { theme.face_light };
-            surf.fill_rect(mute_r, mbg);
-            surf.draw_rect(mute_r, theme.ctrl_border);
-            font.draw_text(
-                surf,
-                mute_r.x + 6,
-                mute_r.y + 7,
-                if self.muted { "Muted" } else { "Mute" },
-                TextStyle::ui_sized(10, contrast_text_on(mbg)),
-            );
-
-            let vol_rect = Rect::new(bounds.x + bounds.w - 134, btn_y + 8, 80, 12);
-            surf.fill_rect(vol_rect, theme.face_dark);
-            let vfill = ((self.volume as i32 * vol_rect.w) / 100).clamp(0, vol_rect.w);
-            if vfill > 0 {
-                surf.fill_rect(Rect::new(vol_rect.x, vol_rect.y, vfill, vol_rect.h), theme.accent);
-            }
-            font.draw_text(
-                surf,
-                vol_rect.x + vol_rect.w + 6,
-                btn_y + 7,
-                &format!("{}%", self.volume),
-                TextStyle::ui_sized(11, contrast_text_on(theme.face)),
-            );
-
-            // Status bar
-            let sy = bounds.y + bounds.h - status_h;
-            surf.fill_rect(Rect::new(bounds.x, sy, bounds.w, status_h), theme.face_dark);
-            font.draw_text(surf, bounds.x + 8, sy + 4, &self.status, TextStyle::ui_sized(11, fg_hdr));
         });
     }
 
