@@ -98,10 +98,24 @@ ap_pm32:
     mov eax, dword ptr [eax]
     mov cr3, eax
 
-    /* Enable 64-bit Long Mode (EFER.LME = bit 8) and NXE (bit 11) in MSR 0xC0000080 */
+    /* Check CPUID 0x80000001:EDX[20] for NX support before setting EFER.NXE */
+    mov eax, 0x80000000
+    cpuid
+    xor esi, esi
+    cmp eax, 0x80000001
+    jb .Lap_no_nx
+    mov eax, 0x80000001
+    cpuid
+    mov esi, edx
+.Lap_no_nx:
+    /* Enable 64-bit Long Mode (EFER.LME = bit 8) and NXE (bit 11 if supported) */
     mov ecx, 0xC0000080
     rdmsr
-    or eax, (1 << 8) | (1 << 11)
+    or eax, (1 << 8)
+    test esi, (1 << 20)
+    jz .Lap_skip_nxe
+    or eax, (1 << 11)
+.Lap_skip_nxe:
     wrmsr
 
     /* Enable Paging (CR0.PG = bit 31), Write Protect (CR0.WP = bit 16), MP, clear EM */

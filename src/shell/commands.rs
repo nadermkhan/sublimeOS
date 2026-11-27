@@ -356,19 +356,8 @@ fn cmd_diskutil(args: &[&str]) {
                 println!();
             }
         } else {
-            println!("/dev/disk0 (internal, physical):");
-            println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
-            println!("   0:      GUID_partition_scheme                        *128.0 MB   disk0");
-            println!("   1:                        EFI EFI                     100.0 MB   disk0s1");
-            println!("   2:                  Sublime_FS Container disk1         *28.0 MB   disk0s2\n");
+            println!("No physical block devices attached (NVMe/AHCI/IDE).");
         }
-
-        println!("/dev/disk1 (synthesized):");
-        println!("   #:                       TYPE NAME                    SIZE       IDENTIFIER");
-        println!("   0:    SublimeFS Container Scheme -                      +28.0 MB    disk1");
-        println!("                                 Physical Store disk0s2");
-        println!("   1:              Cosmic Volume Sublime HD               12.4 MB    disk1s1");
-        println!("   2:              Cosmic Volume Sublime USB              15.6 MB    disk1s2");
     } else {
         println!("Usage: diskutil list");
     }
@@ -537,14 +526,37 @@ fn cmd_defaults(args: &[&str]) {
 fn cmd_top() {
     let (_total_frames, used_frames, free_frames) = crate::mm::pmm::PMM.lock().stats();
     let uptime_secs = crate::arch::x86_64::pit::get_ticks() / 1000;
-    println!("Processes: 3 total, 1 running, 2 sleeping, 3 threads");
-    println!("Load Avg: 0.12, 0.08, 0.02  CPU usage: 1.2% user, 2.4% sys, 96.4% idle");
-    println!("SharedLibs: numLib=12, resident=1.4M");
-    println!("MemRegions: num=48, resident=12M, private=2M");
+    let tasks = crate::task::scheduler::get_task_list();
+    let total = tasks.len();
+    let running = tasks
+        .iter()
+        .filter(|(_, _, s, _)| matches!(s, crate::task::thread::ThreadState::Running))
+        .count();
+    let ready = tasks
+        .iter()
+        .filter(|(_, _, s, _)| matches!(s, crate::task::thread::ThreadState::Ready))
+        .count();
+    let blocked = tasks
+        .iter()
+        .filter(|(_, _, s, _)| {
+            matches!(
+                s,
+                crate::task::thread::ThreadState::Blocked
+                    | crate::task::thread::ThreadState::Sleeping(_)
+            )
+        })
+        .count();
+    let online_cpus = crate::arch::x86_64::smp::ONLINE_AP_COUNT.load(core::sync::atomic::Ordering::Relaxed) + 1;
     println!(
-        "PhysMem: {}M used (12M wired), {}M unused.",
+        "Tasks: {} total, {} running, {} ready, {} blocked/sleeping | CPUs online: {}",
+        total, running, ready, blocked, online_cpus
+    );
+    println!(
+        "PhysMem: {} MiB used ({} frames), {} MiB free ({} frames)",
         (used_frames * 4096) / (1024 * 1024),
-        (free_frames * 4096) / (1024 * 1024)
+        used_frames,
+        (free_frames * 4096) / (1024 * 1024),
+        free_frames
     );
     println!("Uptime: {} seconds\n", uptime_secs);
     cmd_ps();

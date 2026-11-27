@@ -146,22 +146,7 @@ pub fn http_get(url: &str) -> Result<HttpResponse, &'static str> {
     let _ = socket_close(sock);
 
     if response_bytes.is_empty() {
-        // Mock fallback response for simulated/offline demonstration in tests
-        let mock_body = format!(
-            "<!DOCTYPE html>\n<html>\n<head><title>{}</title></head>\n<body>\n<h1>Welcome to {}</h1>\n<p>Served by CosmicOS Sublime TCP Engine</p>\n</body>\n</html>\n",
-            host, host
-        );
-        let mut mock_headers = BTreeMap::new();
-        mock_headers.insert(String::from("Content-Type"), String::from("text/html; charset=UTF-8"));
-        mock_headers.insert(String::from("Server"), String::from("CosmicOS-HTTP/1.0"));
-        mock_headers.insert(String::from("Connection"), String::from("close"));
-
-        return Ok(HttpResponse {
-            status_code: 200,
-            status_text: String::from("OK"),
-            headers: mock_headers,
-            body: Vec::from(mock_body.as_bytes()),
-        });
+        return Err("Empty HTTP response from peer");
     }
 
     parse_http_response(&response_bytes).ok_or("Failed to parse HTTP response")
@@ -194,28 +179,8 @@ pub fn https_get(url: &str) -> Result<HttpResponse, &'static str> {
         return Err("Missing hostname in URL");
     }
 
-    // Establish TLS 1.3 secure channel
-    let mut tls = match crate::net::tls::TlsStream::connect(host, port) {
-        Ok(t) => t,
-        Err(_) => {
-            // Offline fallback response when remote HTTPS host is offline
-            let mock_body = format!(
-                "<!DOCTYPE html>\n<html>\n<head><title>{}</title></head>\n<body>\n<h1>Welcome to {} (HTTPS / TLS 1.3)</h1>\n<p>Securely Served by CosmicOS TLS Engine</p>\n</body>\n</html>\n",
-                host, host
-            );
-            let mut mock_headers = BTreeMap::new();
-            mock_headers.insert(String::from("Content-Type"), String::from("text/html; charset=UTF-8"));
-            mock_headers.insert(String::from("Server"), String::from("CosmicOS-HTTPS/1.3"));
-            mock_headers.insert(String::from("Connection"), String::from("close"));
-
-            return Ok(HttpResponse {
-                status_code: 200,
-                status_text: String::from("OK"),
-                headers: mock_headers,
-                body: Vec::from(mock_body.as_bytes()),
-            });
-        }
-    };
+    // Establish TLS 1.3 secure channel (fail closed on handshake error)
+    let mut tls = crate::net::tls::TlsStream::connect(host, port)?;
 
     // Send HTTP/1.1 request over encrypted TLS 1.3 channel
     let request = format!(
@@ -240,21 +205,7 @@ pub fn https_get(url: &str) -> Result<HttpResponse, &'static str> {
     tls.close();
 
     if response_bytes.is_empty() {
-        let mock_body = format!(
-            "<!DOCTYPE html>\n<html>\n<head><title>{}</title></head>\n<body>\n<h1>Welcome to {} (HTTPS / TLS 1.3)</h1>\n<p>Securely Served by CosmicOS TLS Engine</p>\n</body>\n</html>\n",
-            host, host
-        );
-        let mut mock_headers = BTreeMap::new();
-        mock_headers.insert(String::from("Content-Type"), String::from("text/html; charset=UTF-8"));
-        mock_headers.insert(String::from("Server"), String::from("CosmicOS-HTTPS/1.3"));
-        mock_headers.insert(String::from("Connection"), String::from("close"));
-
-        return Ok(HttpResponse {
-            status_code: 200,
-            status_text: String::from("OK"),
-            headers: mock_headers,
-            body: Vec::from(mock_body.as_bytes()),
-        });
+        return Err("Empty HTTPS response from peer");
     }
 
     parse_http_response(&response_bytes).ok_or("Failed to parse HTTPS response")

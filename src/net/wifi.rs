@@ -459,7 +459,8 @@ pub fn connect(ssid: &str, passphrase: Option<&str>) -> Result<(), &'static str>
         mgr.scan_results.iter().find(|a| a.ssid == ssid).cloned()
     };
 
-    let mut ap = ap_opt.unwrap_or_else(|| WifiAccessPoint {
+    let ap_from_scan = ap_opt.is_some();
+    let ap = ap_opt.unwrap_or_else(|| WifiAccessPoint {
         ssid: String::from(ssid),
         bssid: [0x00, 0x14, 0x22, 0x01, 0x23, 0x45],
         rssi: -50,
@@ -467,8 +468,9 @@ pub fn connect(ssid: &str, passphrase: Option<&str>) -> Result<(), &'static str>
         security: if passphrase.is_some() { WifiSecurity::Wpa2Psk } else { WifiSecurity::Open },
     });
 
-    if passphrase.is_some() && ap.security == WifiSecurity::Open {
-        ap.security = WifiSecurity::Wpa2Psk;
+    // Fail closed on WPA2-to-Open downgrade if a scanned AP advertised Open while a passphrase was supplied.
+    if ap_from_scan && passphrase.is_some() && ap.security == WifiSecurity::Open {
+        return Err("Refusing WPA2-to-Open downgrade: scanned AP does not advertise WPA2/RSN");
     }
 
     let mut pmk = [0u8; 32];
@@ -620,15 +622,26 @@ pub fn connect(ssid: &str, passphrase: Option<&str>) -> Result<(), &'static str>
                     let mut zeroed = eapol.to_vec();
                     zeroed[81..97].fill(0);
                     let expected_mic = eapol_mic_hmac_sha1(&kck, &zeroed);
-                    if expected_mic != eapol[81..97] {
+                    if !crate::net::crypto::ct_eq(&expected_mic, &eapol[81..97]) {
                         dev.set_wifi_session(None, false, None, None);
                         return Err("WPA2 4-way Msg3 MIC mismatch (invalid passphrase?)");
                     }
 
                     let kd_len = u16::from_be_bytes([eapol[97], eapol[98]]) as usize;
-                    if (key_info & 0x1000) != 0 && kd_len >= 24 && 99 + kd_len <= eapol.len() {
-                        if let Ok(unwrapped) = aes128_key_unwrap(&kek, &eapol[99..99 + kd_len]) {
-                            gtk = parse_eapol_gtk_kde(&unwrapped);
+                    if (key_info & 0x1000) != 0 {
+                        if kd_len < 24 || 99 + kd_len > eapol.len() {
+                            dev.set_wifi_session(None, false, None, None);
+                            return Err("WPA2 4-way Msg3 truncated/invalid Key Data");
+                        }
+                        let unwrapped = aes128_key_unwrap(&kek, &eapol[99..99 + kd_len])
+                            .map_err(|_| {
+                                dev.set_wifi_session(None, false, None, None);
+                                "WPA2 4-way Msg3 AES Key Unwrap integrity failure"
+                            })?;
+                        gtk = parse_eapol_gtk_kde(&unwrapped);
+                        if gtk.is_none() {
+                            dev.set_wifi_session(None, false, None, None);
+                            return Err("WPA2 4-way Msg3 missing GTK KDE");
                         }
                     }
 

@@ -166,7 +166,7 @@ impl Ext4FileSystem {
                 }
             }
         }
-        Ok(6)
+        Err("No free blocks available in ext4 group")
     }
 
     pub fn allocate_inode(&self, group: u32) -> Result<u32, &'static str> {
@@ -188,7 +188,7 @@ impl Ext4FileSystem {
                 }
             }
         }
-        Ok(14)
+        Err("No free inodes available in ext4 group")
     }
 
     pub fn write_inode(&self, ino: u32, data: &[u8]) -> Result<(), &'static str> {
@@ -495,24 +495,56 @@ impl InodeOperations for Ext4Inode {
                         | ((self.raw_inode[35] as u32) << 24);
 
                     if (flags & EXT4_EXTENTS_FLAG) != 0 {
-                        self.raw_inode[40] = (EXT4_EXTENTS_MAGIC & 0xFF) as u8;
-                        self.raw_inode[41] = (EXT4_EXTENTS_MAGIC >> 8) as u8;
-                        self.raw_inode[42] = 1; self.raw_inode[43] = 0;
-                        self.raw_inode[44] = 4; self.raw_inode[45] = 0;
-                        self.raw_inode[46] = 0; self.raw_inode[47] = 0;
-                        self.raw_inode[52] = 0; self.raw_inode[53] = 0; self.raw_inode[54] = 0; self.raw_inode[55] = 0;
-                        self.raw_inode[56] = 1; self.raw_inode[57] = 0;
-                        self.raw_inode[58] = 0; self.raw_inode[59] = 0;
-                        self.raw_inode[60] = (new_phys & 0xFF) as u8;
-                        self.raw_inode[61] = ((new_phys >> 8) & 0xFF) as u8;
-                        self.raw_inode[62] = ((new_phys >> 16) & 0xFF) as u8;
-                        self.raw_inode[63] = ((new_phys >> 24) & 0xFF) as u8;
+                        let magic = (self.raw_inode[40] as u16) | ((self.raw_inode[41] as u16) << 8);
+                        let mut entries = if magic == EXT4_EXTENTS_MAGIC {
+                            (self.raw_inode[42] as u16) | ((self.raw_inode[43] as u16) << 8)
+                        } else {
+                            0
+                        };
+                        let depth = if magic == EXT4_EXTENTS_MAGIC {
+                            (self.raw_inode[46] as u16) | ((self.raw_inode[47] as u16) << 8)
+                        } else {
+                            0
+                        };
+                        if depth != 0 {
+                            return Err("ext4 write: multi-level extent tree allocation unsupported");
+                        }
+                        if entries >= 4 {
+                            return Err("ext4 write: inline extent table full (max 4 extents)");
+                        }
+                        if magic != EXT4_EXTENTS_MAGIC {
+                            self.raw_inode[40] = (EXT4_EXTENTS_MAGIC & 0xFF) as u8;
+                            self.raw_inode[41] = (EXT4_EXTENTS_MAGIC >> 8) as u8;
+                            self.raw_inode[44] = 4;
+                            self.raw_inode[45] = 0;
+                            self.raw_inode[46] = 0;
+                            self.raw_inode[47] = 0;
+                        }
+                        let idx = entries as usize;
+                        entries += 1;
+                        self.raw_inode[42] = (entries & 0xFF) as u8;
+                        self.raw_inode[43] = (entries >> 8) as u8;
+                        let eoff = 52 + idx * 12;
+                        self.raw_inode[eoff] = (logical_block & 0xFF) as u8;
+                        self.raw_inode[eoff + 1] = ((logical_block >> 8) & 0xFF) as u8;
+                        self.raw_inode[eoff + 2] = ((logical_block >> 16) & 0xFF) as u8;
+                        self.raw_inode[eoff + 3] = ((logical_block >> 24) & 0xFF) as u8;
+                        self.raw_inode[eoff + 4] = 1;
+                        self.raw_inode[eoff + 5] = 0;
+                        self.raw_inode[eoff + 6] = ((new_phys >> 32) & 0xFF) as u8;
+                        self.raw_inode[eoff + 7] = ((new_phys >> 40) & 0xFF) as u8;
+                        self.raw_inode[eoff + 8] = (new_phys & 0xFF) as u8;
+                        self.raw_inode[eoff + 9] = ((new_phys >> 8) & 0xFF) as u8;
+                        self.raw_inode[eoff + 10] = ((new_phys >> 16) & 0xFF) as u8;
+                        self.raw_inode[eoff + 11] = ((new_phys >> 24) & 0xFF) as u8;
                     } else if logical_block < 12 {
                         let off = 40 + (logical_block as usize) * 4;
                         self.raw_inode[off] = (new_phys & 0xFF) as u8;
                         self.raw_inode[off + 1] = ((new_phys >> 8) & 0xFF) as u8;
                         self.raw_inode[off + 2] = ((new_phys >> 16) & 0xFF) as u8;
                         self.raw_inode[off + 3] = ((new_phys >> 24) & 0xFF) as u8;
+                    } else {
+                        return Err("ext4 write: indirect blocks (>11) unsupported");
                     }
                     new_phys
                 }

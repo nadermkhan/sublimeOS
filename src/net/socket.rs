@@ -141,22 +141,37 @@ pub fn socket_recv(sock_id: usize, buf: &mut [u8], timeout_ms: u64) -> Result<us
 
 /// Close a TCP connection by initiating the FIN handshake.
 pub fn socket_close(sock_id: usize) -> Result<(), &'static str> {
-    let mut table = TCP_TABLE.lock();
-    if let Some(conn) = table.find(sock_id) {
-        if conn.state == TcpState::Established || conn.state == TcpState::SynReceived {
-            let src_ip = conn.local_ip;
-            let dst_ip = conn.remote_ip;
-            let src_port = conn.local_port;
-            let dst_port = conn.remote_port;
-            let seq = conn.local_seq;
-            let ack = conn.local_ack;
-            conn.state = TcpState::Closed;
-            drop(table);
-
-            let _ = send_tcp_packet(src_ip, dst_ip, src_port, dst_port, seq, ack, TCP_FLAG_FIN | TCP_FLAG_ACK, &[]);
-        } else {
+    let mut fin_info = None;
+    {
+        let mut table = TCP_TABLE.lock();
+        if let Some(conn) = table.find(sock_id) {
+            if conn.state == TcpState::Established || conn.state == TcpState::SynReceived {
+                fin_info = Some((
+                    conn.local_ip,
+                    conn.remote_ip,
+                    conn.local_port,
+                    conn.remote_port,
+                    conn.local_seq,
+                    conn.local_ack,
+                ));
+            }
             conn.state = TcpState::Closed;
         }
+        table
+            .connections
+            .retain(|c| c.id != sock_id && c.state != TcpState::Closed);
+    }
+    if let Some((src_ip, dst_ip, src_port, dst_port, seq, ack)) = fin_info {
+        let _ = send_tcp_packet(
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            TCP_FLAG_FIN | TCP_FLAG_ACK,
+            &[],
+        );
     }
     Ok(())
 }
@@ -173,9 +188,10 @@ pub fn socket_bind(sock_id: usize, local_ip: [u8; 4], local_port: u16) -> Result
 }
 
 /// Mark a socket as listening for incoming TCP client connections.
-pub fn socket_listen(sock_id: usize, _backlog: usize) -> Result<(), &'static str> {
+pub fn socket_listen(sock_id: usize, backlog: usize) -> Result<(), &'static str> {
     let mut table = TCP_TABLE.lock();
     let conn = table.find(sock_id).ok_or("Invalid socket ID")?;
+    conn.backlog = backlog.clamp(1, 128);
     conn.state = TcpState::Listen;
     Ok(())
 }

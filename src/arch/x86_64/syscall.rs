@@ -47,9 +47,8 @@ fn configure_cpu_syscall_msrs() {
         // Set LSTAR to syscall assembly entry point
         wrmsr(IA32_LSTAR, syscall_entry as *const () as usize as u64);
 
-        // Set FMASK to clear IF (disable interrupts), TF, and DF during syscall entry prologue
-        // 0x200 = IF, 0x100 = TF, 0x400 = DF
-        wrmsr(IA32_FMASK, 0x700);
+        // Set FMASK to clear IF (0x200), TF (0x100), DF (0x400), and AC (0x40000) on syscall entry
+        wrmsr(IA32_FMASK, 0x40700);
 
         // Point IA32_KERNEL_GSBASE at this core's CpuSyscallContext so `swapgs` reaches kernel_rsp
         let apic_id = crate::arch::x86_64::apic::get_apic_id() as usize;

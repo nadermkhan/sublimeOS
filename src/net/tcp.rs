@@ -169,10 +169,14 @@ pub struct TcpConnection {
     pub remote_win: u16,
     pub rx_buffer: VecDeque<u8>,
     pub pending_accept: VecDeque<usize>,
+    pub backlog: usize,
 }
 
 impl TcpConnection {
     pub fn new(id: usize, local_ip: [u8; 4], local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> Self {
+        let mut isn_bytes = [0u8; 4];
+        crate::net::crypto::csprng_fill_bytes(&mut isn_bytes);
+        let local_seq = u32::from_le_bytes(isn_bytes);
         Self {
             id,
             state: TcpState::Closed,
@@ -180,11 +184,12 @@ impl TcpConnection {
             local_port,
             remote_ip,
             remote_port,
-            local_seq: 0x1000 + (id as u32 * 0x100),
+            local_seq,
             local_ack: 0,
             remote_win: 65535,
             rx_buffer: VecDeque::with_capacity(8192),
             pending_accept: VecDeque::new(),
+            backlog: 16,
         }
     }
 }

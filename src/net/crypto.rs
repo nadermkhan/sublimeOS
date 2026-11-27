@@ -1,5 +1,71 @@
-// Cryptographic primitives for IEEE 802.11i WPA2-PSK authentication.
-// Pure `#![no_std]` Rust implementation of SHA-1, HMAC-SHA1, and PBKDF2-SHA1.
+// Cryptographic primitives for IEEE 802.11i WPA2-PSK, TLS 1.3, and kernel CSPRNG.
+// Pure `#![no_std]` Rust implementation of SHA-1, SHA-256, ChaCha20-Poly1305, X25519, AES-128.
+
+/// Constant-time equality comparison for MACs, tags, and cryptographic digests.
+#[inline(never)]
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+static CSPRNG_COUNTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+#[inline]
+fn try_rdrand_u64() -> Option<u64> {
+    let leaf1 = crate::arch::x86_64::registers::cpuid(1, 0);
+    if (leaf1.ecx & (1 << 30)) == 0 {
+        return None;
+    }
+    let mut val: u64 = 0;
+    let mut ok: u8 = 0;
+    for _ in 0..10 {
+        unsafe {
+            core::arch::asm!(
+                "rdrand {val}",
+                "setc {ok}",
+                val = out(reg) val,
+                ok = out(reg_byte) ok,
+                options(nomem, nostack)
+            );
+        }
+        if ok != 0 {
+            return Some(val);
+        }
+    }
+    None
+}
+
+/// Fill `out` with cryptographically mixed pseudo-random bytes seeded from
+/// hardware `RDRAND` (when supported), TSC, PIT ticks, and an atomic counter.
+pub fn csprng_fill_bytes(out: &mut [u8]) {
+    let mut offset = 0usize;
+    while offset < out.len() {
+        let mut seed_input = [0u8; 32];
+        let tsc = crate::arch::x86_64::pit::read_tsc();
+        let ticks = crate::arch::x86_64::pit::get_ticks();
+        let ctr = CSPRNG_COUNTER.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        let hw = try_rdrand_u64().unwrap_or(tsc.rotate_left(17) ^ ctr.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        seed_input[0..8].copy_from_slice(&tsc.to_le_bytes());
+        seed_input[8..16].copy_from_slice(&ticks.to_le_bytes());
+        seed_input[16..24].copy_from_slice(&ctr.to_le_bytes());
+        seed_input[24..32].copy_from_slice(&hw.to_le_bytes());
+        let key = sha256(&seed_input);
+        let nonce_hash = sha256(&key);
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&nonce_hash[..12]);
+        let mut block = [0u8; 64];
+        let take = (out.len() - offset).min(64);
+        chacha20_crypt(&key, &nonce, ctr as u32, &mut block[..take]);
+        out[offset..offset + take].copy_from_slice(&block[..take]);
+        offset += take;
+    }
+}
 
 /// Compute SHA-1 digest (160 bits / 20 bytes) of input data.
 pub fn sha1(data: &[u8]) -> [u8; 20] {
@@ -619,6 +685,27 @@ pub fn poly1305_mac(key: &[u8; 32], data: &[u8]) -> [u8; 16] {
     h0 += c * 5; c = h0 >> 26; h0 &= 0x03ffffff;
     h1 += c;
 
+    // Constant-time final reduction modulo p = 2^130 - 5: compute g = h + 5 - 2^130
+    let mut g0 = h0 + 5;
+    c = g0 >> 26; g0 &= 0x03ffffff;
+    let mut g1 = h1 + c; c = g1 >> 26; g1 &= 0x03ffffff;
+    let mut g2 = h2 + c; c = g2 >> 26; g2 &= 0x03ffffff;
+    let mut g3 = h3 + c; c = g3 >> 26; g3 &= 0x03ffffff;
+    let mut g4 = (h4 + c).wrapping_sub(1u64 << 26);
+
+    let mask = (g4 >> 63).wrapping_sub(1);
+    g0 &= mask;
+    g1 &= mask;
+    g2 &= mask;
+    g3 &= mask;
+    g4 &= mask;
+    let nmask = !mask;
+    h0 = (h0 & nmask) | g0;
+    h1 = (h1 & nmask) | g1;
+    h2 = (h2 & nmask) | g2;
+    h3 = (h3 & nmask) | g3;
+    h4 = (h4 & nmask) | g4;
+
     let f = (h0 as u128) | ((h1 as u128) << 26) | ((h2 as u128) << 52) | ((h3 as u128) << 78) | ((h4 as u128) << 104);
     let s = u128::from_le_bytes(key[16..32].try_into().unwrap());
     let out = f.wrapping_add(s);
@@ -675,7 +762,7 @@ pub fn chacha20_poly1305_open(
     k32.copy_from_slice(&poly_key[0..32]);
     let expected_tag = poly1305_mac(&k32, &auth_data);
 
-    if &expected_tag != tag {
+    if !ct_eq(&expected_tag, tag) {
         return Err("Poly1305 tag verification failure");
     }
 
@@ -859,7 +946,7 @@ pub fn aes128_key_unwrap(kek: &[u8; 16], wrapped: &[u8]) -> Result<alloc::vec::V
         }
     }
 
-    if a != [0xA6; 8] {
+    if !ct_eq(&a, &[0xA6; 8]) {
         return Err("RFC 3394 AES Key Unwrap integrity check failed");
     }
     let mut out = alloc::vec::Vec::with_capacity(n * 8);
@@ -1096,10 +1183,12 @@ pub fn ccmp_decrypt_mpdu(
     let (aad, nonce) = ccmp_build_aad_and_nonce(hdr, pn)?;
     let s0 = ccmp_ctr_xor(key, &nonce, 1, &mut plaintext);
     let calc_mic = ccmp_cbc_mac(key, &nonce, &aad, &plaintext);
+    let mut expected_mic = [0u8; 8];
     for i in 0..8 {
-        if (calc_mic[i] ^ s0[i]) != enc_mic[i] {
-            return Err("AES-CCMP MIC verification failure");
-        }
+        expected_mic[i] = calc_mic[i] ^ s0[i];
+    }
+    if !ct_eq(&expected_mic, enc_mic) {
+        return Err("AES-CCMP MIC verification failure");
     }
     Ok((plaintext, pn, key_id))
 }

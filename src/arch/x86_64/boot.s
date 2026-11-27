@@ -95,6 +95,7 @@ _start:
     cpuid
     test edx, 1 << 29
     jz no_long_mode
+    mov esi, edx
 
     /* Build early page tables */
     call setup_early_paging
@@ -108,10 +109,14 @@ _start:
     or eax, (1 << 5) | (1 << 9) | (1 << 10)
     mov cr4, eax
 
-    /* Enable Long Mode (LME) and NX bit in EFER MSR (0xC0000080) */
+    /* Enable Long Mode (LME = bit 8) and NX bit (bit 11) when CPUID EDX[20] is set */
     mov ecx, 0xC0000080
     rdmsr
-    or eax, (1 << 8) | (1 << 11)
+    or eax, (1 << 8)
+    test esi, (1 << 20)
+    jz .Lskip_nxe
+    or eax, (1 << 11)
+.Lskip_nxe:
     wrmsr
 
     /* Enable Paging (PG), Write Protect (WP), MP in CR0 and clear EM */

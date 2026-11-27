@@ -285,14 +285,14 @@ impl InodeOperations for Fat32Inode {
         }
 
         let mut bytes_read = 0;
-        let mut cluster_buf = [0u8; 4096]; // Buffer up to 8 sectors per cluster
+        let mut cluster_buf = alloc::vec![0u8; cluster_bytes];
 
         while bytes_read < bytes_to_read {
             let chunk = (bytes_to_read - bytes_read).min(cluster_bytes - cluster_offset);
             let lba = self.fs.cluster_to_lba(curr_cluster);
 
-            let sectors = self.fs.sectors_per_cluster.min(8);
-            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf[..((sectors * 512) as usize)])?;
+            let sectors = self.fs.sectors_per_cluster;
+            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf)?;
 
             buf[bytes_read..bytes_read + chunk].copy_from_slice(&cluster_buf[cluster_offset..cluster_offset + chunk]);
             bytes_read += chunk;
@@ -339,20 +339,20 @@ impl InodeOperations for Fat32Inode {
         }
 
         let mut bytes_written = 0;
-        let mut cluster_buf = [0u8; 4096];
+        let mut cluster_buf = alloc::vec![0u8; cluster_bytes];
 
         while bytes_written < buf.len() {
             let chunk = (buf.len() - bytes_written).min(cluster_bytes - cluster_offset);
             let lba = self.fs.cluster_to_lba(curr_cluster);
-            let sectors = self.fs.sectors_per_cluster.min(8);
+            let sectors = self.fs.sectors_per_cluster;
 
             // Read existing sector content if partial overwrite
             if cluster_offset > 0 || chunk < cluster_bytes {
-                let _ = self.fs.device.read_sectors(lba, sectors, &mut cluster_buf[..((sectors * 512) as usize)]);
+                let _ = self.fs.device.read_sectors(lba, sectors, &mut cluster_buf);
             }
 
             cluster_buf[cluster_offset..cluster_offset + chunk].copy_from_slice(&buf[bytes_written..bytes_written + chunk]);
-            self.fs.device.write_sectors(lba, sectors, &cluster_buf[..((sectors * 512) as usize)])?;
+            self.fs.device.write_sectors(lba, sectors, &cluster_buf)?;
 
             bytes_written += chunk;
             cluster_offset = 0;
@@ -554,13 +554,13 @@ impl Fat32Inode {
     fn allocate_dir_entry(&mut self, name: &str, cluster: u32, size: usize, is_dir: bool) -> Result<usize, &'static str> {
         let mut curr_cluster = self.start_cluster;
         let cluster_bytes = (self.fs.sectors_per_cluster * 512) as usize;
-        let mut cluster_buf = [0u8; 4096];
+        let mut cluster_buf = alloc::vec![0u8; cluster_bytes];
         let mut global_offset = 0;
 
         loop {
             let lba = self.fs.cluster_to_lba(curr_cluster);
-            let sectors = self.fs.sectors_per_cluster.min(8);
-            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf[..((sectors * 512) as usize)])?;
+            let sectors = self.fs.sectors_per_cluster;
+            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf)?;
 
             for entry_idx in 0..(cluster_bytes / 32) {
                 let off = entry_idx * 32;
@@ -585,7 +585,7 @@ impl Fat32Inode {
                     entry[31] = ((sz >> 24) & 0xFF) as u8;
 
                     cluster_buf[off..off + 32].copy_from_slice(&entry);
-                    self.fs.device.write_sectors(lba, sectors, &cluster_buf[..((sectors * 512) as usize)])?;
+                    self.fs.device.write_sectors(lba, sectors, &cluster_buf)?;
 
                     return Ok(global_offset + off);
                 }
@@ -632,16 +632,16 @@ impl Fat32Inode {
     pub fn readdir_internal(&self) -> Result<Vec<(String, u32, usize, bool, usize)>, &'static str> {
         let mut list = Vec::new();
         let mut curr_cluster = self.start_cluster;
-        let mut cluster_buf = [0u8; 4096];
         let cluster_bytes = (self.fs.sectors_per_cluster * 512) as usize;
+        let mut cluster_buf = alloc::vec![0u8; cluster_bytes];
         let mut global_offset = 0;
 
         let mut lfn_chars: Vec<char> = Vec::new();
 
         loop {
             let lba = self.fs.cluster_to_lba(curr_cluster);
-            let sectors = self.fs.sectors_per_cluster.min(8);
-            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf[..((sectors * 512) as usize)])?;
+            let sectors = self.fs.sectors_per_cluster;
+            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf)?;
 
             for entry_idx in 0..(cluster_bytes / 32) {
                 let offset = entry_idx * 32;

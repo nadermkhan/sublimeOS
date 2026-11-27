@@ -296,6 +296,9 @@ impl VirtualMemoryManager {
     /// Handle a Copy-on-Write page fault.
     /// Returns Ok(()) if the CoW page was successfully duplicated and remapped, or Err if not a CoW fault.
     pub fn handle_cow_fault(&self, pml4_phys: u64, fault_vaddr: u64) -> Result<(), &'static str> {
+        if fault_vaddr >= crate::syscall::uaccess::USER_MAX_ADDR {
+            return Err("CoW fault outside lower-half user space");
+        }
         let pml4 = unsafe { &mut *(phys_to_virt(pml4_phys) as *mut PageTable) };
         let pml4_idx = pml4_index(fault_vaddr);
         if !pml4.entries[pml4_idx].is_present() {
@@ -337,17 +340,18 @@ impl VirtualMemoryManager {
                 core::ptr::copy_nonoverlapping(src, dst, 4096);
             }
 
-            let new_flags = (entry.flags() & !PAGE_COW) | PAGE_WRITABLE | PAGE_PRESENT | PAGE_USER;
+            let new_flags = (entry.flags() & !PAGE_COW) | PAGE_WRITABLE | PAGE_PRESENT;
             entry.set(new_frame, new_flags);
         } else {
             drop(pmm);
-            let new_flags = (entry.flags() & !PAGE_COW) | PAGE_WRITABLE | PAGE_PRESENT | PAGE_USER;
+            let new_flags = (entry.flags() & !PAGE_COW) | PAGE_WRITABLE | PAGE_PRESENT;
             entry.set(old_phys, new_flags);
         }
 
         unsafe {
             invlpg(fault_vaddr);
         }
+        crate::arch::x86_64::apic::broadcast_tlb_shootdown(fault_vaddr);
 
         Ok(())
     }

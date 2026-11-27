@@ -75,6 +75,7 @@ pub fn run_all_tests() {
     test_user_app_support();
     test_multimedia_codecs_and_code_editor();
     test_boot_splash_and_scrollbars();
+    test_security_hardening();
 
     println!("=======================================================");
     println!("      All Kernel Self-Tests PASSED Successfully!       ");
@@ -357,7 +358,16 @@ fn test_ext4() {
 
         // Block 2 (descriptor table at byte 2048)
         let desc = 2048;
+        d[desc + 0] = 7; // block bitmap = block 7
+        d[desc + 4] = 8; // inode bitmap = block 8
         d[desc + 8] = 3; // inode table block = 3
+
+        // Block 7 (byte 7168): mark blocks 0..=8 used so allocation starts at block 9
+        d[7168] = 0xFF;
+        d[7169] = 0x01;
+        // Block 8 (byte 8192): mark inodes 1..=12 used so allocation starts at inode 13
+        d[8192] = 0xFF;
+        d[8193] = 0x0F;
 
         // Block 3 (inode table at byte 3072)
         let itable = 3072;
@@ -1974,10 +1984,15 @@ fn test_tls_and_https_engine() {
     bad_tag[0] ^= 0xFF;
     assert!(crate::net::crypto::chacha20_poly1305_open(&aead_key, &nonce, aad, &ciphertext, &bad_tag).is_err());
 
-    // 6. Test HTTPS GET Request Engine
-    let resp = crate::net::http::https_get("https://127.0.0.1/api/status").expect("https_get failed");
-    assert_eq!(resp.status_code, 200);
-    assert!(resp.body_as_str().contains("CosmicOS"));
+    // 6. Verify HTTP and HTTPS fail closed when no peer/TLS server exists (no fabricated 200 OK)
+    assert!(
+        crate::net::http::https_get("https://127.0.0.1/api/status").is_err(),
+        "https_get must fail closed when no TLS server is reachable"
+    );
+    assert!(
+        crate::net::http::http_get("http://127.0.0.1:9999/").is_err(),
+        "http_get must fail closed on closed port"
+    );
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }
@@ -2490,10 +2505,10 @@ fn test_posix_shared_memory_and_mmap() {
         let aspace = p.address_space.as_ref().expect("AddressSpace not found");
         let vma = aspace.vmas.iter().find(|v| v.start == target_mmap_addr).expect("VMA not recorded");
         assert_eq!(vma.end, target_mmap_addr + 8192);
-        assert_eq!(vma.vma_type, crate::mm::address_space::VmaType::Mmap);
+        assert_eq!(vma.vma_type, crate::mm::address_space::VmaType::Shared);
     }
 
-    // 8. Test sys_munmap to unmap region
+    // 8. Test sys_munmap to unmap region and verify PTE removal
     let munmap_ret = sys_munmap(target_mmap_addr, 8192);
     assert_eq!(munmap_ret, 0, "sys_munmap failed");
 
@@ -2503,6 +2518,8 @@ fn test_posix_shared_memory_and_mmap() {
         let p = proc.lock();
         let aspace = p.address_space.as_ref().expect("AddressSpace not found");
         assert!(aspace.vmas.iter().all(|v| v.start != target_mmap_addr), "VMA not removed");
+        let pml4 = unsafe { &*(crate::mm::phys_to_virt(aspace.pml4_phys) as *const crate::mm::vmm::PageTable) };
+        assert!(crate::mm::vmm::VMM.lock().translate(pml4, target_mmap_addr).is_none(), "PTE must be unmapped after sys_munmap");
     }
 
     // 9. Close fd and unlink shared memory
@@ -5587,6 +5604,142 @@ fn test_boot_splash_and_scrollbars() {
     }
     assert!(sysmon.handle_wheel(-1) && sysmon.scroll_row > 0);
     assert!(sysmon.handle_wheel(1) && sysmon.scroll_row == 0);
+
+    println!("\x1b[32m[PASS]\x1b[0m");
+}
+
+fn test_security_hardening() {
+    print!("  [TEST] Syscall Uaccess, W^X, Privilege Gates & CSPRNG ... ");
+
+    use crate::syscall::syscall_dispatcher;
+    use crate::syscall::table::{SYS_GETDENTS64, SYS_MMAP, SYS_READ, SYS_SYSCOMMAND, SYS_UNAME, SYS_WRITE};
+
+    let kernel_ptr: u64 = 0xFFFF_8000_0000_1000;
+    assert_eq!(
+        syscall_dispatcher(SYS_WRITE, 1, kernel_ptr, 16, 0, 0, 0, core::ptr::null()),
+        -14,
+        "SYS_WRITE must reject kernel-half pointer with -EFAULT"
+    );
+    assert_eq!(
+        syscall_dispatcher(SYS_READ, 0, kernel_ptr, 16, 0, 0, 0, core::ptr::null()),
+        -14,
+        "SYS_READ must reject kernel-half pointer with -EFAULT"
+    );
+    assert_eq!(
+        syscall_dispatcher(SYS_UNAME, kernel_ptr, 0, 0, 0, 0, 0, core::ptr::null()),
+        -14,
+        "SYS_UNAME must reject kernel-half pointer with -EFAULT"
+    );
+    assert_eq!(
+        syscall_dispatcher(SYS_GETDENTS64, 0, kernel_ptr, 64, 0, 0, 0, core::ptr::null()),
+        -14,
+        "SYS_GETDENTS64 must reject kernel-half pointer with -EFAULT"
+    );
+    assert_eq!(
+        syscall_dispatcher(SYS_MMAP, kernel_ptr, 4096, 3, 0x22, (-1i32) as u64, 0, core::ptr::null()),
+        -22,
+        "SYS_MMAP must reject kernel-half target address with -EINVAL"
+    );
+
+    // Map a temporary user page, write an unprivileged command, and verify SYS_SYSCOMMAND blocks it
+    let test_uaddr: u64 = 0x0000_7F21_0000_0000;
+    let mapped = crate::task::process::sys_mmap(test_uaddr, 4096, 3, 0x22, -1, 0);
+    assert_eq!(mapped, test_uaddr as i64);
+    let user_pml4_phys = {
+        let cur_pid = crate::task::process::get_current_pid();
+        let proc = crate::task::process::get_process(cur_pid).unwrap();
+        let p = proc.lock();
+        let aspace = p.address_space.as_ref().unwrap();
+        let pml4 = unsafe { &*(crate::mm::phys_to_virt(aspace.pml4_phys) as *const crate::mm::vmm::PageTable) };
+        let phys = crate::mm::vmm::VMM.lock().translate(pml4, test_uaddr).expect("mmap page missing");
+        let dst = crate::mm::phys_to_virt(phys) as *mut u8;
+        let cmd = b"tasks\0";
+        unsafe {
+            core::ptr::copy_nonoverlapping(cmd.as_ptr(), dst, cmd.len());
+        }
+        // Verify W^X: RW mmap without PROT_EXEC must have PAGE_NO_EXECUTE set
+        let pml4_mut = unsafe { &mut *(crate::mm::phys_to_virt(aspace.pml4_phys) as *mut crate::mm::vmm::PageTable) };
+        let pte = crate::mm::vmm::VMM.lock().get_pte_mut(pml4_mut, test_uaddr).unwrap();
+        assert_ne!(pte.flags() & crate::mm::vmm::PAGE_NO_EXECUTE, 0, "RW mmap must enforce NX bit");
+        aspace.pml4_phys
+    };
+    let saved_cr3 = unsafe { crate::arch::x86_64::registers::read_cr3() };
+    unsafe { crate::arch::x86_64::registers::write_cr3(user_pml4_phys); }
+    let sys_cmd_ret = syscall_dispatcher(SYS_SYSCOMMAND, test_uaddr, 0, 0, 0, 0, 0, core::ptr::null());
+    unsafe { crate::arch::x86_64::registers::write_cr3(saved_cr3); }
+    assert_eq!(
+        sys_cmd_ret,
+        -1,
+        "SYS_SYSCOMMAND must reject arbitrary shell commands with -EPERM"
+    );
+    assert_eq!(crate::task::process::sys_munmap(test_uaddr, 4096), 0);
+
+    // Verify CSPRNG produces non-identical outputs
+    let mut r1 = [0u8; 32];
+    let mut r2 = [0u8; 32];
+    crate::net::crypto::csprng_fill_bytes(&mut r1);
+    crate::net::crypto::csprng_fill_bytes(&mut r2);
+    assert_ne!(r1, r2, "CSPRNG produced identical blocks");
+
+    // Verify new Wave B syscalls: SYS_MPROTECT W^X rejection, SYS_GETTIMEOFDAY, SYS_STAT/LSEEK
+    let mp_addr: u64 = 0x0000_7F22_0000_0000;
+    assert_eq!(crate::task::process::sys_mmap(mp_addr, 4096, 3, 0x22, -1, 0), mp_addr as i64);
+    assert_eq!(
+        syscall_dispatcher(
+            crate::syscall::table::SYS_MPROTECT,
+            mp_addr,
+            4096,
+            (crate::mm::shm::PROT_WRITE | crate::mm::shm::PROT_EXEC) as u64,
+            0, 0, 0, core::ptr::null()
+        ),
+        -22,
+        "SYS_MPROTECT must reject PROT_WRITE | PROT_EXEC (W^X)"
+    );
+    assert_eq!(
+        syscall_dispatcher(
+            crate::syscall::table::SYS_MPROTECT,
+            mp_addr,
+            4096,
+            crate::mm::shm::PROT_READ as u64,
+            0, 0, 0, core::ptr::null()
+        ),
+        0,
+        "SYS_MPROTECT PROT_READ must succeed"
+    );
+    assert_eq!(crate::task::process::sys_munmap(mp_addr, 4096), 0);
+
+    assert_eq!(
+        syscall_dispatcher(crate::syscall::table::SYS_GETTIMEOFDAY, kernel_ptr, 0, 0, 0, 0, 0, core::ptr::null()),
+        -14,
+        "SYS_GETTIMEOFDAY must reject kernel-half pointer with -EFAULT"
+    );
+    assert_eq!(
+        syscall_dispatcher(crate::syscall::table::SYS_STAT, kernel_ptr, kernel_ptr, 0, 0, 0, 0, core::ptr::null()),
+        -14,
+        "SYS_STAT must reject kernel-half pointer with -EFAULT"
+    );
+    assert_eq!(
+        syscall_dispatcher(crate::syscall::table::SYS_LSEEK, 9999, 0, 0, 0, 0, 0, core::ptr::null()),
+        -9,
+        "SYS_LSEEK on bad fd must return -EBADF"
+    );
+
+    // Verify Wave C TCP checksum verifier & socket_close cleanup
+    let mut bad_tcp = crate::net::tcp::build_tcp_packet(
+        [10, 0, 2, 15], [10, 0, 2, 2], 12345, 80, 1, 0, crate::net::tcp::TCP_FLAG_SYN, 65535, b"hi"
+    );
+    assert_eq!(crate::net::tcp::calculate_tcp_checksum([10, 0, 2, 15], [10, 0, 2, 2], &bad_tcp), 0);
+    bad_tcp[20] ^= 0xFF;
+    assert_ne!(crate::net::tcp::calculate_tcp_checksum([10, 0, 2, 15], [10, 0, 2, 2], &bad_tcp), 0);
+
+    let s = crate::net::socket::socket_open().expect("socket_open failed");
+    assert!(crate::net::socket::socket_listen(s, 4).is_ok());
+    assert!(crate::net::socket::socket_close(s).is_ok());
+    assert!(crate::net::tcp::TCP_TABLE.lock().find(s).is_none(), "socket_close must reap closed socket");
+
+    // Verify Wave C Wi-Fi Key Unwrap tampering rejection
+    let bad_wrap = [0xAAu8; 24];
+    assert!(crate::net::crypto::aes128_key_unwrap(&[0x11u8; 16], &bad_wrap).is_err());
 
     println!("\x1b[32m[PASS]\x1b[0m");
 }

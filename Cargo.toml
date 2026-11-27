@@ -8,6 +8,11 @@ description = "SublimeOS — KiteKernel: A clean, mature, monolithic Rust-based 
 [dependencies]
 libgui = { path = "libgui" }
 
+[features]
+default = []
+self-test = []
+debug_boot = []
+
 [profile.dev]
 panic = "abort"
 

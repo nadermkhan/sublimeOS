@@ -27,9 +27,7 @@ impl TlsStream {
         socket_connect(sock, dst_ip, port)?;
 
         let mut client_priv = [0u8; 32];
-        for i in 0..32 {
-            client_priv[i] = ((i as u8).wrapping_mul(77) ^ 0x5a).wrapping_add(1);
-        }
+        csprng_fill_bytes(&mut client_priv);
         client_priv[0] &= 248;
         client_priv[31] &= 127;
         client_priv[31] |= 64;
@@ -37,9 +35,7 @@ impl TlsStream {
         let client_pub = x25519_base(&client_priv);
 
         let mut client_random = [0u8; 32];
-        for i in 0..32 {
-            client_random[i] = (i as u8).wrapping_mul(33) ^ 0xA5;
-        }
+        csprng_fill_bytes(&mut client_random);
 
         // Build ClientHello record
         let ch_record = build_client_hello(host, &client_random, &client_pub);
@@ -56,8 +52,8 @@ impl TlsStream {
         let mut server_pub = [0u8; 32];
         let mut server_random = [0u8; 32];
         if !parse_server_hello(&resp_buf[..n], &mut server_random, &mut server_pub) {
-            // Simulated fallback server public key for loopback testing
-            server_pub = x25519_base(&[0x42; 32]);
+            let _ = socket_close(sock);
+            return Err("Invalid or unparseable TLS ServerHello");
         }
 
         // TLS 1.3 Key Schedule
@@ -159,7 +155,6 @@ impl TlsStream {
             for i in 0..8 {
                 nonce[4 + i] ^= seq_bytes[i];
             }
-            self.server_seq += 1;
 
             let ct_len = n - 5 - 16;
             let aad = &raw[0..5];
@@ -168,6 +163,7 @@ impl TlsStream {
             tag.copy_from_slice(&raw[5 + ct_len..n]);
 
             if let Ok(mut dec) = chacha20_poly1305_open(&self.server_write_key, &nonce, aad, ciphertext, &tag) {
+                self.server_seq += 1;
                 while let Some(&0) = dec.last() {
                     dec.pop();
                 }
@@ -181,12 +177,10 @@ impl TlsStream {
                 }
                 return Ok(count);
             }
+            return Err("TLS AEAD authentication failed");
         }
 
-        // If unencrypted fallback or raw stream
-        let count = buf.len().min(n);
-        buf[..count].copy_from_slice(&raw[..count]);
-        Ok(count)
+        Err("Unexpected or unencrypted TLS record")
     }
 
     pub fn close(&mut self) {

@@ -126,11 +126,14 @@ impl ExFatFileSystem {
 
     fn read_volume_label(&self) -> Result<String, &'static str> {
         let cluster_bytes = (self.sectors_per_cluster * 512) as usize;
-        let mut cluster_buf = [0u8; 4096];
+        if cluster_bytes == 0 || cluster_bytes > 131072 {
+            return Err("Unsupported exFAT cluster size");
+        }
+        let mut cluster_buf = alloc::vec![0u8; cluster_bytes];
         let lba = self.cluster_to_lba(self.root_dir_cluster);
-        let sectors = self.sectors_per_cluster.min(8);
+        let sectors = self.sectors_per_cluster;
 
-        self.device.read_sectors(lba, sectors, &mut cluster_buf[..((sectors * 512) as usize)])?;
+        self.device.read_sectors(lba, sectors, &mut cluster_buf)?;
 
         for i in 0..(cluster_bytes / 32) {
             let off = i * 32;
@@ -209,14 +212,14 @@ impl InodeOperations for ExFatInode {
         }
 
         let mut bytes_read = 0;
-        let mut cluster_buf = [0u8; 4096];
+        let mut cluster_buf = alloc::vec![0u8; cluster_bytes];
 
         while bytes_read < bytes_to_read {
             let chunk = (bytes_to_read - bytes_read).min(cluster_bytes - cluster_offset);
             let lba = self.fs.cluster_to_lba(curr_cluster);
-            let sectors = self.fs.sectors_per_cluster.min(8);
+            let sectors = self.fs.sectors_per_cluster;
 
-            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf[..((sectors * 512) as usize)])?;
+            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf)?;
             buf[bytes_read..bytes_read + chunk].copy_from_slice(&cluster_buf[cluster_offset..cluster_offset + chunk]);
             bytes_read += chunk;
             cluster_offset = 0;
@@ -291,13 +294,16 @@ impl ExFatInode {
     fn readdir_internal(&self) -> Result<Vec<(String, u32, usize, bool, bool)>, &'static str> {
         let mut list = Vec::new();
         let mut curr_cluster = self.start_cluster;
-        let mut cluster_buf = [0u8; 4096];
         let cluster_bytes = (self.fs.sectors_per_cluster * 512) as usize;
+        if cluster_bytes == 0 || cluster_bytes > 131072 {
+            return Err("Unsupported exFAT cluster size");
+        }
+        let mut cluster_buf = alloc::vec![0u8; cluster_bytes];
 
         loop {
             let lba = self.fs.cluster_to_lba(curr_cluster);
-            let sectors = self.fs.sectors_per_cluster.min(8);
-            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf[..((sectors * 512) as usize)])?;
+            let sectors = self.fs.sectors_per_cluster;
+            self.fs.device.read_sectors(lba, sectors, &mut cluster_buf)?;
 
             let mut idx = 0;
             while idx < (cluster_bytes / 32) {

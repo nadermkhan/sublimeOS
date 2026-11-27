@@ -83,6 +83,8 @@ pub struct MultibootInfoData {
     pub bootloader_name: Option<&'static str>,
     pub bootloader_name_buf: [u8; 64],
     pub bootloader_name_len: usize,
+    pub cmdline_buf: [u8; 256],
+    pub cmdline_len: usize,
 }
 
 impl MultibootInfoData {
@@ -103,7 +105,13 @@ impl MultibootInfoData {
             bootloader_name: None,
             bootloader_name_buf: [0; 64],
             bootloader_name_len: 0,
+            cmdline_buf: [0; 256],
+            cmdline_len: 0,
         }
+    }
+
+    pub fn cmdline(&self) -> &str {
+        core::str::from_utf8(&self.cmdline_buf[..self.cmdline_len]).unwrap_or("")
     }
 
     pub fn get_bootloader_name(&self) -> Option<&str> {
@@ -138,6 +146,18 @@ impl MultibootInfoData {
 
 pub static MULTIBOOT: IrqSafeSpinlock<MultibootInfoData> =
     IrqSafeSpinlock::new(MultibootInfoData::empty());
+
+/// Returns `true` when kernel debug/verbose boot is enabled via compile-time feature
+/// or boot command line (`debug` / `verbose`).
+pub fn is_debug_boot() -> bool {
+    if cfg!(feature = "debug_boot") {
+        return true;
+    }
+    let mb = MULTIBOOT.lock();
+    mb.cmdline()
+        .split_whitespace()
+        .any(|tok| tok == "debug" || tok == "verbose" || tok == "debug=1")
+}
 
 /// Early boot direct map window (first 64 GiB mapped at PHYSICAL_MEMORY_OFFSET).
 pub const EARLY_DIRECT_MAP_LIMIT: u64 = 64 * 1024 * 1024 * 1024;
@@ -193,6 +213,24 @@ fn parse_multiboot1(mb_info_phys: u64, out: &mut MultibootInfoData) {
         if (flags & 0x01) != 0 {
             out.mem_lower_kb = core::ptr::read_unaligned(ptr.add(1));
             out.mem_upper_kb = core::ptr::read_unaligned(ptr.add(2));
+        }
+
+        // Flags bit 2 (0x04): cmdline physical pointer at +16
+        if (flags & (1 << 2)) != 0 {
+            let cmd_phys = core::ptr::read_unaligned(ptr.add(4)) as u64;
+            if cmd_phys != 0 && cmd_phys + 256 < EARLY_DIRECT_MAP_LIMIT {
+                let cmd_virt = phys_to_virt(cmd_phys) as *const u8;
+                let mut len = 0usize;
+                while len < 255 {
+                    let b = *cmd_virt.add(len);
+                    if b == 0 {
+                        break;
+                    }
+                    out.cmdline_buf[len] = b;
+                    len += 1;
+                }
+                out.cmdline_len = len;
+            }
         }
 
         // Flags bit 6 (0x40): E820 Memory Map (mmap_length @ +44, mmap_addr @ +48)
@@ -322,6 +360,16 @@ fn parse_multiboot2(mb_info_phys: u64, out: &mut MultibootInfoData) {
         }
 
         match tag_type {
+            // Tag 1: Boot Command Line
+            1 if tag_size > 8 => {
+                let max_len = (tag_size - 8).min(255);
+                let mut actual_len = 0;
+                while actual_len < max_len && unsafe { *tag_ptr.add(8 + actual_len) } != 0 {
+                    out.cmdline_buf[actual_len] = unsafe { *tag_ptr.add(8 + actual_len) };
+                    actual_len += 1;
+                }
+                out.cmdline_len = actual_len;
+            }
             // Tag 2: Bootloader Name
             2 if tag_size > 8 => {
                 let name_len = (tag_size - 8).min(63);

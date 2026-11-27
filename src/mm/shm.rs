@@ -52,10 +52,10 @@ impl ShmObject {
             self.frames.push(frame);
         }
 
-        // Shrink
+        // Shrink (decrement refcount; frame is freed only when all mappings drop it)
         while self.frames.len() > needed_pages {
             if let Some(frame) = self.frames.pop() {
-                PMM.lock().free_frame(frame);
+                PMM.lock().release_frame(frame);
             }
         }
 

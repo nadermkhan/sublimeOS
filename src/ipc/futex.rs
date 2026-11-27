@@ -95,8 +95,11 @@ pub fn sys_futex(
     uaddr2: *mut u32,
     _val3: u32,
 ) -> i64 {
-    if uaddr.is_null() || (uaddr as usize & 3) != 0 {
+    if (uaddr as usize & 3) != 0 {
         return -14; // -EFAULT / -EINVAL (misaligned address)
+    }
+    if let Err(e) = crate::syscall::uaccess::validate_user_range(uaddr as u64, core::mem::size_of::<u32>()) {
+        return e;
     }
 
     let cmd = op & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
@@ -104,8 +107,11 @@ pub fn sys_futex(
 
     match cmd {
         FUTEX_WAIT => {
-            // Check if current value matches expected value
-            let current_val = unsafe { core::ptr::read_volatile(uaddr) };
+            // Check if current value matches expected value via validated uaccess
+            let current_val = match crate::syscall::uaccess::copy_from_user(uaddr as *const u32) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
             if current_val != val {
                 return -11; // -EAGAIN (value changed before waiting)
             }
@@ -127,8 +133,8 @@ pub fn sys_futex(
             woken as i64
         }
         FUTEX_REQUEUE => {
-            if uaddr2.is_null() {
-                return -14;
+            if let Err(e) = crate::syscall::uaccess::validate_user_range(uaddr2 as u64, core::mem::size_of::<u32>()) {
+                return e;
             }
             let max_wake = val as usize;
             let max_requeue = if _val3 > 0 { _val3 as usize } else { 1024 };

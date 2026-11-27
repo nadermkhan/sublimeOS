@@ -1,0 +1,51 @@
+name: SublimeOS CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Nightly Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+          targets: x86_64-unknown-none, x86_64-unknown-uefi
+
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
+
+      - name: Build Userland Binaries
+        run: cargo build --manifest-path userland/Cargo.toml --release
+
+      - name: Build Kernel (Release & Debug Self-Test Variants)
+        run: |
+          cargo build --release
+          cargo build --release --features debug_boot,self-test
+
+      - name: Build UEFI Multiboot2 Bootloader
+        run: |
+          cd uefi-boot
+          cargo build --release
+
+      - name: Create 32-bit Multiboot Kernel ELF
+        run: |
+          OBJCOPY=$(find "$(rustc --print sysroot)" -name "rust-objcopy" -o -name "llvm-objcopy" | head -n 1)
+          "$OBJCOPY" -O elf32-i386 target/x86_64-unknown-none/release/kitekernel sublimekernel32.elf
+
+      - name: Run Headless 2-Core SMP QEMU Self-Tests
+        run: |
+          timeout 25 qemu-system-x86_64 \
+            -kernel sublimekernel32.elf \
+            -m 128M \
+            -smp 2 \
+            -append "debug" \
+            -display none \
+            -serial file:qemu_ci.log \
+            -no-reboot || true
+          cat qemu_ci.log
+          grep -q "All Kernel Self-Tests PASSED Successfully!" qemu_ci.log

@@ -2,7 +2,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use crate::mm::address_space::{AddressSpace, VmaType};
 use crate::mm::pmm::PMM;
-use crate::mm::vmm::{VMM, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+use crate::mm::vmm::{VMM, PAGE_NO_EXECUTE, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
 use crate::mm::{align_down, align_up, phys_to_virt, PAGE_SIZE};
 
 // Standard ELF constants
@@ -150,9 +150,12 @@ impl<'a> ElfBinary<'a> {
         // Parse ELF Header
         let header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
 
-        // Validate Machine (EM_X86_64 = 0x3E)
+        // Validate Machine (EM_X86_64 = 0x3E) and canonical lower-half entry point
         if header.machine != ELF_MACHINE_X86_64 {
             return Err("Unsupported ELF architecture: target must be x86_64 (EM_X86_64)");
+        }
+        if header.entry >= crate::syscall::uaccess::USER_MAX_ADDR {
+            return Err("ELF entry point outside canonical lower-half user space");
         }
 
         // Parse Program Headers
@@ -219,7 +222,17 @@ impl<'a> ElfBinary<'a> {
             }
 
             let start_vaddr = ph.p_vaddr;
-            let end_vaddr = start_vaddr + ph.p_memsz;
+            let end_vaddr = start_vaddr
+                .checked_add(ph.p_memsz)
+                .ok_or("ELF PT_LOAD address overflow")?;
+            if start_vaddr >= crate::syscall::uaccess::USER_MAX_ADDR
+                || end_vaddr > crate::syscall::uaccess::USER_MAX_ADDR
+            {
+                return Err("ELF PT_LOAD segment targets kernel address space");
+            }
+            if ph.p_filesz > ph.p_memsz {
+                return Err("ELF PT_LOAD filesz exceeds memsz");
+            }
             let page_start = align_down(start_vaddr, PAGE_SIZE as u64);
             let page_end = align_up(end_vaddr, PAGE_SIZE as u64);
             let pages = (page_end - page_start) / (PAGE_SIZE as u64);
@@ -227,6 +240,9 @@ impl<'a> ElfBinary<'a> {
             let mut page_flags = PAGE_PRESENT | PAGE_USER;
             if (ph.p_flags & PF_W) != 0 {
                 page_flags |= PAGE_WRITABLE;
+            }
+            if (ph.p_flags & PF_X) == 0 {
+                page_flags |= PAGE_NO_EXECUTE;
             }
 
             for p in 0..pages {
@@ -298,13 +314,18 @@ impl<'a> ElfBinary<'a> {
                 top_virt_frame = virt_frame;
             }
 
-            vmm.map_page(pml4, curr_page, frame, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER)?;
+            vmm.map_page(
+                pml4,
+                curr_page,
+                frame,
+                PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER | PAGE_NO_EXECUTE,
+            )?;
         }
 
         addr_space.vmas.push(crate::mm::address_space::VirtualMemoryArea {
             start: stack_bottom,
             end: USER_STACK_TOP,
-            flags: PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER,
+            flags: PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER | PAGE_NO_EXECUTE,
             vma_type: VmaType::Stack,
         });
 

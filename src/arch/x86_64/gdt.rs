@@ -1,5 +1,6 @@
 use core::arch::asm;
 use core::mem::size_of;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 pub const KERNEL_CS: u16 = 0x08;
 pub const KERNEL_DS: u16 = 0x10;
@@ -8,9 +9,11 @@ pub const USER_CS: u16 = 0x20 | 3;
 pub const TSS_SELECTOR: u16 = 0x28;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 1;
-pub const PAGE_FAULT_IST_INDEX: u16 = 2;
+pub const MAX_CPUS: usize = 32;
+const DF_STACK_SIZE: usize = 16384;
 
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct TaskStateSegment {
     reserved1: u32,
     pub rsp: [u64; 3], // rsp0, rsp1, rsp2
@@ -36,17 +39,11 @@ impl TaskStateSegment {
 }
 
 #[repr(C, align(16))]
-struct IstStacks {
-    double_fault_stack: [u8; 65536],
-    page_fault_stack: [u8; 65536],
-}
+#[derive(Clone, Copy)]
+struct DfStack([u8; DF_STACK_SIZE]);
 
-static mut IST_STACKS: IstStacks = IstStacks {
-    double_fault_stack: [0; 65536],
-    page_fault_stack: [0; 65536],
-};
-
-pub static mut TSS: TaskStateSegment = TaskStateSegment::new();
+static mut DF_STACKS: [DfStack; MAX_CPUS] = [DfStack([0; DF_STACK_SIZE]); MAX_CPUS];
+pub static mut TSS_ARRAY: [TaskStateSegment; MAX_CPUS] = [TaskStateSegment::new(); MAX_CPUS];
 
 #[repr(C, packed)]
 struct GdtDescriptor {
@@ -55,11 +52,12 @@ struct GdtDescriptor {
 }
 
 #[repr(C, align(8))]
+#[derive(Clone, Copy)]
 struct GdtTable {
     entries: [u64; 7], // 0: null, 1: kcode, 2: kdata, 3: udata, 4: ucode, 5-6: tss (16 bytes)
 }
 
-static mut GDT: GdtTable = GdtTable {
+const EMPTY_GDT: GdtTable = GdtTable {
     entries: [
         0x0000000000000000, // 0x00: Null
         0x00209A0000000000, // 0x08: Kernel Code 64-bit (DPL 0)
@@ -71,48 +69,73 @@ static mut GDT: GdtTable = GdtTable {
     ],
 };
 
-/// Initialize GDT, configure TSS with IST stacks and kernel stack, and load TSS register.
-pub fn init() {
-    unsafe {
-        // Set up IST stacks using raw pointers
-        let df_stack_top = core::ptr::addr_of!(IST_STACKS.double_fault_stack) as u64 + 16384;
-        let pf_stack_top = core::ptr::addr_of!(IST_STACKS.page_fault_stack) as u64 + 16384;
+static mut GDT_ARRAY: [GdtTable; MAX_CPUS] = [EMPTY_GDT; MAX_CPUS];
 
-        TSS.ist[DOUBLE_FAULT_IST_INDEX as usize - 1] = df_stack_top;
-        TSS.ist[PAGE_FAULT_IST_INDEX as usize - 1] = pf_stack_top;
+const UNMAPPED_SLOT: AtomicU8 = AtomicU8::new(0xFF);
+static APIC_TO_SLOT: [AtomicU8; 256] = [UNMAPPED_SLOT; 256];
+static NEXT_CPU_SLOT: AtomicUsize = AtomicUsize::new(1);
 
-        // Load 16-byte TSS descriptor into GDT
-        let tss_ptr = core::ptr::addr_of!(TSS) as u64;
-        let tss_size = (size_of::<TaskStateSegment>() - 1) as u64;
-
-        // TSS Low (64-bit)
-        let mut low = 0x0000E90000000000u64; // Present, DPL 3 (or 0), Type 9 (64-bit TSS available)
-        low |= tss_size & 0xFFFF;
-        low |= (tss_ptr & 0x00FFFFFF) << 16;
-        low |= (tss_ptr & 0xFF000000) << 32;
-
-        // TSS High (64-bit)
-        let high = tss_ptr >> 32;
-
-        GDT.entries[5] = low;
-        GDT.entries[6] = high;
-
-        reload_kernel_gdt_segments();
-
-        // Load Task Register (LTR) on BSP only
-        asm!("ltr {0:x}", in(reg) TSS_SELECTOR, options(nostack, preserves_flags));
+#[inline]
+pub fn current_cpu_slot() -> usize {
+    let apic_id = crate::arch::x86_64::apic::get_apic_id() as usize;
+    let slot = APIC_TO_SLOT[apic_id & 0xFF].load(Ordering::Acquire) as usize;
+    if slot < MAX_CPUS {
+        slot
+    } else {
+        0
     }
 }
 
-/// Load the shared kernel GDT on an Application Processor (AP) without reloading BSP's busy TSS.
-pub unsafe fn load_kernel_gdt_for_ap() {
-    reload_kernel_gdt_segments();
+unsafe fn configure_and_load_slot(slot: usize) {
+    let df_stack_top = core::ptr::addr_of!(DF_STACKS[slot].0) as u64 + DF_STACK_SIZE as u64;
+    TSS_ARRAY[slot].ist[DOUBLE_FAULT_IST_INDEX as usize - 1] = df_stack_top;
+
+    let tss_ptr = core::ptr::addr_of!(TSS_ARRAY[slot]) as u64;
+    let tss_size = (size_of::<TaskStateSegment>() - 1) as u64;
+
+    // TSS Low (64-bit): Present, DPL 0, Type 9 (64-bit TSS available)
+    let mut low = 0x0000890000000000u64;
+    low |= tss_size & 0xFFFF;
+    low |= (tss_ptr & 0x00FFFFFF) << 16;
+    low |= (tss_ptr & 0xFF000000) << 32;
+
+    let high = tss_ptr >> 32;
+
+    GDT_ARRAY[slot].entries[5] = low;
+    GDT_ARRAY[slot].entries[6] = high;
+
+    reload_kernel_gdt_segments(slot);
+    asm!("ltr {0:x}", in(reg) TSS_SELECTOR, options(nostack, preserves_flags));
 }
 
-unsafe fn reload_kernel_gdt_segments() {
+/// Initialize GDT, configure per-CPU TSS with IST1 stack, and load TSS register on BSP.
+pub fn init() {
+    let bsp_apic = crate::arch::x86_64::apic::get_apic_id() as usize;
+    APIC_TO_SLOT[bsp_apic & 0xFF].store(0, Ordering::Release);
+    unsafe {
+        configure_and_load_slot(0);
+    }
+}
+
+/// Initialize a dedicated per-CPU GDT and TSS on an Application Processor (AP) and load TR.
+pub unsafe fn load_kernel_gdt_for_ap() {
+    let apic_id = crate::arch::x86_64::apic::get_apic_id() as usize & 0xFF;
+    let existing = APIC_TO_SLOT[apic_id].load(Ordering::Acquire);
+    let slot = if (existing as usize) < MAX_CPUS {
+        existing as usize
+    } else {
+        let claimed = NEXT_CPU_SLOT.fetch_add(1, Ordering::AcqRel);
+        let bounded = if claimed < MAX_CPUS { claimed } else { MAX_CPUS - 1 };
+        APIC_TO_SLOT[apic_id].store(bounded as u8, Ordering::Release);
+        bounded
+    };
+    configure_and_load_slot(slot);
+}
+
+unsafe fn reload_kernel_gdt_segments(slot: usize) {
     let gdt_desc = GdtDescriptor {
         size: (size_of::<GdtTable>() - 1) as u16,
-        offset: core::ptr::addr_of!(GDT.entries) as u64,
+        offset: core::ptr::addr_of!(GDT_ARRAY[slot].entries) as u64,
     };
 
     asm!("lgdt [{}]", in(reg) &gdt_desc, options(readonly, nostack, preserves_flags));
@@ -136,16 +159,18 @@ unsafe fn reload_kernel_gdt_segments() {
     );
 }
 
-/// Set the kernel stack pointer (RSP0) in the TSS for user-to-kernel transitions.
+/// Set the kernel stack pointer (RSP0) in the executing core's TSS for user-to-kernel transitions.
 pub fn set_kernel_stack(stack_top: u64) {
+    let slot = current_cpu_slot();
     unsafe {
-        TSS.rsp[0] = stack_top;
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(TSS_ARRAY[slot].rsp[0]), stack_top);
     }
 }
 
-/// Get the current kernel stack pointer (RSP0) in the TSS.
+/// Get the current kernel stack pointer (RSP0) in the executing core's TSS.
 pub fn get_kernel_stack() -> u64 {
+    let slot = current_cpu_slot();
     unsafe {
-        TSS.rsp[0]
+        core::ptr::read_volatile(core::ptr::addr_of!(TSS_ARRAY[slot].rsp[0]))
     }
 }

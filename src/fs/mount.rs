@@ -134,7 +134,7 @@ pub fn mount_partition_device(part: Arc<dyn BlockDevice>) -> Result<String, &'st
         part.name(),
         &mount_path,
         fs_type,
-        if fs_type == "fat32" || fs_type == "exfat" { "rw" } else { "ro" },
+        if fs_type == "fat32" { "rw" } else { "ro" },
     );
 
     kinfo!(

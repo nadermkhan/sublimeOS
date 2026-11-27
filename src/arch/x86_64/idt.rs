@@ -1,6 +1,6 @@
 use core::arch::asm;
 use core::mem::size_of;
-use crate::arch::x86_64::gdt::{DOUBLE_FAULT_IST_INDEX, KERNEL_CS, PAGE_FAULT_IST_INDEX};
+use crate::arch::x86_64::gdt::{DOUBLE_FAULT_IST_INDEX, KERNEL_CS};
 use crate::arch::x86_64::registers::read_cr2;
 use crate::kerror;
 
@@ -97,12 +97,14 @@ extern "C" {
     fn isr_40(); fn isr_41(); fn isr_42(); fn isr_43();
     fn isr_44(); fn isr_45(); fn isr_46(); fn isr_47();
     fn isr_48();
+    fn isr_49();
 
     fn isr_128();
     fn isr_255();
 }
 
 pub const LAPIC_TIMER_VECTOR: usize = 48;
+pub const TLB_SHOOTDOWN_VECTOR: usize = 49;
 
 pub fn init() {
     unsafe {
@@ -116,7 +118,6 @@ pub fn init() {
         for (vec, &isr) in isrs.iter().enumerate() {
             let ist = match vec {
                 8 => DOUBLE_FAULT_IST_INDEX as u8,
-                14 => PAGE_FAULT_IST_INDEX as u8,
                 _ => 0,
             };
             IDT.entries[vec].set_handler(isr as *const () as usize, ist, 0);
@@ -134,6 +135,9 @@ pub fn init() {
 
         // Local APIC MMIO Periodic Timer (Vector 48)
         IDT.entries[LAPIC_TIMER_VECTOR].set_handler(isr_48 as *const () as usize, 0, 0);
+
+        // SMP TLB Shootdown IPI (Vector 49)
+        IDT.entries[TLB_SHOOTDOWN_VECTOR].set_handler(isr_49 as *const () as usize, 0, 0);
 
         // Syscall `int 0x80` (Vector 128) accessible from user space (DPL 3)
         IDT.entries[128].set_handler(isr_128 as *const () as usize, 0, 3);
@@ -195,6 +199,12 @@ pub extern "C" fn interrupt_dispatch(ctx: *mut InterruptContext) {
         LAPIC_TIMER_VECTOR => {
             crate::arch::x86_64::apic::eoi();
             crate::arch::x86_64::pit::advance_system_tick(ctx_ref);
+        }
+
+        // SMP TLB Shootdown IPI (Vector 49)
+        TLB_SHOOTDOWN_VECTOR => {
+            crate::arch::x86_64::apic::handle_tlb_shootdown_ipi();
+            crate::arch::x86_64::apic::eoi();
         }
 
         // Syscall via int 0x80

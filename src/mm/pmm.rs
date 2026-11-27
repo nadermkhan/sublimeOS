@@ -194,6 +194,15 @@ impl PhysicalMemoryManager {
         self.set_frame_free(frame);
     }
 
+    /// Decrement frame reference count and free the frame only when refcount reaches 0.
+    pub fn release_frame(&mut self, phys_addr: u64) {
+        let remaining = self.dec_frame_ref(phys_addr);
+        if remaining == 0 {
+            let frame = (phys_addr as usize) / PAGE_SIZE;
+            self.set_frame_free(frame);
+        }
+    }
+
     /// Increment reference count for a physical frame (e.g. during fork / CoW).
     pub fn inc_frame_ref(&mut self, phys_addr: u64) {
         let frame = (phys_addr as usize) / PAGE_SIZE;

@@ -48,6 +48,8 @@ enter_user_mode_asm:
 
     /* 2. Save current kernel RSP, CR3, and RFLAGS to nested frame stack */
     mov r8, [rip + NEST_DEPTH]
+    cmp r8, 16
+    jae .Lnest_overflow
     lea r9, [rip + SAVED_RSP_STACK]
     mov [r9 + r8 * 8], rsp
 
@@ -136,6 +138,16 @@ exit_user_mode_asm:
     pop rbx
 
     /* 7. Return cleanly to the caller of enter_user_mode_asm */
+    ret
+
+.Lnest_overflow:
+    mov rax, -1
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbp
+    pop rbx
     ret
 
 /*

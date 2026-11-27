@@ -354,12 +354,14 @@ pub fn generate_telnetd_binary() -> Vec<u8> {
     b.emit_bytes(&[0xBF, 0x03, 0x00, 0x00, 0x00]); // mov edi, 3 (fd)
     b.emit_bytes(&[0xBE, 0x05, 0x00, 0x00, 0x00]); // mov esi, 5
     b.emit_syscall();
-    b.emit_sys_write(1, b"\x1b[34m[telnetd] Listening for remote client connections...\x1b[0m\n");
-    b.emit_sys_write(1, b"\x1b[34m[telnetd] Remote shell session active on port 23\x1b[0m\n");
-    b.emit_sys_write(1, b"\x1b[35m[telnetd] Telnet daemon operational. Ready for client traffic.\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[34m[telnetd] Socket bound and listening on 0.0.0.0:23 (self-test probe)\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[33m[telnetd] Closing socket fd 3 (non-persistent smoke binary; no shell/PTY loop)\x1b[0m\n");
     b.emit_sys_write(1, b"\x1b[36m=====================================================\x1b[0m\n");
 
-    // 5. sys_exit(0)
+    // 5. close(fd=3) then sys_exit(0)
+    b.emit_mov_eax(3); // SYS_CLOSE
+    b.emit_bytes(&[0xBF, 0x03, 0x00, 0x00, 0x00]); // mov edi, 3 (fd)
+    b.emit_syscall();
     b.emit_sys_exit(0);
 
     b.build()
@@ -401,12 +403,14 @@ pub fn generate_sshd_binary() -> Vec<u8> {
     b.emit_bytes(&[0xBF, 0x03, 0x00, 0x00, 0x00]); // mov edi, 3 (fd)
     b.emit_bytes(&[0xBE, 0x05, 0x00, 0x00, 0x00]); // mov esi, 5
     b.emit_syscall();
-    b.emit_sys_write(1, b"\x1b[34m[sshd] Server listening on port 22 (fd 3)\x1b[0m\n");
-    b.emit_sys_write(1, b"\x1b[34m[sshd] Protocol version exchange: SSH-2.0-CosmicSSH_1.0\x1b[0m\n");
-    b.emit_sys_write(1, b"\x1b[35m[sshd] SSH server daemon online. Secure remote shell ready.\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[34m[sshd] Socket bound and listening on 0.0.0.0:22 (fd 3, self-test probe)\x1b[0m\n");
+    b.emit_sys_write(1, b"\x1b[33m[sshd] Closing socket fd 3 (SSH transport/auth daemon not yet implemented)\x1b[0m\n");
     b.emit_sys_write(1, b"\x1b[36m=====================================================\x1b[0m\n");
 
-    // 5. sys_exit(0)
+    // 5. close(fd=3) then sys_exit(0)
+    b.emit_mov_eax(3); // SYS_CLOSE
+    b.emit_bytes(&[0xBF, 0x03, 0x00, 0x00, 0x00]); // mov edi, 3 (fd)
+    b.emit_syscall();
     b.emit_sys_exit(0);
 
     b.build()

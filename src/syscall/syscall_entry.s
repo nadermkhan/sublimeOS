@@ -90,9 +90,27 @@ syscall_entry:
     pop rcx
     pop r11
 
+    /* Sanitize user RFLAGS: preserve safe status/direction bits, force IF|bit1, clear IOPL/NT/VM/RF/AC */
+    and r11, 0x00200CD5
+    or  r11, 0x202
+
+    /* Validate RCX is canonical user-space (< 0x0000800000000000) before pop rsp + sysretq */
+    push rax
+    mov rax, rcx
+    shr rax, 47
+    test rax, rax
+    pop rax
+    jnz .Lbad_sysret_rip
+
     /* Disable interrupts across user RSP restore before sysretq re-enables IF via R11 */
     cli
     pop rsp
 
     /* Return to user space (RAX holds syscall return code) */
     sysretq
+
+.Lbad_sysret_rip:
+    /* Non-canonical or kernel-range RCX: terminate offending Ring-3 task on kernel stack */
+    cld
+    mov edi, 139
+    call syscall_bad_return_rip

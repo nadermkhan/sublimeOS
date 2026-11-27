@@ -28,6 +28,7 @@ pub struct PerCpuRunQueue {
     pub ready_queue: VecDeque<Arc<IrqSafeSpinlock<ThreadControlBlock>>>,
     pub current_thread: Option<Arc<IrqSafeSpinlock<ThreadControlBlock>>>,
     pub idle_thread: Option<Arc<IrqSafeSpinlock<ThreadControlBlock>>>,
+    pub pending_finish: Option<(Arc<IrqSafeSpinlock<ThreadControlBlock>>, bool)>,
     pub total_ticks: u64,
 }
 
@@ -38,6 +39,7 @@ impl PerCpuRunQueue {
             ready_queue: VecDeque::new(),
             current_thread: None,
             idle_thread: None,
+            pending_finish: None,
             total_ticks: 0,
         }
     }
@@ -52,6 +54,7 @@ pub struct Scheduler {
     pub sleeping_queue: Vec<Arc<IrqSafeSpinlock<ThreadControlBlock>>>,
     pub ready_queue: VecDeque<Arc<IrqSafeSpinlock<ThreadControlBlock>>>,
     pub dead_queue: Vec<Arc<IrqSafeSpinlock<ThreadControlBlock>>>,
+    pub pending_finish: Option<(Arc<IrqSafeSpinlock<ThreadControlBlock>>, bool)>,
     pub current_thread: Option<Arc<IrqSafeSpinlock<ThreadControlBlock>>>,
     pub idle_thread: Option<Arc<IrqSafeSpinlock<ThreadControlBlock>>>,
 }
@@ -63,6 +66,7 @@ impl Scheduler {
             sleeping_queue: Vec::new(),
             ready_queue: VecDeque::new(),
             dead_queue: Vec::new(),
+            pending_finish: None,
             current_thread: None,
             idle_thread: None,
         }
@@ -177,7 +181,7 @@ pub fn init() {
         bsp_rq.idle_thread = Some(idle.clone());
         sched.per_cpu.push(bsp_rq);
     } else {
-        let bsp_idx = (crate::arch::x86_64::apic::get_apic_id() as usize).min(sched.per_cpu.len() - 1);
+        let bsp_idx = crate::arch::x86_64::gdt::current_cpu_slot().min(sched.per_cpu.len() - 1);
         sched.per_cpu[bsp_idx].current_thread = Some(boot_thread.clone());
         if sched.per_cpu[bsp_idx].idle_thread.is_none() {
             sched.per_cpu[bsp_idx].idle_thread = Some(idle.clone());
@@ -235,7 +239,7 @@ pub fn is_current_user_thread() -> bool {
     let cpu_id = if sched.per_cpu.is_empty() {
         0
     } else {
-        (crate::arch::x86_64::apic::get_apic_id() as usize).min(sched.per_cpu.len() - 1)
+        crate::arch::x86_64::gdt::current_cpu_slot().min(sched.per_cpu.len() - 1)
     };
     let curr_opt = if !sched.per_cpu.is_empty() {
         sched.per_cpu[cpu_id].current_thread.as_ref()
@@ -251,7 +255,7 @@ pub fn set_current_user_context(pid: u64, cr3: u64, kstack_top: u64) {
     let cpu_id = if sched.per_cpu.is_empty() {
         0
     } else {
-        (crate::arch::x86_64::apic::get_apic_id() as usize).min(sched.per_cpu.len() - 1)
+        crate::arch::x86_64::gdt::current_cpu_slot().min(sched.per_cpu.len() - 1)
     };
     let curr_opt = if !sched.per_cpu.is_empty() {
         sched.per_cpu[cpu_id].current_thread.as_ref()
@@ -272,7 +276,7 @@ pub fn set_current_thread_exec(cr3: u64, name: &str) {
     let cpu_id = if sched.per_cpu.is_empty() {
         0
     } else {
-        (crate::arch::x86_64::apic::get_apic_id() as usize).min(sched.per_cpu.len() - 1)
+        crate::arch::x86_64::gdt::current_cpu_slot().min(sched.per_cpu.len() - 1)
     };
     let curr_opt = if !sched.per_cpu.is_empty() {
         sched.per_cpu[cpu_id].current_thread.as_ref()
@@ -411,15 +415,42 @@ pub fn schedule() {
     }
 }
 
+fn finalize_pending_switch(sched: &mut Scheduler, cpu_id: usize) {
+    let pending = if !sched.per_cpu.is_empty() {
+        sched.per_cpu[cpu_id].pending_finish.take()
+    } else {
+        sched.pending_finish.take()
+    };
+    if let Some((old_task, old_is_idle)) = pending {
+        let mut old = old_task.lock();
+        if old.state == ThreadState::Running {
+            old.state = ThreadState::Ready;
+            if !old_is_idle {
+                drop(old);
+                if !sched.per_cpu.is_empty() {
+                    sched.per_cpu[cpu_id].ready_queue.push_back(old_task);
+                } else {
+                    sched.ready_queue.push_back(old_task);
+                }
+                return;
+            }
+        } else if old.state == ThreadState::Dead {
+            drop(old);
+            sched.dead_queue.push(old_task);
+            return;
+        }
+    }
+}
+
 fn schedule_inner() -> Vec<Arc<IrqSafeSpinlock<ThreadControlBlock>>> {
     let mut sched = SCHEDULER.lock();
-    let dead_to_drop = core::mem::take(&mut sched.dead_queue);
-
     let cpu_id = if sched.per_cpu.is_empty() {
         0
     } else {
-        (crate::arch::x86_64::apic::get_apic_id() as usize).min(sched.per_cpu.len() - 1)
+        crate::arch::x86_64::gdt::current_cpu_slot().min(sched.per_cpu.len() - 1)
     };
+    finalize_pending_switch(&mut sched, cpu_id);
+    let dead_to_drop = core::mem::take(&mut sched.dead_queue);
 
     // 1. Check sleeping queue for awakened tasks
     let current_ticks = crate::arch::x86_64::pit::get_ticks();
@@ -579,23 +610,16 @@ fn schedule_inner() -> Vec<Arc<IrqSafeSpinlock<ThreadControlBlock>>> {
             .map_or(false, |idle| Arc::ptr_eq(&prev_task, idle))
     };
 
-    // Move current running task back to ready queue if it's still running (never enqueue idle!)
+    // Defer re-queueing/reaping prev_task until AFTER sublime_context_switch saves prev.rsp
     let prev_rsp_ptr = {
         let mut prev = prev_task.lock();
-        if prev.state == ThreadState::Running {
-            prev.state = ThreadState::Ready;
-            if !prev_is_idle {
-                if !sched.per_cpu.is_empty() {
-                    sched.per_cpu[cpu_id].ready_queue.push_back(prev_task.clone());
-                } else {
-                    sched.ready_queue.push_back(prev_task.clone());
-                }
-            }
-        } else if prev.state == ThreadState::Dead {
-            sched.dead_queue.push(prev_task.clone());
-        }
         &mut prev.rsp as *mut u64
     };
+    if !sched.per_cpu.is_empty() {
+        sched.per_cpu[cpu_id].pending_finish = Some((prev_task, prev_is_idle));
+    } else {
+        sched.pending_finish = Some((prev_task, prev_is_idle));
+    }
 
     let (next_rsp, next_kstack_top, next_cr3, next_pid, _next_is_user) = {
         let mut next = next_task.lock();
@@ -636,7 +660,16 @@ fn schedule_inner() -> Vec<Arc<IrqSafeSpinlock<ThreadControlBlock>>> {
         sublime_context_switch(prev_rsp_ptr, next_rsp);
     }
 
-    Vec::new()
+    {
+        let mut sched2 = SCHEDULER.lock();
+        let cur_cpu = if sched2.per_cpu.is_empty() {
+            0
+        } else {
+            crate::arch::x86_64::gdt::current_cpu_slot().min(sched2.per_cpu.len() - 1)
+        };
+        finalize_pending_switch(&mut sched2, cur_cpu);
+        core::mem::take(&mut sched2.dead_queue)
+    }
 }
 
 /// Called on every timer tick (preemption).
@@ -650,7 +683,7 @@ pub fn on_timer_tick(_ticks: u64, _ctx: &mut InterruptContext) {
         let cpu_id = if sched.per_cpu.is_empty() {
             0
         } else {
-            (crate::arch::x86_64::apic::get_apic_id() as usize).min(sched.per_cpu.len() - 1)
+            crate::arch::x86_64::gdt::current_cpu_slot().min(sched.per_cpu.len() - 1)
         };
 
         if !sched.per_cpu.is_empty() {
@@ -688,7 +721,7 @@ pub fn sleep_ms(ms: u64) {
         let cpu_id = if sched.per_cpu.is_empty() {
             0
         } else {
-            (crate::arch::x86_64::apic::get_apic_id() as usize).min(sched.per_cpu.len() - 1)
+            crate::arch::x86_64::gdt::current_cpu_slot().min(sched.per_cpu.len() - 1)
         };
         let current = if !sched.per_cpu.is_empty() {
             sched.per_cpu[cpu_id].current_thread.as_ref().cloned()
@@ -710,7 +743,7 @@ pub fn exit_current_thread(_code: i32) -> ! {
         let cpu_id = if sched.per_cpu.is_empty() {
             0
         } else {
-            (crate::arch::x86_64::apic::get_apic_id() as usize).min(sched.per_cpu.len() - 1)
+            crate::arch::x86_64::gdt::current_cpu_slot().min(sched.per_cpu.len() - 1)
         };
         let current = if !sched.per_cpu.is_empty() {
             sched.per_cpu[cpu_id].current_thread.as_ref()

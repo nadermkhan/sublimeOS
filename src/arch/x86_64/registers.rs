@@ -1,4 +1,35 @@
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+pub static SMEP_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static SMAP_ENABLED: AtomicBool = AtomicBool::new(false);
+pub static NX_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Probe CPUID and enable hardware security mitigations (CR4.SMEP, CR4.SMAP) on the current core.
+pub unsafe fn enable_cpu_security_features() {
+    let max_ext = cpuid(0x8000_0000, 0).eax;
+    if max_ext >= 0x8000_0001 {
+        let ext1 = cpuid(0x8000_0001, 0);
+        if (ext1.edx & (1 << 20)) != 0 {
+            NX_ENABLED.store(true, Ordering::Release);
+        }
+    }
+
+    let max_basic = cpuid(0, 0).eax;
+    if max_basic >= 7 {
+        let leaf7 = cpuid(7, 0);
+        let mut cr4 = read_cr4();
+        if (leaf7.ebx & (1 << 7)) != 0 {
+            cr4 |= 1 << 20; // SMEP
+            SMEP_ENABLED.store(true, Ordering::Release);
+        }
+        if (leaf7.ebx & (1 << 20)) != 0 {
+            cr4 |= 1 << 21; // SMAP
+            SMAP_ENABLED.store(true, Ordering::Release);
+        }
+        write_cr4(cr4);
+    }
+}
 
 /// Read CR0.
 #[inline(always)]

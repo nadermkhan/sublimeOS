@@ -2,7 +2,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use crate::sync::IrqSafeSpinlock;
 use crate::mm::pmm::PMM;
-use crate::mm::vmm::{VMM, PageTable, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+use crate::mm::vmm::{VMM, PageTable, PAGE_NO_EXECUTE, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
 use crate::mm::swap::SWAP_MANAGER;
 use crate::mm::{phys_to_virt, align_down};
 
@@ -71,6 +71,9 @@ pub fn handle_demand_fault(pml4_phys: u64, fault_vaddr: u64, is_write: bool) -> 
         if !region.is_demand_paged {
             return Err("VMA is not demand-paged");
         }
+        if is_write && (region.flags & PAGE_WRITABLE) == 0 {
+            return Err("Write fault on read-only VMA");
+        }
 
         let frame = PMM.lock().alloc_frame().ok_or("Out of memory for demand paging")?;
         let virt_frame = phys_to_virt(frame) as *mut u8;
@@ -78,9 +81,13 @@ pub fn handle_demand_fault(pml4_phys: u64, fault_vaddr: u64, is_write: bool) -> 
             core::ptr::write_bytes(virt_frame, 0, 4096);
         }
 
-        let mut map_flags = PAGE_PRESENT | PAGE_USER;
-        if (region.flags & 2) != 0 || is_write {
+        let mut map_flags = PAGE_PRESENT | PAGE_USER | (region.flags & PAGE_NO_EXECUTE);
+        if (region.flags & PAGE_WRITABLE) != 0 {
             map_flags |= PAGE_WRITABLE;
+        }
+        if (region.flags & PAGE_NO_EXECUTE) == 0 && (region.flags & PAGE_WRITABLE) != 0 {
+            // Enforce W^X: writable demand-paged regions are non-executable by default
+            map_flags |= PAGE_NO_EXECUTE;
         }
 
         let pml4 = unsafe { &mut *(phys_to_virt(pml4_phys) as *mut PageTable) };
@@ -120,13 +127,16 @@ pub fn handle_demand_fault(pml4_phys: u64, fault_vaddr: u64, is_write: bool) -> 
     }
 
     if let Some(vma_flags) = matched_vma_flags {
+        if is_write && (vma_flags & PAGE_WRITABLE) == 0 {
+            return Err("Write fault on read-only user VMA");
+        }
         let frame = PMM.lock().alloc_frame().ok_or("Out of memory for user demand fault")?;
         let virt_frame = phys_to_virt(frame) as *mut u8;
         unsafe {
             core::ptr::write_bytes(virt_frame, 0, 4096);
         }
-        let mut map_flags = PAGE_PRESENT | PAGE_USER;
-        if (vma_flags & 2) != 0 || is_write {
+        let mut map_flags = PAGE_PRESENT | PAGE_USER | (vma_flags & PAGE_NO_EXECUTE);
+        if (vma_flags & PAGE_WRITABLE) != 0 {
             map_flags |= PAGE_WRITABLE;
         }
         let pml4 = unsafe { &mut *(phys_to_virt(pml4_phys) as *mut PageTable) };

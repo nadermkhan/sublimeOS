@@ -199,12 +199,21 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+pub const ENAMETOOLONG: isize = -36;
+
+fn copy_path_cstr(path: &str, out: &mut [u8; 256]) -> Result<(), isize> {
+    let bytes = path.as_bytes();
+    if bytes.len() > 255 {
+        return Err(ENAMETOOLONG);
+    }
+    out[..bytes.len()].copy_from_slice(bytes);
+    out[bytes.len()] = 0;
+    Ok(())
+}
+
 pub fn read_dir(path: &str) -> Result<alloc::vec::Vec<DirEntry>, isize> {
     let mut path_buf = [0u8; 256];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(255);
-    path_buf[..len].copy_from_slice(&bytes[..len]);
-    path_buf[len] = 0;
+    copy_path_cstr(path, &mut path_buf)?;
 
     let fd = unsafe { syscall3(2, path_buf.as_ptr() as u64, O_RDONLY as u64, 0) as isize };
     if fd < 0 {
@@ -215,7 +224,11 @@ pub fn read_dir(path: &str) -> Result<alloc::vec::Vec<DirEntry>, isize> {
     let mut buf = [0u8; 1024];
     loop {
         let n = unsafe { syscall3(217, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) as isize };
-        if n <= 0 {
+        if n < 0 {
+            close(fd as usize);
+            return Err(n);
+        }
+        if n == 0 {
             break;
         }
         let mut off = 0usize;
@@ -247,10 +260,7 @@ pub fn read_dir(path: &str) -> Result<alloc::vec::Vec<DirEntry>, isize> {
 
 pub fn read_to_string(path: &str) -> Result<alloc::string::String, isize> {
     let mut path_buf = [0u8; 256];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(255);
-    path_buf[..len].copy_from_slice(&bytes[..len]);
-    path_buf[len] = 0;
+    copy_path_cstr(path, &mut path_buf)?;
 
     let fd = unsafe { syscall3(2, path_buf.as_ptr() as u64, O_RDONLY as u64, 0) as isize };
     if fd < 0 {
@@ -260,7 +270,11 @@ pub fn read_to_string(path: &str) -> Result<alloc::string::String, isize> {
     let mut buf = [0u8; 512];
     loop {
         let n = read(fd as usize, &mut buf);
-        if n <= 0 {
+        if n < 0 {
+            close(fd as usize);
+            return Err(n);
+        }
+        if n == 0 {
             break;
         }
         if let Ok(s) = core::str::from_utf8(&buf[..n as usize]) {
@@ -274,10 +288,7 @@ pub fn read_to_string(path: &str) -> Result<alloc::string::String, isize> {
 /// Read up to `max_bytes` raw bytes from `path` (e.g. ELF64 headers or binary files).
 pub fn read_bytes(path: &str, max_bytes: usize) -> Result<alloc::vec::Vec<u8>, isize> {
     let mut path_buf = [0u8; 256];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(255);
-    path_buf[..len].copy_from_slice(&bytes[..len]);
-    path_buf[len] = 0;
+    copy_path_cstr(path, &mut path_buf)?;
 
     let fd = unsafe { syscall3(2, path_buf.as_ptr() as u64, O_RDONLY as u64, 0) as isize };
     if fd < 0 {
@@ -288,7 +299,11 @@ pub fn read_bytes(path: &str, max_bytes: usize) -> Result<alloc::vec::Vec<u8>, i
     while res.len() < max_bytes {
         let want = (max_bytes - res.len()).min(buf.len());
         let n = read(fd as usize, &mut buf[..want]);
-        if n <= 0 {
+        if n < 0 {
+            close(fd as usize);
+            return Err(n);
+        }
+        if n == 0 {
             break;
         }
         res.extend_from_slice(&buf[..n as usize]);
@@ -299,10 +314,7 @@ pub fn read_bytes(path: &str, max_bytes: usize) -> Result<alloc::vec::Vec<u8>, i
 
 pub fn write_file(path: &str, data: &[u8]) -> Result<(), isize> {
     let mut path_buf = [0u8; 256];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(255);
-    path_buf[..len].copy_from_slice(&bytes[..len]);
-    path_buf[len] = 0;
+    copy_path_cstr(path, &mut path_buf)?;
 
     let flags = O_WRONLY | O_CREAT | O_TRUNC;
     let fd = unsafe { syscall3(2, path_buf.as_ptr() as u64, flags as u64, 0o644) as isize };
@@ -342,10 +354,9 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 
 pub fn open(path: &str, flags: i32, mode: i32) -> isize {
     let mut buf = [0u8; 256];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(255);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    buf[len] = 0;
+    if let Err(e) = copy_path_cstr(path, &mut buf) {
+        return e;
+    }
     unsafe { syscall3(2, buf.as_ptr() as u64, flags as u64, mode as u64) as isize }
 }
 
@@ -367,43 +378,44 @@ pub fn pipe(fds: &mut [i32; 2]) -> isize {
 
 pub fn unlink(path: &str) -> isize {
     let mut buf = [0u8; 256];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(255);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    buf[len] = 0;
+    if let Err(e) = copy_path_cstr(path, &mut buf) {
+        return e;
+    }
     unsafe { syscall1(87, buf.as_ptr() as u64) as isize }
 }
 
 pub fn mkdir(path: &str, mode: u32) -> isize {
     let mut buf = [0u8; 256];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(255);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    buf[len] = 0;
+    if let Err(e) = copy_path_cstr(path, &mut buf) {
+        return e;
+    }
     unsafe { syscall2(83, buf.as_ptr() as u64, mode as u64) as isize }
 }
 
-pub fn getcwd() -> alloc::string::String {
+pub fn try_getcwd() -> Result<alloc::string::String, isize> {
     let mut buf = [0u8; 256];
-    let ret = unsafe { syscall2(79, buf.as_mut_ptr() as u64, buf.len() as u64) };
-    if ret >= 0 {
-        let mut len = 0;
-        while len < buf.len() && buf[len] != 0 {
-            len += 1;
-        }
-        if let Ok(s) = core::str::from_utf8(&buf[..len]) {
-            return alloc::string::String::from(s);
-        }
+    let ret = unsafe { syscall2(79, buf.as_mut_ptr() as u64, buf.len() as u64) as isize };
+    if ret < 0 {
+        return Err(ret);
     }
-    alloc::string::String::from("/")
+    let mut len = 0;
+    while len < buf.len() && buf[len] != 0 {
+        len += 1;
+    }
+    core::str::from_utf8(&buf[..len])
+        .map(alloc::string::String::from)
+        .map_err(|_| -22)
+}
+
+pub fn getcwd() -> alloc::string::String {
+    try_getcwd().unwrap_or_else(|_| alloc::string::String::from("/"))
 }
 
 pub fn chdir(path: &str) -> isize {
     let mut buf = [0u8; 256];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(255);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    buf[len] = 0;
+    if let Err(e) = copy_path_cstr(path, &mut buf) {
+        return e;
+    }
     unsafe { syscall1(80, buf.as_ptr() as u64) as isize }
 }
 
@@ -426,10 +438,9 @@ pub fn kill(pid: usize, sig: i32) -> isize {
 /// Replace the current process image with the ELF64 binary at `path` (POSIX `execve`, syscall 59).
 pub fn execve(path: &str, argv: &[&str]) -> isize {
     let mut path_buf = [0u8; 256];
-    let pb = path.as_bytes();
-    let plen = pb.len().min(255);
-    path_buf[..plen].copy_from_slice(&pb[..plen]);
-    path_buf[plen] = 0;
+    if let Err(e) = copy_path_cstr(path, &mut path_buf) {
+        return e;
+    }
 
     let mut storage = alloc::vec::Vec::with_capacity(argv.len());
     let mut ptrs = alloc::vec::Vec::with_capacity(argv.len() + 1);
@@ -469,10 +480,9 @@ pub fn sync() {
 
 fn spawn_syscall(sysno: u64, path: &str) -> isize {
     let mut buf = [0u8; 256];
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(255);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    buf[len] = 0;
+    if let Err(e) = copy_path_cstr(path, &mut buf) {
+        return e;
+    }
     unsafe { syscall1(sysno, buf.as_ptr() as u64) as isize }
 }
 
@@ -486,11 +496,70 @@ pub fn spawn_bg(path: &str) -> isize {
 
 pub fn syscommand(cmd: &str) -> isize {
     let mut buf = [0u8; 256];
-    let bytes = cmd.as_bytes();
-    let len = bytes.len().min(255);
-    buf[..len].copy_from_slice(&bytes[..len]);
-    buf[len] = 0;
+    if let Err(e) = copy_path_cstr(cmd, &mut buf) {
+        return e;
+    }
     unsafe { syscall1(400, buf.as_ptr() as u64) as isize }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LinuxStat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_nlink: u64,
+    pub st_mode: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub __pad0: u32,
+    pub st_rdev: u64,
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_atime: i64,
+    pub st_atime_nsec: i64,
+    pub st_mtime: i64,
+    pub st_mtime_nsec: i64,
+    pub st_ctime: i64,
+    pub st_ctime_nsec: i64,
+    pub __unused: [i64; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TimeVal {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
+
+pub const SEEK_SET: i32 = 0;
+pub const SEEK_CUR: i32 = 1;
+pub const SEEK_END: i32 = 2;
+pub const PROT_NONE: i32 = 0x0;
+pub const PROT_EXEC: i32 = 0x4;
+
+pub fn lseek(fd: usize, offset: isize, whence: i32) -> isize {
+    unsafe { syscall3(8, fd as u64, offset as u64, whence as u64) as isize }
+}
+
+pub fn stat(path: &str, out: &mut LinuxStat) -> isize {
+    let mut buf = [0u8; 256];
+    if let Err(e) = copy_path_cstr(path, &mut buf) {
+        return e;
+    }
+    unsafe { syscall2(4, buf.as_ptr() as u64, out as *mut LinuxStat as u64) as isize }
+}
+
+pub fn fstat(fd: usize, out: &mut LinuxStat) -> isize {
+    unsafe { syscall2(5, fd as u64, out as *mut LinuxStat as u64) as isize }
+}
+
+pub fn mprotect(addr: *mut u8, length: usize, prot: i32) -> isize {
+    unsafe { syscall3(10, addr as u64, length as u64, prot as u64) as isize }
+}
+
+pub fn gettimeofday(tv: &mut TimeVal) -> isize {
+    unsafe { syscall2(96, tv as *mut TimeVal as u64, 0) as isize }
 }
 
 pub fn shutdown() -> ! {
@@ -519,13 +588,15 @@ pub fn socket(domain: i32, sock_type: i32, protocol: i32) -> isize {
 }
 
 pub fn connect_unix(fd: usize, path: &str) -> isize {
+    let bytes = path.as_bytes();
+    if bytes.len() > 107 {
+        return ENAMETOOLONG;
+    }
     let mut addr = SockAddrUn {
         sun_family: AF_UNIX as u16,
         sun_path: [0u8; 108],
     };
-    let bytes = path.as_bytes();
-    let len = bytes.len().min(107);
-    addr.sun_path[..len].copy_from_slice(&bytes[..len]);
+    addr.sun_path[..bytes.len()].copy_from_slice(bytes);
     unsafe {
         syscall3(
             42,
@@ -747,15 +818,27 @@ struct UserAllocator;
 
 unsafe impl core::alloc::GlobalAlloc for UserAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let align = layout.align().max(core::mem::align_of::<FreeNode>());
-        let size = layout.size().max(core::mem::size_of::<FreeNode>());
+        let node_align = core::mem::align_of::<FreeNode>();
+        let align = layout.align().max(node_align);
+        let raw_size = layout.size().max(core::mem::size_of::<FreeNode>());
+        let size = match raw_size.checked_add(node_align - 1) {
+            Some(s) => s & !(node_align - 1),
+            None => return core::ptr::null_mut(),
+        };
         ALLOC_STATE.lock_guard();
 
         let mut prev: *mut FreeNode = core::ptr::null_mut();
         let mut cur = ALLOC_STATE.free_head.load(core::sync::atomic::Ordering::Relaxed) as *mut FreeNode;
         while !cur.is_null() {
             if (cur as usize) & (align - 1) == 0 && (*cur).cap >= size {
-                let next = (*cur).next;
+                let mut next = (*cur).next;
+                let rem = (*cur).cap - size;
+                if rem >= core::mem::size_of::<FreeNode>() + node_align {
+                    let tail = ((cur as usize) + size) as *mut FreeNode;
+                    (*tail).cap = rem;
+                    (*tail).next = next;
+                    next = tail;
+                }
                 if prev.is_null() {
                     ALLOC_STATE
                         .free_head
@@ -771,12 +854,24 @@ unsafe impl core::alloc::GlobalAlloc for UserAllocator {
         }
 
         let cur_brk = brk(0);
-        if cur_brk == 0 {
+        if cur_brk < 0x1000 {
             ALLOC_STATE.unlock_guard();
             return core::ptr::null_mut();
         }
-        let aligned_brk = (cur_brk + align - 1) & !(align - 1);
-        let new_brk = aligned_brk + size;
+        let aligned_brk = match cur_brk.checked_add(align - 1) {
+            Some(v) => v & !(align - 1),
+            None => {
+                ALLOC_STATE.unlock_guard();
+                return core::ptr::null_mut();
+            }
+        };
+        let new_brk = match aligned_brk.checked_add(size) {
+            Some(v) => v,
+            None => {
+                ALLOC_STATE.unlock_guard();
+                return core::ptr::null_mut();
+            }
+        };
         let res = brk(new_brk);
         ALLOC_STATE.unlock_guard();
         if res >= new_brk {
@@ -790,10 +885,15 @@ unsafe impl core::alloc::GlobalAlloc for UserAllocator {
         if ptr.is_null() || (ptr as usize) < 0x1000 {
             return;
         }
-        let cap = layout.size().max(core::mem::size_of::<FreeNode>());
-        if (ptr as usize) % core::mem::align_of::<FreeNode>() != 0 {
+        let node_align = core::mem::align_of::<FreeNode>();
+        if (ptr as usize) & (node_align - 1) != 0 {
             return;
         }
+        let raw_cap = layout.size().max(core::mem::size_of::<FreeNode>());
+        let cap = match raw_cap.checked_add(node_align - 1) {
+            Some(s) => s & !(node_align - 1),
+            None => return,
+        };
         ALLOC_STATE.lock_guard();
         let node = ptr as *mut FreeNode;
         let head = ALLOC_STATE.free_head.load(core::sync::atomic::Ordering::Relaxed) as *mut FreeNode;

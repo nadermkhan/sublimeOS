@@ -484,7 +484,7 @@ impl NtfsInode {
                             let namespace = self.raw_record[fn_off + 65];
 
                             // Skip pure DOS 8.3 duplicates if namespace == 2 to avoid duplicate entries
-                            if namespace != 2 && name_len > 0 {
+                            if namespace != 2 && name_len > 0 && fn_off + 66 + name_len * 2 <= self.raw_record.len() {
                                 let mut name_str = String::new();
                                 for c in 0..name_len {
                                     let ch = (self.raw_record[fn_off + 66 + c * 2] as u16)

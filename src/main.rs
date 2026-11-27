@@ -45,7 +45,8 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     mm::pmm::init(mb_info);
     mm::vmm::VMM.lock().init();
     mm::heap::HEAP_ALLOCATOR.init();
-    if drivers::vbe::init_early_gop() {
+    let debug_boot = arch::x86_64::multiboot::is_debug_boot();
+    if drivers::vbe::init_early_gop() && !debug_boot {
         let _ = gui::boot_splash::start();
     }
 
@@ -79,11 +80,13 @@ pub extern "C" fn kernel_main(magic: u64, mb_info: u64) -> ! {
     kinfo!("CPU interrupts enabled");
     arch::x86_64::rtc::init();
 
-    // 8. Run Kernel Self-Test Suite to verify all subsystems
-    gui::boot_splash::set_stage(88, "Running Kernel Diagnostics...");
-    arch::x86_64::pit::IN_KERNEL_TESTS.store(true, core::sync::atomic::Ordering::SeqCst);
-    tests::run_all_tests();
-    arch::x86_64::pit::IN_KERNEL_TESTS.store(false, core::sync::atomic::Ordering::SeqCst);
+    // 8. Run Kernel Self-Test Suite only in debug or explicit self-test builds (commercial OSes skip noisy boot tests)
+    if debug_boot || cfg!(feature = "self-test") {
+        gui::boot_splash::set_stage(88, "Running Kernel Diagnostics...");
+        arch::x86_64::pit::IN_KERNEL_TESTS.store(true, core::sync::atomic::Ordering::SeqCst);
+        tests::run_all_tests();
+        arch::x86_64::pit::IN_KERNEL_TESTS.store(false, core::sync::atomic::Ordering::SeqCst);
+    }
 
     // Ensure stdout capture is off and hardware input buffers are unlatched before PID 1 starts
     let _ = arch::x86_64::vga::stop_stdout_capture();

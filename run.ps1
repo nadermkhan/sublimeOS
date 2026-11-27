@@ -38,7 +38,7 @@ if ($Headless) {
 }
 
 if ($Debug) {
-    $qemuArgs += @("-d", "int,cpu_reset", "-no-reboot")
+    $qemuArgs += @("-append", "debug", "-d", "int,cpu_reset", "-no-reboot")
 }
 
 & $qemu @qemuArgs

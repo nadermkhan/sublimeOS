@@ -1,6 +1,6 @@
 extern crate alloc;
 use alloc::vec::Vec;
-use core::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::arch::x86_64::apic;
 use crate::arch::x86_64::madt::MADT;
 use crate::arch::x86_64::pit::{delay_ms, delay_us};
@@ -31,6 +31,7 @@ const ATOMIC_ZERO: AtomicU64 = AtomicU64::new(0);
 static AP_BOOT_ACK: [AtomicBool; 256] = [ATOMIC_FALSE; 256];
 static AP_STACK_TOPS: [AtomicU64; 256] = [ATOMIC_ZERO; 256];
 static TRAMPOLINE_STAGED: AtomicBool = AtomicBool::new(false);
+pub static ONLINE_AP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy)]
 pub struct CpuCore {
@@ -151,6 +152,7 @@ fn get_or_alloc_ap_stack(apic_id: u8) -> Option<u64> {
 pub extern "C" fn ap_kernel_entry(apic_id_arg: u64) -> ! {
     unsafe {
         crate::arch::x86_64::registers::enable_sse();
+        crate::arch::x86_64::registers::enable_cpu_security_features();
         crate::arch::x86_64::registers::enable_write_combining();
         crate::arch::x86_64::gdt::load_kernel_gdt_for_ap();
         crate::arch::x86_64::idt::load_idt();
@@ -161,12 +163,11 @@ pub extern "C" fn ap_kernel_entry(apic_id_arg: u64) -> ! {
     let hw_apic_id = apic::get_apic_id();
     AP_BOOT_ACK[hw_apic_id as usize].store(true, Ordering::SeqCst);
     AP_BOOT_ACK[(apic_id_arg as u8) as usize].store(true, Ordering::SeqCst);
+    ONLINE_AP_COUNT.fetch_add(1, Ordering::AcqRel);
     fence(Ordering::SeqCst);
 
     loop {
-        unsafe {
-            core::arch::asm!("cli; hlt", options(nomem, nostack));
-        }
+        crate::arch::x86_64::registers::enable_interrupts_and_hlt();
     }
 }
 

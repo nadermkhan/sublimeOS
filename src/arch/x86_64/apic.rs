@@ -1,5 +1,5 @@
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use crate::arch::x86_64::idt::LAPIC_TIMER_VECTOR;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use crate::arch::x86_64::idt::{LAPIC_TIMER_VECTOR, TLB_SHOOTDOWN_VECTOR};
 use crate::arch::x86_64::msr::{rdmsr, wrmsr, IA32_APIC_BASE};
 use crate::kinfo;
 
@@ -228,4 +228,43 @@ pub fn send_init_ipi(dest_apic_id: u8) {
 /// Send Startup IPI (SIPI) to start AP core executing at (page_num * 4096).
 pub fn send_sipi(dest_apic_id: u8, page_num: u8) {
     send_ipi(dest_apic_id, page_num, 6); // Mode 6: Startup
+}
+
+static TLB_SHOOTDOWN_VADDR: AtomicU64 = AtomicU64::new(0);
+static TLB_SHOOTDOWN_ACKS: AtomicUsize = AtomicUsize::new(0);
+
+/// Handle incoming SMP TLB shootdown IPI on a remote core.
+pub fn handle_tlb_shootdown_ipi() {
+    let vaddr = TLB_SHOOTDOWN_VADDR.load(Ordering::Acquire);
+    unsafe {
+        if vaddr == u64::MAX {
+            let cr3 = crate::arch::x86_64::registers::read_cr3();
+            crate::arch::x86_64::registers::write_cr3(cr3);
+        } else {
+            crate::arch::x86_64::registers::invlpg(vaddr);
+        }
+    }
+    TLB_SHOOTDOWN_ACKS.fetch_add(1, Ordering::Release);
+}
+
+/// Broadcast a TLB shootdown IPI (`vaddr`, or `u64::MAX` for full flush) to all other online APs.
+pub fn broadcast_tlb_shootdown(vaddr: u64) {
+    let ap_count = crate::arch::x86_64::smp::ONLINE_AP_COUNT.load(Ordering::Acquire);
+    if ap_count == 0 || LAPIC_BASE_VIRT.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    TLB_SHOOTDOWN_VADDR.store(vaddr, Ordering::Release);
+    TLB_SHOOTDOWN_ACKS.store(0, Ordering::Release);
+    unsafe {
+        write_reg(REG_ESR, 0);
+        write_reg(REG_ICR_HIGH, 0);
+        // Destination Shorthand = 11b (All Excluding Self, bits 18..19), Fixed (000), Level Assert (bit 14)
+        write_reg(REG_ICR_LOW, (0b11 << 18) | (1 << 14) | (TLB_SHOOTDOWN_VECTOR as u32));
+        for _ in 0..50_000 {
+            if TLB_SHOOTDOWN_ACKS.load(Ordering::Acquire) >= ap_count {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
 }

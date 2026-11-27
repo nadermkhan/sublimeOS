@@ -1,8 +1,10 @@
 extern crate alloc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::mm::pmm::PMM;
-use crate::mm::vmm::{VMM, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+use crate::mm::vmm::{VMM, PAGE_NO_EXECUTE, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
 use crate::mm::{align_up, PAGE_SIZE};
+use crate::sync::IrqSafeSpinlock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmaType {
@@ -11,6 +13,8 @@ pub enum VmaType {
     Heap,
     Stack,
     Mmap,
+    Shared,
+    Device,
 }
 
 #[derive(Debug, Clone)]
@@ -21,12 +25,76 @@ pub struct VirtualMemoryArea {
     pub vma_type: VmaType,
 }
 
+struct Pml4DropGuard {
+    pml4_phys: u64,
+    device_ranges: IrqSafeSpinlock<Vec<(u64, u64)>>,
+}
+
+impl Drop for Pml4DropGuard {
+    fn drop(&mut self) {
+        if self.pml4_phys == 0 {
+            return;
+        }
+        let kcr3 = crate::task::scheduler::kernel_cr3();
+        let cur_cr3 = unsafe { crate::arch::x86_64::registers::read_cr3() } & crate::mm::vmm::ADDRESS_MASK;
+        if cur_cr3 == self.pml4_phys && kcr3 != 0 {
+            unsafe {
+                crate::arch::x86_64::registers::write_cr3(kcr3);
+            }
+        }
+        let dev_ranges = self.device_ranges.lock().clone();
+        let pml4 = unsafe { &mut *(crate::mm::phys_to_virt(self.pml4_phys) as *mut crate::mm::vmm::PageTable) };
+
+        for i in 0..256 {
+            if !pml4.entries[i].is_present() {
+                continue;
+            }
+            let pdpt_phys = pml4.entries[i].address();
+            let pdpt = unsafe { &mut *(crate::mm::phys_to_virt(pdpt_phys) as *mut crate::mm::vmm::PageTable) };
+            for j in 0..512 {
+                if !pdpt.entries[j].is_present() || pdpt.entries[j].is_huge() {
+                    continue;
+                }
+                let pd_phys = pdpt.entries[j].address();
+                let pd = unsafe { &mut *(crate::mm::phys_to_virt(pd_phys) as *mut crate::mm::vmm::PageTable) };
+                for k in 0..512 {
+                    if !pd.entries[k].is_present() || pd.entries[k].is_huge() {
+                        continue;
+                    }
+                    let pt_phys = pd.entries[k].address();
+                    let pt = unsafe { &mut *(crate::mm::phys_to_virt(pt_phys) as *mut crate::mm::vmm::PageTable) };
+                    for l in 0..512 {
+                        if !pt.entries[l].is_present() {
+                            continue;
+                        }
+                        let virt = ((i as u64) << 39)
+                            | ((j as u64) << 30)
+                            | ((k as u64) << 21)
+                            | ((l as u64) << 12);
+                        let is_dev = dev_ranges.iter().any(|&(s, e)| virt >= s && virt < e);
+                        if !is_dev {
+                            PMM.lock().release_frame(pt.entries[l].address());
+                        }
+                        pt.entries[l].clear();
+                    }
+                    PMM.lock().release_frame(pt_phys);
+                }
+                PMM.lock().release_frame(pd_phys);
+            }
+            PMM.lock().release_frame(pdpt_phys);
+            pml4.entries[i].clear();
+        }
+        PMM.lock().release_frame(self.pml4_phys);
+    }
+}
+
 #[derive(Clone)]
 pub struct AddressSpace {
     pub pml4_phys: u64,
     pub vmas: Vec<VirtualMemoryArea>,
     pub brk_start: u64,
     pub brk_current: u64,
+    owner: Arc<Pml4DropGuard>,
 }
 
 impl AddressSpace {
@@ -37,6 +105,10 @@ impl AddressSpace {
             vmas: Vec::new(),
             brk_start: 0x4000_0000,
             brk_current: 0x4000_0000,
+            owner: Arc::new(Pml4DropGuard {
+                pml4_phys: pml4,
+                device_ranges: IrqSafeSpinlock::new(Vec::new()),
+            }),
         })
     }
 
@@ -52,6 +124,9 @@ impl AddressSpace {
             vmm.map_page(pml4, virt, phys, flags | PAGE_PRESENT | PAGE_USER)?;
         }
 
+        if vma_type == VmaType::Device {
+            self.owner.device_ranges.lock().push((start, start + length));
+        }
         self.vmas.push(VirtualMemoryArea {
             start,
             end: start + length,
@@ -81,6 +156,9 @@ impl AddressSpace {
             vmm.map_page(pml4, virt, phys, flags | PAGE_PRESENT | PAGE_USER)?;
         }
 
+        if vma_type == VmaType::Device {
+            self.owner.device_ranges.lock().push((start, start + length));
+        }
         self.vmas.push(VirtualMemoryArea {
             start,
             end: start + length,
@@ -109,7 +187,15 @@ impl AddressSpace {
                 let virt = old_aligned + i * (PAGE_SIZE as u64);
                 let frame_opt = PMM.lock().alloc_frame();
                 if let Some(phys) = frame_opt {
-                    let _ = vmm.map_page(pml4, virt, phys, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+                    if vmm.map_page(
+                        pml4,
+                        virt,
+                        phys,
+                        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER | PAGE_NO_EXECUTE,
+                    ).is_err() {
+                        PMM.lock().release_frame(phys);
+                        return self.brk_current;
+                    }
                 } else {
                     return self.brk_current;
                 }
@@ -124,7 +210,8 @@ impl AddressSpace {
     /// All writable pages in the lower half (user space, PML4 entries 0..256)
     /// are marked read-only and PAGE_COW in both parent and child.
     pub fn clone_cow(&mut self) -> Option<Self> {
-        let child_pml4_phys = VMM.lock().create_address_space()?;
+        let _vmm = VMM.lock();
+        let child_pml4_phys = _vmm.create_address_space()?;
         let parent_pml4 = unsafe { &mut *(crate::mm::phys_to_virt(self.pml4_phys) as *mut crate::mm::vmm::PageTable) };
         let child_pml4 = unsafe { &mut *(crate::mm::phys_to_virt(child_pml4_phys) as *mut crate::mm::vmm::PageTable) };
 
@@ -140,7 +227,7 @@ impl AddressSpace {
             child_pml4.entries[i].set(child_pdpt_frame, parent_pml4.entries[i].flags());
 
             for j in 0..512 {
-                if !parent_pdpt.entries[j].is_present() {
+                if !parent_pdpt.entries[j].is_present() || parent_pdpt.entries[j].is_huge() {
                     continue;
                 }
 
@@ -151,7 +238,7 @@ impl AddressSpace {
                 child_pdpt.entries[j].set(child_pd_frame, parent_pdpt.entries[j].flags());
 
                 for k in 0..512 {
-                    if !parent_pd.entries[k].is_present() {
+                    if !parent_pd.entries[k].is_present() || parent_pd.entries[k].is_huge() {
                         continue;
                     }
 
@@ -167,39 +254,56 @@ impl AddressSpace {
                             continue;
                         }
 
+                        let virt = ((i as u64) << 39)
+                            | ((j as u64) << 30)
+                            | ((k as u64) << 21)
+                            | ((l as u64) << 12);
+                        let is_device = self.vmas.iter().any(|v| {
+                            virt >= v.start && virt < v.end && v.vma_type == VmaType::Device
+                        });
+                        let is_shared = self.vmas.iter().any(|v| {
+                            virt >= v.start && virt < v.end && v.vma_type == VmaType::Shared
+                        });
+
                         let phys = p_entry.address();
                         let mut flags = p_entry.flags();
 
-                        // If writable, mark both parent and child as Copy-on-Write
-                        if (flags & crate::mm::vmm::PAGE_WRITABLE) != 0 {
+                        // Mark private writable pages CoW; preserve writable flag on MAP_SHARED/Device
+                        if !is_shared && !is_device && (flags & crate::mm::vmm::PAGE_WRITABLE) != 0 {
                             flags &= !crate::mm::vmm::PAGE_WRITABLE;
                             flags |= crate::mm::vmm::PAGE_COW;
                             p_entry.set(phys, flags);
                         }
 
-                        // Child gets identical flags and points to the same frame
                         child_pt.entries[l].set(phys, flags);
 
-                        // Increment reference count for the shared physical frame
-                        PMM.lock().inc_frame_ref(phys);
+                        if !is_device {
+                            PMM.lock().inc_frame_ref(phys);
+                        }
                     }
                 }
             }
         }
 
-        // Reload CR3 in parent if currently active so read-only permissions take immediate effect
+        // Reload CR3 in parent if currently active and broadcast SMP TLB shootdown
         let current_cr3 = unsafe { crate::arch::x86_64::registers::read_cr3() };
         if current_cr3 == self.pml4_phys {
             unsafe {
                 crate::arch::x86_64::registers::write_cr3(self.pml4_phys);
             }
         }
+        crate::arch::x86_64::apic::broadcast_tlb_shootdown(u64::MAX);
 
+        let dev_ranges = self.owner.device_ranges.lock().clone();
         Some(Self {
             pml4_phys: child_pml4_phys,
             vmas: self.vmas.clone(),
             brk_start: self.brk_start,
             brk_current: self.brk_current,
+            owner: Arc::new(Pml4DropGuard {
+                pml4_phys: child_pml4_phys,
+                device_ranges: IrqSafeSpinlock::new(dev_ranges),
+            }),
         })
     }
 

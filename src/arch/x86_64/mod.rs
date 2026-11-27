@@ -20,9 +20,10 @@ use crate::kinfo;
 
 /// Full architecture initialization sequence for x86_64.
 pub fn init() {
-    // 0. Enable SSE / SIMD instructions in CR0/CR4 & PAT Write-Combining (WC)
+    // 0. Enable SSE / SIMD instructions in CR0/CR4, PAT Write-Combining (WC), and SMEP/SMAP
     unsafe {
         registers::enable_sse();
+        registers::enable_cpu_security_features();
         registers::enable_write_combining();
     }
 

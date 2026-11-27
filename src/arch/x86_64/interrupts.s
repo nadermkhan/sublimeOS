@@ -78,6 +78,9 @@ ISR_NOERRCODE 47  /* IRQ 15: Secondary ATA */
 /* Local APIC Timer vector 0x30 (48) */
 ISR_NOERRCODE 48
 
+/* SMP TLB Shootdown IPI vector 0x31 (49) */
+ISR_NOERRCODE 49
+
 /* Syscall vector 0x80 (128) */
 ISR_NOERRCODE 128
 
@@ -85,6 +88,8 @@ ISR_NOERRCODE 128
 ISR_NOERRCODE 255
 
 interrupt_common:
+    /* SysV ABI requires Direction Flag cleared on C/Rust entry */
+    cld
     /* Save general purpose registers */
     push rax
     push rbx

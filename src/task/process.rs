@@ -10,17 +10,26 @@ use crate::sync::IrqSafeSpinlock;
 pub type ProcessId = u64;
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(2);
-static CURRENT_PID: AtomicU64 = AtomicU64::new(1);
+const ZERO_PID: AtomicU64 = AtomicU64::new(0);
+static CURRENT_PIDS: [AtomicU64; crate::arch::x86_64::gdt::MAX_CPUS] =
+    [ZERO_PID; crate::arch::x86_64::gdt::MAX_CPUS];
 
 pub static PROCESS_TABLE: IrqSafeSpinlock<Vec<Arc<IrqSafeSpinlock<ProcessControlBlock>>>> =
     IrqSafeSpinlock::new(Vec::new());
 
 pub fn get_current_pid() -> ProcessId {
-    CURRENT_PID.load(Ordering::Relaxed)
+    let slot = crate::arch::x86_64::gdt::current_cpu_slot();
+    let pid = CURRENT_PIDS[slot].load(Ordering::Relaxed);
+    if pid != 0 {
+        pid
+    } else {
+        1
+    }
 }
 
 pub fn set_current_pid(pid: ProcessId) {
-    CURRENT_PID.store(pid, Ordering::Relaxed);
+    let slot = crate::arch::x86_64::gdt::current_cpu_slot();
+    CURRENT_PIDS[slot].store(pid, Ordering::Relaxed);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +45,10 @@ pub struct ProcessControlBlock {
     pub ppid: ProcessId,
     pub pgid: ProcessId,
     pub sid: ProcessId,
+    pub uid: u32,
+    pub euid: u32,
+    pub gid: u32,
+    pub egid: u32,
     pub name: String,
     pub cwd: String,
     pub state: ProcessState,
@@ -69,6 +82,10 @@ impl ProcessControlBlock {
             ppid,
             pgid: pid,
             sid: if ppid > 0 { ppid } else { pid },
+            uid: 0,
+            euid: 0,
+            gid: 0,
+            egid: 0,
             name: String::from(name),
             cwd: String::from("/"),
             state: ProcessState::Running,
@@ -184,6 +201,20 @@ pub fn get_process(pid: ProcessId) -> Option<Arc<IrqSafeSpinlock<ProcessControlB
         }
     }
     None
+}
+
+/// Returns `true` when the executing process holds UID 0 / EUID 0 privileges (or PID 1).
+pub fn is_current_privileged() -> bool {
+    let pid = get_current_pid();
+    if pid == 1 {
+        return true;
+    }
+    get_process(pid)
+        .map(|p| {
+            let g = p.lock();
+            g.euid == 0 || g.uid == 0
+        })
+        .unwrap_or(false)
 }
 
 /// Mark a spawned process as detached so its zombie PCB and AddressSpace are auto-reaped on exit.
@@ -362,8 +393,8 @@ pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, options: i32) -> i32 {
 
         if let Some((child_pid, exit_code)) = target_child {
             if !status_ptr.is_null() {
-                unsafe {
-                    *status_ptr = (exit_code & 0xFF) << 8;
+                if let Err(e) = crate::syscall::uaccess::copy_to_user(status_ptr, (exit_code & 0xFF) << 8) {
+                    return e as i32;
                 }
             }
             // Remove zombie from process table
@@ -374,8 +405,8 @@ pub fn sys_waitpid(pid: i64, status_ptr: *mut i32, options: i32) -> i32 {
 
         if let Some((child_pid, stop_sig)) = target_stopped {
             if !status_ptr.is_null() {
-                unsafe {
-                    *status_ptr = 0x007F | ((stop_sig & 0xFF) << 8);
+                if let Err(e) = crate::syscall::uaccess::copy_to_user(status_ptr, 0x007F | ((stop_sig & 0xFF) << 8)) {
+                    return e as i32;
                 }
             }
             return child_pid as i32;
@@ -436,35 +467,11 @@ pub fn wait_for_child_exit(child_pid: ProcessId) -> i32 {
 
 /// Read a null-terminated UTF-8 string safely from current user/kernel virtual memory.
 fn copy_cstr_from_user(ptr: *const u8, max_len: usize) -> Option<String> {
-    if ptr.is_null() {
-        return None;
-    }
-    let mut buf = Vec::new();
-    for i in 0..max_len {
-        let b = unsafe { *ptr.add(i) };
-        if b == 0 {
-            break;
-        }
-        buf.push(b);
-    }
-    String::from_utf8(buf).ok()
+    crate::syscall::uaccess::copy_user_cstr(ptr, max_len).ok()
 }
 
 fn copy_cstr_array_from_user(arr: *const *const u8, limit: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    if arr.is_null() {
-        return out;
-    }
-    for i in 0..limit {
-        let item_ptr = unsafe { *arr.add(i) };
-        if item_ptr.is_null() {
-            break;
-        }
-        if let Some(s) = copy_cstr_from_user(item_ptr, 512) {
-            out.push(s);
-        }
-    }
-    out
+    crate::syscall::uaccess::copy_user_cstr_array(arr, limit).unwrap_or_default()
 }
 
 /// POSIX sys_execve (Syscall 59): Replaces the process image with a new ELF64 executable.
@@ -808,23 +815,43 @@ pub fn sys_rt_sigaction(
         return -22; // -EINVAL (SIGKILL and SIGSTOP cannot be modified)
     }
 
+    // Copy user structs BEFORE locking PCB to prevent #PF demand-paging self-deadlock
+    let new_act = if !act_ptr.is_null() {
+        match crate::syscall::uaccess::copy_from_user(act_ptr) {
+            Ok(a) => Some(a),
+            Err(e) => return e as i32,
+        }
+    } else {
+        None
+    };
+
+    if !oact_ptr.is_null() {
+        if let Err(e) = crate::syscall::uaccess::validate_user_range(
+            oact_ptr as u64,
+            core::mem::size_of::<crate::ipc::signal::SigAction>(),
+        ) {
+            return e as i32;
+        }
+    }
+
     let current_pid = get_current_pid();
     let proc = match get_process(current_pid) {
         Some(p) => p,
         None => return -3, // -ESRCH
     };
 
-    let mut p = proc.lock();
+    let old_act = {
+        let mut p = proc.lock();
+        let old = p.sigactions[sig as usize];
+        if let Some(act) = new_act {
+            p.sigactions[sig as usize] = act;
+        }
+        old
+    };
 
     if !oact_ptr.is_null() {
-        unsafe {
-            *oact_ptr = p.sigactions[sig as usize];
-        }
-    }
-
-    if !act_ptr.is_null() {
-        unsafe {
-            p.sigactions[sig as usize] = *act_ptr;
+        if let Err(e) = crate::syscall::uaccess::copy_to_user(oact_ptr, old_act) {
+            return e as i32;
         }
     }
 
@@ -838,34 +865,55 @@ pub fn sys_rt_sigprocmask(
     oldset_ptr: *mut u64,
     _sigsetsize: usize,
 ) -> i32 {
+    // Copy user structs BEFORE locking PCB to prevent #PF demand-paging self-deadlock
+    let new_set = if !set_ptr.is_null() {
+        match crate::syscall::uaccess::copy_from_user(set_ptr) {
+            Ok(s) => Some(s),
+            Err(e) => return e as i32,
+        }
+    } else {
+        None
+    };
+
+    if !oldset_ptr.is_null() {
+        if let Err(e) = crate::syscall::uaccess::validate_user_range(
+            oldset_ptr as u64,
+            core::mem::size_of::<u64>(),
+        ) {
+            return e as i32;
+        }
+    }
+
     let current_pid = get_current_pid();
     let proc = match get_process(current_pid) {
         Some(p) => p,
         None => return -3, // -ESRCH
     };
 
-    let mut p = proc.lock();
+    let old_blocked = {
+        let mut p = proc.lock();
+        let old = p.signal_state.blocked;
+        if let Some(set) = new_set {
+            let unblockable = (1 << 9) | (1 << 19);
+            match how {
+                crate::ipc::signal::SIG_BLOCK => {
+                    p.signal_state.blocked |= set & !unblockable;
+                }
+                crate::ipc::signal::SIG_UNBLOCK => {
+                    p.signal_state.blocked &= !(set & !unblockable);
+                }
+                crate::ipc::signal::SIG_SETMASK => {
+                    p.signal_state.blocked = set & !unblockable;
+                }
+                _ => return -22, // -EINVAL
+            }
+        }
+        old
+    };
 
     if !oldset_ptr.is_null() {
-        unsafe {
-            *oldset_ptr = p.signal_state.blocked;
-        }
-    }
-
-    if !set_ptr.is_null() {
-        let set = unsafe { *set_ptr };
-        let unblockable = (1 << 9) | (1 << 19);
-        match how {
-            crate::ipc::signal::SIG_BLOCK => {
-                p.signal_state.blocked |= set & !unblockable;
-            }
-            crate::ipc::signal::SIG_UNBLOCK => {
-                p.signal_state.blocked &= !(set & !unblockable);
-            }
-            crate::ipc::signal::SIG_SETMASK => {
-                p.signal_state.blocked = set & !unblockable;
-            }
-            _ => return -22, // -EINVAL
+        if let Err(e) = crate::syscall::uaccess::copy_to_user(oldset_ptr, old_blocked) {
+            return e as i32;
         }
     }
 
@@ -873,17 +921,11 @@ pub fn sys_rt_sigprocmask(
 }
 
 pub fn sys_open(path_ptr: *const u8, flags: i32, _mode: i32) -> i64 {
-    if path_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *path_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let path_str = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(path_ptr, len) }) {
+    let path_owned = match crate::syscall::uaccess::copy_user_cstr(path_ptr, 255) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return e,
     };
+    let path_str = path_owned.as_str();
 
     let inode = if path_str == "/dev/ptmx" {
         crate::tty::pty::allocate_pty_master()
@@ -946,8 +988,11 @@ pub fn sys_posix_openpt(flags: i32) -> i64 {
 }
 
 pub fn sys_ptsname(fd: usize, buf: *mut u8, buflen: usize) -> i64 {
-    if buf.is_null() || buflen == 0 {
-        return -14; // -EFAULT
+    if buflen == 0 {
+        return -22; // -EINVAL
+    }
+    if let Err(e) = crate::syscall::uaccess::validate_user_range(buf as u64, buflen) {
+        return e;
     }
     let current_pid = get_current_pid();
     let file = if let Some(proc) = get_process(current_pid) {
@@ -969,8 +1014,9 @@ pub fn sys_ptsname(fd: usize, buf: *mut u8, buflen: usize) -> i64 {
             if bytes.len() > buflen {
                 return -34; // -ERANGE
             }
-            let slice = unsafe { core::slice::from_raw_parts_mut(buf, bytes.len()) };
-            slice.copy_from_slice(bytes);
+            if let Err(e) = crate::syscall::uaccess::copy_slice_to_user(buf, bytes) {
+                return e;
+            }
             return 0;
         }
     }
@@ -1000,16 +1046,9 @@ pub fn sys_unlockpt(fd: usize) -> i64 {
 }
 
 pub fn sys_shm_open(name_ptr: *const u8, oflag: i32, _mode: u32) -> i64 {
-    if name_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+    let raw_name = match crate::syscall::uaccess::copy_user_cstr(name_ptr, 255) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return e,
     };
     let clean_name = raw_name.trim_start_matches('/');
 
@@ -1025,16 +1064,9 @@ pub fn sys_shm_open(name_ptr: *const u8, oflag: i32, _mode: u32) -> i64 {
 }
 
 pub fn sys_shm_unlink(name_ptr: *const u8) -> i64 {
-    if name_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+    let raw_name = match crate::syscall::uaccess::copy_user_cstr(name_ptr, 255) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return e,
     };
     let clean_name = raw_name.trim_start_matches('/');
     if crate::mm::shm::SHM_REGISTRY.lock().unlink(clean_name) {
@@ -1060,16 +1092,9 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> i64 {
 }
 
 pub fn sys_sem_open(name_ptr: *const u8, oflag: i32, mode: u32, value: u32) -> i64 {
-    if name_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+    let raw_name = match crate::syscall::uaccess::copy_user_cstr(name_ptr, 255) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return e,
     };
     let clean_name = raw_name.trim_start_matches('/');
 
@@ -1150,8 +1175,8 @@ pub fn sys_sem_trywait(fd: usize) -> i64 {
 }
 
 pub fn sys_sem_getvalue(fd: usize, sval_ptr: *mut i32) -> i64 {
-    if sval_ptr.is_null() {
-        return -14; // -EFAULT
+    if let Err(e) = crate::syscall::uaccess::validate_user_range(sval_ptr as u64, core::mem::size_of::<i32>()) {
+        return e;
     }
     let current_pid = get_current_pid();
     if let Some(proc) = get_process(current_pid) {
@@ -1160,10 +1185,10 @@ pub fn sys_sem_getvalue(fd: usize, sval_ptr: *mut i32) -> i64 {
             let inode = file.inode.clone();
             drop(p);
             return match inode.lock().sem_getvalue() {
-                Ok(val) => {
-                    unsafe { *sval_ptr = val; }
-                    0
-                }
+                Ok(val) => match crate::syscall::uaccess::copy_to_user(sval_ptr, val) {
+                    Ok(()) => 0,
+                    Err(e) => e,
+                },
                 Err(e) => e as i64,
             };
         }
@@ -1172,16 +1197,9 @@ pub fn sys_sem_getvalue(fd: usize, sval_ptr: *mut i32) -> i64 {
 }
 
 pub fn sys_sem_unlink(name_ptr: *const u8) -> i64 {
-    if name_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+    let raw_name = match crate::syscall::uaccess::copy_user_cstr(name_ptr, 255) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return e,
     };
     let clean_name = raw_name.trim_start_matches('/');
     if crate::ipc::semaphore::SEMAPHORE_REGISTRY.lock().unlink(clean_name) {
@@ -1192,20 +1210,16 @@ pub fn sys_sem_unlink(name_ptr: *const u8) -> i64 {
 }
 
 pub fn sys_mq_open(name_ptr: *const u8, oflag: i32, attr_ptr: *const crate::ipc::mqueue::MqAttr) -> i64 {
-    if name_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+    let raw_name = match crate::syscall::uaccess::copy_user_cstr(name_ptr, 255) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return e,
     };
     let clean_name = raw_name.trim_start_matches('/');
     let attr = if !attr_ptr.is_null() {
-        Some(unsafe { *attr_ptr })
+        match crate::syscall::uaccess::copy_from_user(attr_ptr) {
+            Ok(a) => Some(a),
+            Err(e) => return e,
+        }
     } else {
         None
     };
@@ -1235,13 +1249,13 @@ pub fn sys_mq_open(name_ptr: *const u8, oflag: i32, attr_ptr: *const crate::ipc:
 }
 
 pub fn sys_mq_send(fd: usize, msg_ptr: *const u8, msg_len: usize, msg_prio: u32) -> i64 {
-    if msg_ptr.is_null() && msg_len > 0 {
-        return -14; // -EFAULT
-    }
     let slice = if msg_len > 0 {
-        unsafe { core::slice::from_raw_parts(msg_ptr, msg_len) }
+        match crate::syscall::uaccess::copy_slice_from_user(msg_ptr, msg_len) {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
     } else {
-        &[]
+        Vec::new()
     };
 
     let current_pid = get_current_pid();
@@ -1250,7 +1264,7 @@ pub fn sys_mq_send(fd: usize, msg_ptr: *const u8, msg_len: usize, msg_prio: u32)
         if let Some(file) = p.get_fd(fd) {
             let inode = file.inode.clone();
             drop(p);
-            return match inode.lock().mq_send(slice, msg_prio, false) {
+            return match inode.lock().mq_send(&slice, msg_prio, false) {
                 Ok(()) => 0,
                 Err(e) => e as i64,
             };
@@ -1260,10 +1274,22 @@ pub fn sys_mq_send(fd: usize, msg_ptr: *const u8, msg_len: usize, msg_prio: u32)
 }
 
 pub fn sys_mq_receive(fd: usize, msg_ptr: *mut u8, msg_len: usize, msg_prio_ptr: *mut u32) -> i64 {
-    if msg_ptr.is_null() || msg_len == 0 {
-        return -14; // -EFAULT
+    if msg_len == 0 {
+        return -22; // -EINVAL
     }
-    let slice = unsafe { core::slice::from_raw_parts_mut(msg_ptr, msg_len) };
+    let capped = msg_len.min(crate::syscall::uaccess::MAX_USER_COPY);
+    if let Err(e) = crate::syscall::uaccess::validate_user_range(msg_ptr as u64, capped) {
+        return e;
+    }
+    if !msg_prio_ptr.is_null() {
+        if let Err(e) = crate::syscall::uaccess::validate_user_range(
+            msg_prio_ptr as u64,
+            core::mem::size_of::<u32>(),
+        ) {
+            return e;
+        }
+    }
+    let mut kbuf = alloc::vec![0u8; capped];
 
     let current_pid = get_current_pid();
     if let Some(proc) = get_process(current_pid) {
@@ -1271,10 +1297,15 @@ pub fn sys_mq_receive(fd: usize, msg_ptr: *mut u8, msg_len: usize, msg_prio_ptr:
         if let Some(file) = p.get_fd(fd) {
             let inode = file.inode.clone();
             drop(p);
-            return match inode.lock().mq_receive(slice, msg_len, false) {
+            return match inode.lock().mq_receive(&mut kbuf, capped, false) {
                 Ok((bytes, prio)) => {
+                    if let Err(e) = crate::syscall::uaccess::copy_slice_to_user(msg_ptr, &kbuf[..bytes]) {
+                        return e;
+                    }
                     if !msg_prio_ptr.is_null() {
-                        unsafe { *msg_prio_ptr = prio; }
+                        if let Err(e) = crate::syscall::uaccess::copy_to_user(msg_prio_ptr, prio) {
+                            return e;
+                        }
                     }
                     bytes as i64
                 }
@@ -1286,8 +1317,11 @@ pub fn sys_mq_receive(fd: usize, msg_ptr: *mut u8, msg_len: usize, msg_prio_ptr:
 }
 
 pub fn sys_mq_getattr(fd: usize, attr_ptr: *mut crate::ipc::mqueue::MqAttr) -> i64 {
-    if attr_ptr.is_null() {
-        return -14; // -EFAULT
+    if let Err(e) = crate::syscall::uaccess::validate_user_range(
+        attr_ptr as u64,
+        core::mem::size_of::<crate::ipc::mqueue::MqAttr>(),
+    ) {
+        return e;
     }
     let current_pid = get_current_pid();
     if let Some(proc) = get_process(current_pid) {
@@ -1296,10 +1330,10 @@ pub fn sys_mq_getattr(fd: usize, attr_ptr: *mut crate::ipc::mqueue::MqAttr) -> i
             let inode = file.inode.clone();
             drop(p);
             return match inode.lock().mq_getattr() {
-                Ok(attr) => {
-                    unsafe { *attr_ptr = attr; }
-                    0
-                }
+                Ok(attr) => match crate::syscall::uaccess::copy_to_user(attr_ptr, attr) {
+                    Ok(()) => 0,
+                    Err(e) => e,
+                },
                 Err(e) => e as i64,
             };
         }
@@ -1308,16 +1342,9 @@ pub fn sys_mq_getattr(fd: usize, attr_ptr: *mut crate::ipc::mqueue::MqAttr) -> i
 }
 
 pub fn sys_mq_unlink(name_ptr: *const u8) -> i64 {
-    if name_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *name_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let raw_name = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(name_ptr, len) }) {
+    let raw_name = match crate::syscall::uaccess::copy_user_cstr(name_ptr, 255) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return e,
     };
     let clean_name = raw_name.trim_start_matches('/');
     if crate::ipc::mqueue::MQUEUE_REGISTRY.lock().unlink(clean_name) {
@@ -1399,8 +1426,11 @@ pub fn sys_dup2(oldfd: usize, newfd: usize) -> i64 {
 }
 
 pub fn sys_pipe(pipefd_ptr: *mut i32) -> i64 {
-    if pipefd_ptr.is_null() {
-        return -14; // -EFAULT
+    if let Err(e) = crate::syscall::uaccess::validate_user_range(
+        pipefd_ptr as u64,
+        core::mem::size_of::<[i32; 2]>(),
+    ) {
+        return e;
     }
     let (r_inode, w_inode) = crate::ipc::pipe::create_pipe();
     let r_file = Arc::new(crate::fs::vfs::File::new(r_inode, 0));
@@ -1411,9 +1441,15 @@ pub fn sys_pipe(pipefd_ptr: *mut i32) -> i64 {
         let mut p = proc.lock();
         if let Some(fd0) = p.alloc_fd(r_file) {
             if let Some(fd1) = p.alloc_fd(w_file) {
-                unsafe {
-                    *pipefd_ptr = fd0 as i32;
-                    *pipefd_ptr.add(1) = fd1 as i32;
+                drop(p);
+                let pair = [fd0 as i32, fd1 as i32];
+                if let Err(e) = crate::syscall::uaccess::copy_to_user(pipefd_ptr as *mut [i32; 2], pair) {
+                    if let Some(proc2) = get_process(current_pid) {
+                        let mut p2 = proc2.lock();
+                        p2.fd_table[fd0] = None;
+                        p2.fd_table[fd1] = None;
+                    }
+                    return e;
                 }
                 return 0;
             } else {
@@ -1426,17 +1462,11 @@ pub fn sys_pipe(pipefd_ptr: *mut i32) -> i64 {
 }
 
 pub fn sys_unlink(path_ptr: *const u8) -> i64 {
-    if path_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *path_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let path_str = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(path_ptr, len) }) {
+    let path_owned = match crate::syscall::uaccess::copy_user_cstr(path_ptr, 255) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return e,
     };
+    let path_str = path_owned.as_str();
     let (parent_path, filename) = match path_str.rfind('/') {
         Some(pos) => {
             let p = if pos == 0 { "/" } else { &path_str[..pos] };
@@ -1459,17 +1489,11 @@ pub fn sys_unlink(path_ptr: *const u8) -> i64 {
 }
 
 pub fn sys_mkdir(path_ptr: *const u8, _mode: u32) -> i64 {
-    if path_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *path_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let path_str = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(path_ptr, len) }) {
+    let path_owned = match crate::syscall::uaccess::copy_user_cstr(path_ptr, 255) {
         Ok(s) => s,
-        Err(_) => return -22, // -EINVAL
+        Err(e) => return e,
     };
+    let path_str = path_owned.as_str();
     let (parent_path, dir_name) = match path_str.rfind('/') {
         Some(pos) => {
             let p = if pos == 0 { "/" } else { &path_str[..pos] };
@@ -1524,8 +1548,11 @@ pub fn canonicalize_path(base_cwd: &str, target: &str) -> String {
 }
 
 pub fn sys_getcwd(buf_ptr: *mut u8, size: usize) -> i64 {
-    if buf_ptr.is_null() || size == 0 {
-        return -14; // -EFAULT
+    if size == 0 {
+        return -22; // -EINVAL
+    }
+    if let Err(e) = crate::syscall::uaccess::validate_user_range(buf_ptr as u64, size) {
+        return e;
     }
     let current_pid = get_current_pid();
     let cwd = if let Some(proc) = get_process(current_pid) {
@@ -1537,25 +1564,21 @@ pub fn sys_getcwd(buf_ptr: *mut u8, size: usize) -> i64 {
     if bytes.len() + 1 > size {
         return -34; // -ERANGE
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr, bytes.len());
-        *buf_ptr.add(bytes.len()) = 0;
+    let mut out = Vec::with_capacity(bytes.len() + 1);
+    out.extend_from_slice(bytes);
+    out.push(0);
+    if let Err(e) = crate::syscall::uaccess::copy_slice_to_user(buf_ptr, &out) {
+        return e;
     }
     buf_ptr as i64
 }
 
 pub fn sys_chdir(path_ptr: *const u8) -> i64 {
-    if path_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mut len = 0;
-    while unsafe { *path_ptr.add(len) } != 0 && len < 256 {
-        len += 1;
-    }
-    let raw_path = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(path_ptr, len) }) {
-        Ok(s) => s.trim(),
-        Err(_) => return -22, // -EINVAL
+    let raw_owned = match crate::syscall::uaccess::copy_user_cstr(path_ptr, 255) {
+        Ok(s) => s,
+        Err(e) => return e,
     };
+    let raw_path = raw_owned.trim();
     if raw_path.is_empty() {
         return -22; // -EINVAL
     }
@@ -1623,12 +1646,22 @@ pub fn sys_mmap(
         return -22; // -EINVAL
     }
 
-    let pages = (length + crate::mm::PAGE_SIZE - 1) / crate::mm::PAGE_SIZE;
+    let aligned_len = match (length as u64).checked_add((crate::mm::PAGE_SIZE - 1) as u64) {
+        Some(v) => v & !((crate::mm::PAGE_SIZE - 1) as u64),
+        None => return -12, // -ENOMEM
+    };
+    if aligned_len == 0 || aligned_len > 256 * 1024 * 1024 {
+        return -12; // -ENOMEM
+    }
+    let pages = (aligned_len as usize) / crate::mm::PAGE_SIZE;
     let current_pid = get_current_pid();
 
     let proc = match get_process(current_pid) {
         Some(p) => p,
         None => {
+            if !crate::arch::x86_64::pit::IN_KERNEL_TESTS.load(Ordering::Relaxed) {
+                return -3; // -ESRCH
+            }
             let pcb = Arc::new(IrqSafeSpinlock::new(ProcessControlBlock::new(current_pid, 0, "proc")));
             PROCESS_TABLE.lock().push(pcb.clone());
             pcb
@@ -1641,6 +1674,23 @@ pub fn sys_mmap(
     }
 
     let target_addr = if addr != 0 {
+        if (addr & 0xFFF) != 0 {
+            return -22; // -EINVAL (must be page-aligned)
+        }
+        let end = match addr.checked_add(aligned_len) {
+            Some(e) => e,
+            None => return -12,
+        };
+        if addr >= crate::syscall::uaccess::USER_MAX_ADDR
+            || end > crate::syscall::uaccess::USER_MAX_ADDR
+        {
+            return -22; // -EINVAL (cannot map into kernel higher half)
+        }
+        if let Some(ref aspace) = p.address_space {
+            if aspace.vmas.iter().any(|v| addr < v.end && end > v.start) {
+                return -12; // -ENOMEM / overlap
+            }
+        }
         addr
     } else if let Some(ref aspace) = p.address_space {
         let top = aspace
@@ -1655,9 +1705,15 @@ pub fn sys_mmap(
         0x6000_0000
     };
 
-    let mut map_flags = crate::mm::vmm::PAGE_PRESENT | crate::mm::vmm::PAGE_USER;
-    if (prot & crate::mm::shm::PROT_WRITE) != 0 || prot == 0 {
+    let mut map_flags = crate::mm::vmm::PAGE_USER;
+    if prot != 0 {
+        map_flags |= crate::mm::vmm::PAGE_PRESENT;
+    }
+    if (prot & crate::mm::shm::PROT_WRITE) != 0 {
         map_flags |= crate::mm::vmm::PAGE_WRITABLE;
+    }
+    if (prot & crate::mm::shm::PROT_EXEC) == 0 {
+        map_flags |= crate::mm::vmm::PAGE_NO_EXECUTE;
     }
 
     if fd >= 0 {
@@ -1683,21 +1739,20 @@ pub fn sys_mmap(
                 if let Some(ref mut aspace) = p.address_space {
                     if aspace.map_phys_region(
                         target_addr,
-                        length as u64,
+                        aligned_len,
                         phys,
                         fb_flags,
-                        crate::mm::address_space::VmaType::Mmap,
+                        crate::mm::address_space::VmaType::Device,
                     ).is_ok() {
                         return target_addr as i64;
                     }
                 }
                 return -12; // -ENOMEM
             } else {
-                // Virtual RAM-backed fallback: map allocated RAM pages
                 if let Some(ref mut aspace) = p.address_space {
                     if aspace.map_region(
                         target_addr,
-                        length as u64,
+                        aligned_len,
                         map_flags,
                         crate::mm::address_space::VmaType::Mmap,
                     ).is_ok() {
@@ -1725,13 +1780,15 @@ pub fn sys_mmap(
                 let pml4 = unsafe { &mut *(crate::mm::phys_to_virt(aspace.pml4_phys) as *mut crate::mm::vmm::PageTable) };
                 for (i, &frame) in frames.iter().take(pages).enumerate() {
                     let virt = target_addr + (i * crate::mm::PAGE_SIZE) as u64;
-                    let _ = vmm.map_page(pml4, virt, frame, map_flags);
+                    if vmm.map_page(pml4, virt, frame, map_flags).is_ok() {
+                        crate::mm::pmm::PMM.lock().inc_frame_ref(frame);
+                    }
                 }
                 aspace.vmas.push(crate::mm::address_space::VirtualMemoryArea {
                     start: target_addr,
-                    end: target_addr + (pages * crate::mm::PAGE_SIZE) as u64,
+                    end: target_addr + aligned_len,
                     flags: map_flags,
-                    vma_type: crate::mm::address_space::VmaType::Mmap,
+                    vma_type: crate::mm::address_space::VmaType::Shared,
                 });
                 return target_addr as i64;
             }
@@ -1742,7 +1799,7 @@ pub fn sys_mmap(
     if let Some(ref mut aspace) = p.address_space {
         if aspace.map_region(
             target_addr,
-            length as u64,
+            aligned_len,
             map_flags,
             crate::mm::address_space::VmaType::Mmap,
         ).is_ok() {
@@ -1753,25 +1810,142 @@ pub fn sys_mmap(
     -12 // -ENOMEM
 }
 
-pub fn sys_munmap(addr: u64, length: usize) -> i64 {
-    if length == 0 || addr == 0 {
+/// POSIX `mprotect(2)` with strict W^X enforcement and SMP TLB shootdown.
+pub fn sys_mprotect(addr: u64, length: usize, prot: i32) -> i64 {
+    if length == 0
+        || addr < crate::mm::PAGE_SIZE as u64
+        || (addr & 0xFFF) != 0
+        || (prot & !0x7) != 0
+    {
         return -22; // -EINVAL
     }
+    let write = (prot & crate::mm::shm::PROT_WRITE) != 0;
+    let exec = (prot & crate::mm::shm::PROT_EXEC) != 0;
+    // W^X: reject simultaneous write + execute permissions.
+    if write && exec {
+        return -22; // -EINVAL
+    }
+    let aligned_len = match (length as u64).checked_add(0xFFF) {
+        Some(v) => v & !0xFFF,
+        None => return -22,
+    };
+    let end = match addr.checked_add(aligned_len) {
+        Some(e) if e <= crate::syscall::uaccess::USER_MAX_ADDR => e,
+        _ => return -22,
+    };
+
+    let mut new_flags = crate::mm::vmm::PAGE_PRESENT;
+    if prot != 0 {
+        new_flags |= crate::mm::vmm::PAGE_USER;
+    }
+    if write {
+        new_flags |= crate::mm::vmm::PAGE_WRITABLE;
+    }
+    if !exec {
+        new_flags |= crate::mm::vmm::PAGE_NO_EXECUTE;
+    }
+
     let current_pid = get_current_pid();
     if let Some(proc) = get_process(current_pid) {
         let mut p = proc.lock();
         if let Some(ref mut aspace) = p.address_space {
-            aspace.vmas.retain(|vma| vma.start != addr);
+            let vmm = crate::mm::vmm::VMM.lock();
+            let pml4 = unsafe {
+                &mut *(crate::mm::phys_to_virt(aspace.pml4_phys) as *mut crate::mm::vmm::PageTable)
+            };
+            let pages = (aligned_len as usize) / crate::mm::PAGE_SIZE;
+            let mut updated_any = false;
+            for i in 0..pages {
+                let virt = addr + (i * crate::mm::PAGE_SIZE) as u64;
+                if let Some(pte) = vmm.get_pte_mut(pml4, virt) {
+                    if pte.is_present() {
+                        let phys = pte.address();
+                        let flags = if pte.is_cow() {
+                            (new_flags & !crate::mm::vmm::PAGE_WRITABLE) | crate::mm::vmm::PAGE_COW
+                        } else {
+                            new_flags
+                        };
+                        pte.set(phys, flags);
+                        unsafe {
+                            crate::arch::x86_64::registers::invlpg(virt);
+                        }
+                        crate::arch::x86_64::apic::broadcast_tlb_shootdown(virt);
+                        updated_any = true;
+                    }
+                }
+            }
+            for vma in aspace.vmas.iter_mut() {
+                if addr < vma.end && end > vma.start {
+                    vma.flags = new_flags;
+                    updated_any = true;
+                }
+            }
+            if !updated_any {
+                return -12; // -ENOMEM
+            }
+            return 0;
+        }
+    }
+    -22
+}
+
+pub fn sys_munmap(addr: u64, length: usize) -> i64 {
+    if length == 0 || addr == 0 || (addr & 0xFFF) != 0 {
+        return -22; // -EINVAL
+    }
+    let aligned_len = match (length as u64).checked_add(0xFFF) {
+        Some(v) => v & !0xFFF,
+        None => return -22,
+    };
+    let end = match addr.checked_add(aligned_len) {
+        Some(e) if e <= crate::syscall::uaccess::USER_MAX_ADDR => e,
+        _ => return -22,
+    };
+
+    let current_pid = get_current_pid();
+    if let Some(proc) = get_process(current_pid) {
+        let mut p = proc.lock();
+        if let Some(ref mut aspace) = p.address_space {
+            let is_device = aspace.vmas.iter().any(|v| {
+                addr < v.end && end > v.start && v.vma_type == crate::mm::address_space::VmaType::Device
+            });
+            let vmm = crate::mm::vmm::VMM.lock();
+            let pml4 = unsafe {
+                &mut *(crate::mm::phys_to_virt(aspace.pml4_phys) as *mut crate::mm::vmm::PageTable)
+            };
+            let pages = (aligned_len as usize) / crate::mm::PAGE_SIZE;
+            for i in 0..pages {
+                let virt = addr + (i * crate::mm::PAGE_SIZE) as u64;
+                let phys_opt = vmm.get_pte_mut(pml4, virt).and_then(|pte| {
+                    if pte.is_present() {
+                        let phys = pte.address();
+                        pte.clear();
+                        unsafe {
+                            crate::arch::x86_64::registers::invlpg(virt);
+                        }
+                        Some(phys)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(phys) = phys_opt {
+                    if !is_device {
+                        crate::mm::pmm::PMM.lock().release_frame(phys);
+                    }
+                }
+            }
+            aspace.vmas.retain(|vma| !(vma.start >= addr && vma.end <= end));
+            crate::arch::x86_64::apic::broadcast_tlb_shootdown(u64::MAX);
         }
     }
     0
 }
 
 pub fn sys_sched_setaffinity(pid: i32, _len: usize, mask_ptr: *const u64) -> i32 {
-    if mask_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-    let mask = unsafe { *mask_ptr };
+    let mask = match crate::syscall::uaccess::copy_from_user(mask_ptr) {
+        Ok(m) => m,
+        Err(e) => return e as i32,
+    };
     if mask == 0 {
         return -22; // -EINVAL
     }
@@ -1787,10 +1961,6 @@ pub fn sys_sched_setaffinity(pid: i32, _len: usize, mask_ptr: *const u64) -> i32
 }
 
 pub fn sys_sched_getaffinity(pid: i32, _len: usize, mask_ptr: *mut u64) -> i32 {
-    if mask_ptr.is_null() {
-        return -14; // -EFAULT
-    }
-
     let target_id = if pid <= 0 {
         0
     } else {
@@ -1798,8 +1968,8 @@ pub fn sys_sched_getaffinity(pid: i32, _len: usize, mask_ptr: *mut u64) -> i32 {
     };
 
     let mask = crate::task::scheduler::get_affinity(target_id);
-    unsafe {
-        *mask_ptr = mask;
+    if let Err(e) = crate::syscall::uaccess::copy_to_user(mask_ptr, mask) {
+        return e as i32;
     }
     0
 }
@@ -1825,7 +1995,7 @@ fn get_sock_handle(fd: usize) -> Option<GenericSocket> {
     if fd < p.fd_table.len() {
         if let Some(ref file) = p.fd_table[fd] {
             let stat = file.inode.lock().stat();
-            if stat.file_type == crate::fs::vfs::FileType::Socket || stat.inode >= 5000 {
+            if stat.inode >= 5000 {
                 return Some(GenericSocket::Unix((stat.inode - 5000) as usize));
             } else if stat.inode >= 200 {
                 return Some(GenericSocket::Inet((stat.inode - 200) as usize));
@@ -1872,23 +2042,26 @@ pub fn sys_socket(domain: i32, sock_type: i32, _protocol: i32) -> i64 {
 }
 
 pub fn sys_bind(fd: usize, sockaddr_ptr: *const u8, _addrlen: usize) -> i64 {
-    if sockaddr_ptr.is_null() {
-        return -14; // -EFAULT
-    }
     let sock = match get_sock_handle(fd) {
         Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
     match sock {
         GenericSocket::Unix(unix_id) => {
-            let sun = unsafe { &*(sockaddr_ptr as *const crate::net::unix::SockAddrUn) };
+            let sun = match crate::syscall::uaccess::copy_from_user(sockaddr_ptr as *const crate::net::unix::SockAddrUn) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
             match crate::net::unix::unix_socket_bind(unix_id, sun.path_str()) {
                 Ok(()) => 0,
                 Err(_) => -98, // -EADDRINUSE
             }
         }
         GenericSocket::Inet(inet_id) => {
-            let addr = unsafe { *(sockaddr_ptr as *const SockAddrIn) };
+            let addr = match crate::syscall::uaccess::copy_from_user(sockaddr_ptr as *const SockAddrIn) {
+                Ok(a) => a,
+                Err(e) => return e,
+            };
             let port = u16::from_be(addr.sin_port);
             match crate::net::socket::socket_bind(inet_id, addr.sin_addr, port) {
                 Ok(()) => 0,
@@ -1949,10 +2122,17 @@ pub fn sys_accept(fd: usize, sockaddr_out: *mut u8, addrlen_out: *mut u32) -> i6
                             sin_addr: r_ip,
                             sin_zero: [0; 8],
                         };
-                        unsafe {
-                            *(sockaddr_out as *mut SockAddrIn) = out;
-                            if !addrlen_out.is_null() {
-                                *addrlen_out = core::mem::size_of::<SockAddrIn>() as u32;
+                        if let Err(e) = crate::syscall::uaccess::copy_to_user(sockaddr_out as *mut SockAddrIn, out) {
+                            let _ = crate::net::socket::socket_close(client_id);
+                            return e;
+                        }
+                        if !addrlen_out.is_null() {
+                            if let Err(e) = crate::syscall::uaccess::copy_to_user(
+                                addrlen_out,
+                                core::mem::size_of::<SockAddrIn>() as u32,
+                            ) {
+                                let _ = crate::net::socket::socket_close(client_id);
+                                return e;
                             }
                         }
                     }
@@ -1975,23 +2155,26 @@ pub fn sys_accept(fd: usize, sockaddr_out: *mut u8, addrlen_out: *mut u32) -> i6
 }
 
 pub fn sys_connect(fd: usize, sockaddr_ptr: *const u8, _addrlen: usize) -> i64 {
-    if sockaddr_ptr.is_null() {
-        return -14; // -EFAULT
-    }
     let sock = match get_sock_handle(fd) {
         Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
     match sock {
         GenericSocket::Unix(unix_id) => {
-            let sun = unsafe { &*(sockaddr_ptr as *const crate::net::unix::SockAddrUn) };
+            let sun = match crate::syscall::uaccess::copy_from_user(sockaddr_ptr as *const crate::net::unix::SockAddrUn) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
             match crate::net::unix::unix_socket_connect(unix_id, sun.path_str()) {
                 Ok(()) => 0,
                 Err(_) => -111, // -ECONNREFUSED
             }
         }
         GenericSocket::Inet(inet_id) => {
-            let addr = unsafe { *(sockaddr_ptr as *const SockAddrIn) };
+            let addr = match crate::syscall::uaccess::copy_from_user(sockaddr_ptr as *const SockAddrIn) {
+                Ok(a) => a,
+                Err(e) => return e,
+            };
             let port = u16::from_be(addr.sin_port);
             match crate::net::socket::socket_connect(inet_id, addr.sin_addr, port) {
                 Ok(()) => 0,
@@ -2002,20 +2185,20 @@ pub fn sys_connect(fd: usize, sockaddr_ptr: *const u8, _addrlen: usize) -> i64 {
 }
 
 pub fn sys_sendto(fd: usize, buf: *const u8, len: usize, _flags: i32, _dest: *const u8, _addrlen: usize) -> i64 {
-    if buf.is_null() {
-        return -14; // -EFAULT
-    }
     let sock = match get_sock_handle(fd) {
         Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
-    let slice = unsafe { core::slice::from_raw_parts(buf, len) };
+    let slice = match crate::syscall::uaccess::copy_slice_from_user(buf, len) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     match sock {
-        GenericSocket::Unix(unix_id) => match crate::net::unix::unix_socket_send(unix_id, slice) {
+        GenericSocket::Unix(unix_id) => match crate::net::unix::unix_socket_send(unix_id, &slice) {
             Ok(n) => n as i64,
             Err(_) => -32, // -EPIPE
         },
-        GenericSocket::Inet(inet_id) => match crate::net::socket::socket_send(inet_id, slice) {
+        GenericSocket::Inet(inet_id) => match crate::net::socket::socket_send(inet_id, &slice) {
             Ok(n) => n as i64,
             Err(_) => -32, // -EPIPE
         },
@@ -2023,23 +2206,31 @@ pub fn sys_sendto(fd: usize, buf: *const u8, len: usize, _flags: i32, _dest: *co
 }
 
 pub fn sys_recvfrom(fd: usize, buf: *mut u8, len: usize, _flags: i32, _src: *mut u8, _addrlen: *mut u32) -> i64 {
-    if buf.is_null() {
-        return -14; // -EFAULT
+    let capped = len.min(crate::syscall::uaccess::MAX_USER_COPY);
+    if let Err(e) = crate::syscall::uaccess::validate_user_range(buf as u64, capped) {
+        return e;
     }
     let sock = match get_sock_handle(fd) {
         Some(s) => s,
         None => return -88, // -ENOTSOCK
     };
-    let slice = unsafe { core::slice::from_raw_parts_mut(buf, len) };
-    match sock {
-        GenericSocket::Unix(unix_id) => match crate::net::unix::unix_socket_recv(unix_id, slice) {
-            Ok(n) => n as i64,
-            Err(_) => -11, // -EAGAIN
+    let mut kbuf = alloc::vec![0u8; capped];
+    let res = match sock {
+        GenericSocket::Unix(unix_id) => match crate::net::unix::unix_socket_recv(unix_id, &mut kbuf) {
+            Ok(n) => Ok(n),
+            Err(_) => Err(-11i64), // -EAGAIN
         },
-        GenericSocket::Inet(inet_id) => match crate::net::socket::socket_recv(inet_id, slice, 2000) {
-            Ok(n) => n as i64,
-            Err(_) => -11, // -EAGAIN
+        GenericSocket::Inet(inet_id) => match crate::net::socket::socket_recv(inet_id, &mut kbuf, 2000) {
+            Ok(n) => Ok(n),
+            Err(_) => Err(-11i64), // -EAGAIN
         },
+    };
+    match res {
+        Ok(n) => match crate::syscall::uaccess::copy_slice_to_user(buf, &kbuf[..n]) {
+            Ok(()) => n as i64,
+            Err(e) => e,
+        },
+        Err(e) => e,
     }
 }
 
@@ -2095,10 +2286,14 @@ pub fn sys_clone(flags: u64, _stack: *mut u8, ptid: *mut i32, ctid: *mut i32, _t
     }
 
     if (flags & CLONE_PARENT_SETTID) != 0 && !ptid.is_null() {
-        unsafe { *ptid = new_tid as i32; }
+        if let Err(e) = crate::syscall::uaccess::copy_to_user(ptid, new_tid as i32) {
+            return e;
+        }
     }
     if (flags & CLONE_CHILD_SETTID) != 0 && !ctid.is_null() {
-        unsafe { *ctid = new_tid as i32; }
+        if let Err(e) = crate::syscall::uaccess::copy_to_user(ctid, new_tid as i32) {
+            return e;
+        }
     }
 
     PROCESS_TABLE.lock().push(Arc::new(IrqSafeSpinlock::new(child_pcb)));
